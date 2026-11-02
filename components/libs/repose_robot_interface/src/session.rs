@@ -183,7 +183,7 @@ impl CuSessionTracker {
 
     /// Record that `command` went out with protocol sequence `sequence`.
     pub fn mark_sent(&mut self, command: CuSessionCommand, sequence: u32) {
-        let cancelled = core::mem::take(&mut self.transit_cancelled) && needs_control(command);
+        let lost_in_transit = core::mem::take(&mut self.transit_cancelled);
         self.in_transit = false;
         if command == CuSessionCommand::AcquireControl {
             self.held_before_acquire = self.state.control_acquired;
@@ -193,7 +193,10 @@ impl CuSessionTracker {
         self.state.result = CuSessionResult::Pending;
         self.state.rejection = CuSessionRejection::None;
         self.state.detail = CuSessionDetail::default();
-        if cancelled {
+        if lost_in_transit && command == CuSessionCommand::ReleaseControl {
+            // Control is already gone: the release has nothing left to wait for.
+            self.state.result = CuSessionResult::Acknowledged;
+        } else if lost_in_transit && needs_control(command) {
             // Sent after control was lost: no answer may take effect.
             self.state.result = CuSessionResult::Rejected;
             self.state.rejection = CuSessionRejection::NotInControl;
@@ -447,6 +450,18 @@ mod tests {
         assert_eq!(tracker.state().rejection, CuSessionRejection::NotInControl);
         tracker.on_acknowledged(9);
         assert!(!tracker.state().drives_enabled);
+        assert!(!tracker.is_busy());
+    }
+
+    #[test]
+    fn test_release_lost_in_transit_completes() {
+        let mut tracker = CuSessionTracker::default();
+        tracker.on_control_report(true);
+        tracker.request(CuSessionCommand::ReleaseControl);
+        let command = tracker.take_outgoing().unwrap();
+        tracker.on_control_report(false);
+        tracker.mark_sent(command, 4);
+        assert_eq!(tracker.state().result, CuSessionResult::Acknowledged);
         assert!(!tracker.is_busy());
     }
 

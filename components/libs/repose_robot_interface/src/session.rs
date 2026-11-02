@@ -131,6 +131,8 @@ pub struct CuSessionTracker {
     outgoing: Option<CuSessionCommand>,
     /// Taken by the bridge but not yet confirmed with `mark_sent`.
     in_transit: bool,
+    /// Control was lost while a command was in transit.
+    transit_cancelled: bool,
     /// Whether control was already held when `AcquireControl` went out.
     held_before_acquire: bool,
     acquired_here: bool,
@@ -181,6 +183,7 @@ impl CuSessionTracker {
 
     /// Record that `command` went out with protocol sequence `sequence`.
     pub fn mark_sent(&mut self, command: CuSessionCommand, sequence: u32) {
+        let cancelled = core::mem::take(&mut self.transit_cancelled) && needs_control(command);
         self.in_transit = false;
         if command == CuSessionCommand::AcquireControl {
             self.held_before_acquire = self.state.control_acquired;
@@ -190,6 +193,11 @@ impl CuSessionTracker {
         self.state.result = CuSessionResult::Pending;
         self.state.rejection = CuSessionRejection::None;
         self.state.detail = CuSessionDetail::default();
+        if cancelled {
+            // Sent after control was lost: no answer may take effect.
+            self.state.result = CuSessionResult::Rejected;
+            self.state.rejection = CuSessionRejection::NotInControl;
+        }
         self.changed = true;
     }
 
@@ -260,6 +268,7 @@ impl CuSessionTracker {
     pub fn on_disconnected(&mut self) {
         self.outgoing = None;
         self.in_transit = false;
+        self.transit_cancelled = false;
         if self.state.result == CuSessionResult::Pending {
             self.state.result = CuSessionResult::Idle;
         }
@@ -306,15 +315,22 @@ impl CuSessionTracker {
         {
             self.outgoing = None;
         }
-        let needs_control = !matches!(
-            self.state.command,
-            Some(CuSessionCommand::AcquireControl | CuSessionCommand::ReleaseControl)
-        );
-        if self.state.result == CuSessionResult::Pending && needs_control {
+        self.transit_cancelled |= self.in_transit;
+        if self.state.result == CuSessionResult::Pending
+            && self.state.command.is_some_and(needs_control)
+        {
             self.state.result = CuSessionResult::Rejected;
             self.state.rejection = CuSessionRejection::NotInControl;
         }
     }
+}
+
+/// Commands that only make sense while this client is in control.
+fn needs_control(command: CuSessionCommand) -> bool {
+    !matches!(
+        command,
+        CuSessionCommand::AcquireControl | CuSessionCommand::ReleaseControl
+    )
 }
 
 #[cfg(test)]
@@ -418,6 +434,20 @@ mod tests {
         assert_eq!(tracker.state().rejection, CuSessionRejection::NotInControl);
         tracker.on_acknowledged(3); // late answer is ignored
         assert!(!tracker.state().drives_enabled);
+    }
+
+    #[test]
+    fn test_control_lost_in_transit() {
+        let mut tracker = CuSessionTracker::default();
+        tracker.on_control_report(true);
+        tracker.request(CuSessionCommand::EnableDrives);
+        let command = tracker.take_outgoing().unwrap();
+        tracker.on_control_report(false);
+        tracker.mark_sent(command, 9);
+        assert_eq!(tracker.state().rejection, CuSessionRejection::NotInControl);
+        tracker.on_acknowledged(9);
+        assert!(!tracker.state().drives_enabled);
+        assert!(!tracker.is_busy());
     }
 
     #[test]

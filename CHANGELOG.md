@@ -9,6 +9,12 @@ may be breaking.
 
 ### Added
 
+- `repose::planners`: the single registry of joint planners.
+  `CuPlannerChoice` names every planner (RON spelling: `rrt_connect`,
+  `rrt_star`, `prm`, `a_star`, `stomp`, `path_optimizer`, `direct`) and
+  `CuAnyPlanner<N, M>` is a `CuJointPlanner` that runs the chosen one (directly, or in `CuJointPlannerTask` by name). Adding a
+  planner means implementing the trait and adding one variant there.
+
 - `repose-robot-interface` (re-exported as `repose::robot_interface`): the
   vendor-neutral robot bridge contract. It documents the standard channel set
   (`joint_state`, `joint_command`, `session`, `session_state`) and adds the

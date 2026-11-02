@@ -191,22 +191,18 @@ state). Failures are published, not dropped: the path then carries no
 waypoints and its `status` names the reason (`invalid_start`,
 `invalid_goal`, `invalid_request`, `exhausted`, `capacity_exceeded`).
 
-| Planner | Kind | Behaviour |
-|---|---|---|
-| `CuJointRrtStar` (`repose-joint-rrt-star`) | sampling | Seeded RRT* with rewiring and shortcutting; keeps shortening its path. |
-| `CuJointRrtConnect` | sampling | Bidirectional trees; fastest to a first path, converges on connection without optimizing. |
-| `CuJointPrm` | sampling | Probabilistic roadmap (up to 1024 nodes) plus Dijkstra; improves as the roadmap densifies. Rebuilt per job. |
-| `CuJointAStar` | search | Deterministic A* on a joint-space lattice (`resolution`); complete at that resolution within its node capacity. |
-| `CuJointPathOptimizer` | optimization | Deterministic CHOMP-style gradient descent on smoothness and clearance; improves each quantum. |
-| `CuJointStomp` | optimization | Seeded stochastic rollouts weighted by cost; no gradients, copes with flat or discontinuous costs. |
-| `CuJointDirectPlanner` | direct | The straight joint line or a definite `exhausted`; a cheap first attempt. |
+The planner list lives in one place, [`repose::planners`](components/libs/repose/src/planners.rs):
+`CuPlannerChoice` names every planner (RON spelling) with its behaviour, and
+`CuAnyPlanner` runs any of them. Applications select planners by name from
+there; adding a planner is one trait impl plus one line in that list.
 
 The optimizers are local: they can stay stuck behind large obstacles where
 sampling or search planners still succeed.
 
 Sampling planners derive all randomness from the job seed; deterministic
-planners ignore it. New planners only implement the trait and share
-`CuSceneValidity` for collision and clearance queries.
+planners ignore it. New planners implement the trait, share
+`CuSceneValidity` for collision and clearance queries, and are registered in
+`repose::planners`.
 
 ## Planning scene snapshots
 

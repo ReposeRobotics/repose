@@ -19,6 +19,8 @@ domains = ["algorithm/manipulation"]
 environments = ["host", "embedded"]
 
 [dependencies]
+cu29 = { workspace = true }
+serde = { workspace = true }
 repose-kinematics = { version = "0.7.0", path = "../repose_kinematics", default-features = false }
 repose-collision = { version = "0.7.0", path = "../repose_collision", default-features = false }
 repose-robot-description = { version = "0.7.0", path = "../repose_robot_description", default-features = false }
@@ -33,6 +35,8 @@ repose-mujoco-sim = { version = "0.7.0", path = "../../bridges/repose_mujoco_sim
 [features]
 default = ["std"]
 std = [
+  "cu29/std",
+  "serde/std",
   "repose-kinematics/std",
   "repose-collision/std",
   "repose-robot-description/std",
@@ -45,3 +49,6 @@ std = [
 ]
 # MuJoCo simulator bridge (host only).
 mujoco-sim = ["std", "dep:repose-mujoco-sim", "repose-mujoco-sim/std"]
+
+[dev-dependencies]
+ron = "0.12"

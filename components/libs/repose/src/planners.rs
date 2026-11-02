@@ -1,7 +1,8 @@
 //! The one registry of Repose joint planners: [`CuPlannerKind`] names every
 //! planner (its RON spelling) and [`CuAnyPlanner`] runs any of them through
 //! the [`CuJointPlanner`] contract. Adding a planner means implementing the
-//! trait and adding one variant here; applications select it by name.
+//! trait and adding one line to the `planners!` list below; applications
+//! select it by name.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -25,138 +26,89 @@ use repose_motion_planning::CuPlanStatus;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Every Repose joint planner, by RON name.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Reflect)]
-#[serde(rename_all = "snake_case")]
-pub enum CuPlannerKind {
-    /// Bidirectional RRT, feasibility-first (`rrt_connect`).
-    #[default]
-    RrtConnect,
-    /// Asymptotically optimal RRT* with rewiring and shortcutting (`rrt_star`).
-    RrtStar,
-    /// Probabilistic roadmap (`prm`).
-    Prm,
-    /// A* on a joint-space lattice (`a_star`).
-    AStar,
-    /// Stochastic trajectory optimization (`stomp`).
-    Stomp,
-    /// Gradient path optimizer, CHOMP-style (`path_optimizer`).
-    PathOptimizer,
-    /// Straight joint line, collision-checked (`direct`).
-    Direct,
-}
+/// Generates [`CuPlannerKind`], [`CuAnyPlanner`] and all their dispatch from
+/// one list, so a planner is added in exactly one line.
+macro_rules! planners {
+    ($($(#[$doc:meta])* $variant:ident => $ty:ident),+ $(,)?) => {
+        /// Every Repose joint planner, by RON name (snake_case of the variant).
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Reflect)]
+        #[serde(rename_all = "snake_case")]
+        pub enum CuPlannerKind {
+            #[default]
+            $($(#[$doc])* $variant,)+
+        }
 
-impl CuPlannerKind {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 7] = [
-        Self::RrtConnect,
-        Self::RrtStar,
-        Self::Prm,
-        Self::AStar,
-        Self::Stomp,
-        Self::PathOptimizer,
-        Self::Direct,
-    ];
-}
+        impl CuPlannerKind {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
 
-/// Any Repose joint planner with default parameters, chosen at runtime.
-pub enum CuAnyPlanner<const N: usize, const M: usize = N> {
-    RrtConnect(Box<CuJointRrtConnect<N, M>>),
-    RrtStar(Box<CuJointRrtStar<N, M>>),
-    Prm(Box<CuJointPrm<N, M>>),
-    AStar(Box<CuJointAStar<N, M>>),
-    Stomp(Box<CuJointStomp<N, M>>),
-    PathOptimizer(Box<CuJointPathOptimizer<N, M>>),
-    Direct(Box<CuJointDirect<N, M>>),
-}
+        /// Any Repose joint planner with default parameters, chosen at runtime.
+        pub enum CuAnyPlanner<const N: usize, const M: usize = N> {
+            $($(#[$doc])* $variant(Box<$ty<N, M>>),)+
+        }
 
-macro_rules! each {
-    ($self:expr, $p:ident => $body:expr) => {
-        match $self {
-            Self::RrtConnect($p) => $body,
-            Self::RrtStar($p) => $body,
-            Self::Prm($p) => $body,
-            Self::AStar($p) => $body,
-            Self::Stomp($p) => $body,
-            Self::PathOptimizer($p) => $body,
-            Self::Direct($p) => $body,
+        impl<const N: usize, const M: usize> CuAnyPlanner<N, M> {
+            /// Builds the planner `kind` for `chain` and `model`.
+            pub fn new(
+                kind: CuPlannerKind,
+                chain: CuKinematicChain<N>,
+                model: CuRobotCollisionModel<N, M>,
+            ) -> CuResult<Self> {
+                Ok(match kind {
+                    $(CuPlannerKind::$variant => Self::$variant(Box::new(
+                        CuJointPlanner::new(chain, model, Default::default())?,
+                    )),)+
+                })
+            }
+
+            /// Which planner this is.
+            pub fn kind(&self) -> CuPlannerKind {
+                match self {
+                    $(Self::$variant(_) => CuPlannerKind::$variant,)+
+                }
+            }
+
+            /// See [`CuJointPlanner::begin`].
+            pub fn begin(&mut self, request: &CuJointPlanRequest<N>, seed: u64) -> CuResult<CuPlanStatus> {
+                match self {
+                    $(Self::$variant(p) => p.begin(request, seed),)+
+                }
+            }
+
+            /// See [`CuJointPlanner::step`].
+            pub fn step(&mut self, budget: u32) -> CuResult<CuPlanStatus> {
+                match self {
+                    $(Self::$variant(p) => p.step(budget),)+
+                }
+            }
+
+            /// See [`CuJointPlanner::write_best`].
+            pub fn write_best(&self, out: &mut CuJointPlanPath<N>) -> CuPlanStatus {
+                match self {
+                    $(Self::$variant(p) => p.write_best(out),)+
+                }
+            }
         }
     };
 }
 
-impl<const N: usize, const M: usize> CuAnyPlanner<N, M> {
-    /// Builds the planner `kind` for `chain` and `model`.
-    pub fn new(
-        kind: CuPlannerKind,
-        chain: CuKinematicChain<N>,
-        model: CuRobotCollisionModel<N, M>,
-    ) -> CuResult<Self> {
-        Ok(match kind {
-            CuPlannerKind::RrtConnect => Self::RrtConnect(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-            CuPlannerKind::RrtStar => Self::RrtStar(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-            CuPlannerKind::Prm => Self::Prm(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-            CuPlannerKind::AStar => Self::AStar(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-            CuPlannerKind::Stomp => Self::Stomp(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-            CuPlannerKind::PathOptimizer => Self::PathOptimizer(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-            CuPlannerKind::Direct => Self::Direct(Box::new(CuJointPlanner::new(
-                chain,
-                model,
-                Default::default(),
-            )?)),
-        })
-    }
-
-    /// Which planner this is.
-    pub fn kind(&self) -> CuPlannerKind {
-        match self {
-            Self::RrtConnect(_) => CuPlannerKind::RrtConnect,
-            Self::RrtStar(_) => CuPlannerKind::RrtStar,
-            Self::Prm(_) => CuPlannerKind::Prm,
-            Self::AStar(_) => CuPlannerKind::AStar,
-            Self::Stomp(_) => CuPlannerKind::Stomp,
-            Self::PathOptimizer(_) => CuPlannerKind::PathOptimizer,
-            Self::Direct(_) => CuPlannerKind::Direct,
-        }
-    }
-
-    /// See [`CuJointPlanner::begin`].
-    pub fn begin(&mut self, request: &CuJointPlanRequest<N>, seed: u64) -> CuResult<CuPlanStatus> {
-        each!(self, p => p.begin(request, seed))
-    }
-
-    /// See [`CuJointPlanner::step`].
-    pub fn step(&mut self, budget: u32) -> CuResult<CuPlanStatus> {
-        each!(self, p => p.step(budget))
-    }
-
-    /// See [`CuJointPlanner::write_best`].
-    pub fn write_best(&self, out: &mut CuJointPlanPath<N>) -> CuPlanStatus {
-        each!(self, p => p.write_best(out))
-    }
+// The single list of planners. The first entry is the default.
+planners! {
+    /// Bidirectional RRT, feasibility-first (`rrt_connect`).
+    RrtConnect => CuJointRrtConnect,
+    /// Asymptotically optimal RRT* with rewiring and shortcutting (`rrt_star`).
+    RrtStar => CuJointRrtStar,
+    /// Probabilistic roadmap (`prm`).
+    Prm => CuJointPrm,
+    /// A* on a joint-space lattice (`a_star`).
+    AStar => CuJointAStar,
+    /// Stochastic trajectory optimization (`stomp`).
+    Stomp => CuJointStomp,
+    /// Gradient path optimizer, CHOMP-style (`path_optimizer`).
+    PathOptimizer => CuJointPathOptimizer,
+    /// Straight joint line, collision-checked (`direct`).
+    Direct => CuJointDirect,
 }
 
 #[cfg(test)]
@@ -179,7 +131,7 @@ mod tests {
             goal: deg([0.0, 30.0, 60.0, 0.0, 60.0, 0.0]),
             ..Default::default()
         };
-        for kind in CuPlannerKind::ALL {
+        for &kind in CuPlannerKind::ALL {
             let name = ron::to_string(&kind).unwrap();
             assert_eq!(ron::from_str::<CuPlannerKind>(&name).unwrap(), kind);
             let mut planner =

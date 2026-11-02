@@ -13,6 +13,7 @@
 //! | [`kinematics`] | `repose-kinematics` | Serial chains, FK, Jacobians, IK, servoing, joint-state payloads |
 //! | [`collision`] | `repose-collision` | Capsule/sphere robot models, planning scenes, collision checks |
 //! | [`robot_description`] | `repose-robot-description` | URDF/SRDF import into fixed-size models (`std`) |
+//! | [`robot_interface`] | `repose-robot-interface` | Vendor-neutral robot bridge contract: session commands, session state, `CuSessionTracker` |
 //! | [`trajectory`] | `repose-trajectory` | Trajectory timing, interpolation, following |
 //! | [`motion_planning`] | `repose-motion-planning` | Planner contract, anytime planner task, built-in planners |
 //! | [`rrt_star`] | `repose-joint-rrt-star` | Joint-space RRT* planner |
@@ -35,4 +36,5 @@ pub use repose_motion_planning as motion_planning;
 #[cfg(feature = "mujoco-sim")]
 pub use repose_mujoco_sim as mujoco_sim;
 pub use repose_robot_description as robot_description;
+pub use repose_robot_interface as robot_interface;
 pub use repose_trajectory as trajectory;

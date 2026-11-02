@@ -7,6 +7,10 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Umbrella crate doc example now points at the `v0.7.1` tag.
+
 ## [0.7.1] - 2026-11-02
 
 ### Added

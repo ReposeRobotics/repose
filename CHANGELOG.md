@@ -10,9 +10,9 @@ may be breaking.
 ### Added
 
 - `repose::planners`: the single registry of joint planners.
-  `CuPlannerKind` names every planner (RON spelling: `rrt_connect`,
+  `CuPlannerChoice` names every planner (RON spelling: `rrt_connect`,
   `rrt_star`, `prm`, `a_star`, `stomp`, `path_optimizer`, `direct`) and
-  `CuAnyPlanner<N, M>` runs any of them through `CuJointPlanner`. Adding a
+  `CuAnyPlanner<N, M>` is a `CuJointPlanner` that runs the chosen one (directly, or in `CuJointPlannerTask` by name). Adding a
   planner means implementing the trait and adding one variant there.
 
 - `repose-robot-interface` (re-exported as `repose::robot_interface`): the

@@ -17,7 +17,7 @@
 //! | [`trajectory`] | `repose-trajectory` | Trajectory timing, interpolation, following |
 //! | [`motion_planning`] | `repose-motion-planning` | Planner contract, anytime planner task, built-in planners |
 //! | [`rrt_star`] | `repose-joint-rrt-star` | Joint-space RRT* planner |
-//! | [`planners`] | (this crate) | The planner registry: [`planners::CuPlannerKind`] (RON names) and [`planners::CuAnyPlanner`] |
+//! | [`planners`] | (this crate) | The planner registry: [`planners::CuPlannerChoice`] (RON names) and [`planners::CuAnyPlanner`] |
 //! | [`controller`] | `repose-controller` | Joint controller with watchdog and rate limiting |
 //! | [`io`] | `repose-io` | Digital IO payloads and an IO-driven gripper |
 //! | `mujoco_sim` | `repose-mujoco-sim` | MuJoCo simulator bridge (feature `mujoco-sim`) |

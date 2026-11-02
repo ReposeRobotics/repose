@@ -192,7 +192,7 @@ waypoints and its `status` names the reason (`invalid_start`,
 `invalid_goal`, `invalid_request`, `exhausted`, `capacity_exceeded`).
 
 The planner list lives in one place, [`repose::planners`](components/libs/repose/src/planners.rs):
-`CuPlannerKind` names every planner (RON spelling) with its behaviour, and
+`CuPlannerChoice` names every planner (RON spelling) with its behaviour, and
 `CuAnyPlanner` runs any of them. Applications select planners by name from
 there; adding a planner is one trait impl plus one line in that list.
 

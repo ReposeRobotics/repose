@@ -129,6 +129,10 @@ pub enum CuSessionDecision {
 pub struct CuSessionTracker {
     state: CuSessionState,
     outgoing: Option<CuSessionCommand>,
+    /// Taken by the bridge but not yet confirmed with `mark_sent`.
+    in_transit: bool,
+    /// Whether control was already held when `AcquireControl` went out.
+    held_before_acquire: bool,
     acquired_here: bool,
     changed: bool,
 }
@@ -146,7 +150,7 @@ impl CuSessionTracker {
 
     /// True while a command is queued or awaiting its answer.
     pub fn is_busy(&self) -> bool {
-        self.outgoing.is_some() || self.state.result == CuSessionResult::Pending
+        self.outgoing.is_some() || self.in_transit || self.state.result == CuSessionResult::Pending
     }
 
     /// Handle one request from Copper.
@@ -170,11 +174,17 @@ impl CuSessionTracker {
     /// The queued command, removed from the queue. Pass it to
     /// [`mark_sent`](Self::mark_sent) once written.
     pub fn take_outgoing(&mut self) -> Option<CuSessionCommand> {
-        self.outgoing.take()
+        let command = self.outgoing.take();
+        self.in_transit |= command.is_some();
+        command
     }
 
     /// Record that `command` went out with protocol sequence `sequence`.
     pub fn mark_sent(&mut self, command: CuSessionCommand, sequence: u32) {
+        self.in_transit = false;
+        if command == CuSessionCommand::AcquireControl {
+            self.held_before_acquire = self.state.control_acquired;
+        }
         self.state.command = Some(command);
         self.state.sequence = sequence;
         self.state.result = CuSessionResult::Pending;
@@ -192,7 +202,7 @@ impl CuSessionTracker {
         match self.state.command {
             Some(CuSessionCommand::AcquireControl) => {
                 self.state.control_acquired = true;
-                self.acquired_here = true;
+                self.acquired_here = !self.held_before_acquire;
             }
             Some(CuSessionCommand::ReleaseControl) => self.lose_control(),
             Some(CuSessionCommand::EnableDrives) => self.state.drives_enabled = true,
@@ -221,7 +231,7 @@ impl CuSessionTracker {
             match (self.state.command, in_control) {
                 (Some(CuSessionCommand::AcquireControl), true) => {
                     self.state.result = CuSessionResult::Acknowledged;
-                    self.acquired_here = true;
+                    self.acquired_here = !self.held_before_acquire;
                 }
                 (Some(CuSessionCommand::ReleaseControl), false) => {
                     self.state.result = CuSessionResult::Acknowledged;
@@ -249,6 +259,7 @@ impl CuSessionTracker {
     /// The transport was lost: nothing is pending and nothing is held.
     pub fn on_disconnected(&mut self) {
         self.outgoing = None;
+        self.in_transit = false;
         if self.state.result == CuSessionResult::Pending {
             self.state.result = CuSessionResult::Idle;
         }
@@ -282,10 +293,27 @@ impl CuSessionTracker {
         self.state.motion_allowed = false;
     }
 
+    /// Control is gone: drop queued commands that need it, and fail a
+    /// pending one so a late answer cannot mark drives enabled.
     fn lose_control(&mut self) {
         self.state.control_acquired = false;
         self.acquired_here = false;
+        self.held_before_acquire = false;
         self.disable();
+        if self
+            .outgoing
+            .is_some_and(|command| command != CuSessionCommand::AcquireControl)
+        {
+            self.outgoing = None;
+        }
+        let needs_control = !matches!(
+            self.state.command,
+            Some(CuSessionCommand::AcquireControl | CuSessionCommand::ReleaseControl)
+        );
+        if self.state.result == CuSessionResult::Pending && needs_control {
+            self.state.result = CuSessionResult::Rejected;
+            self.state.rejection = CuSessionRejection::NotInControl;
+        }
     }
 }
 
@@ -370,6 +398,57 @@ mod tests {
         tracker.on_control_report(false);
         assert_eq!(tracker.state().result, CuSessionResult::Acknowledged);
         assert_eq!(tracker.shutdown_step(), None);
+    }
+
+    #[test]
+    fn test_losing_control_cancels_privileged_commands() {
+        let mut tracker = CuSessionTracker::default();
+        tracker.on_control_report(true);
+        assert_eq!(
+            tracker.request(CuSessionCommand::EnableDrives),
+            CuSessionDecision::Send
+        );
+        tracker.on_control_report(false);
+        assert_eq!(tracker.take_outgoing(), None);
+
+        tracker.on_control_report(true);
+        send(&mut tracker, CuSessionCommand::EnableDrives, 3);
+        tracker.on_control_report(false);
+        assert_eq!(tracker.state().result, CuSessionResult::Rejected);
+        assert_eq!(tracker.state().rejection, CuSessionRejection::NotInControl);
+        tracker.on_acknowledged(3); // late answer is ignored
+        assert!(!tracker.state().drives_enabled);
+    }
+
+    #[test]
+    fn test_busy_between_take_and_mark_sent() {
+        let mut tracker = CuSessionTracker::default();
+        tracker.on_control_report(true);
+        tracker.request(CuSessionCommand::ClearFaults);
+        let command = tracker.take_outgoing().unwrap();
+        assert!(tracker.is_busy());
+        assert_eq!(
+            tracker.request(CuSessionCommand::EnableDrives),
+            CuSessionDecision::Refused
+        );
+        tracker.mark_sent(command, 1);
+        assert_eq!(tracker.state().command, Some(CuSessionCommand::ClearFaults));
+    }
+
+    #[test]
+    fn test_acquire_while_already_held_is_not_released() {
+        for via_report in [false, true] {
+            let mut tracker = CuSessionTracker::default();
+            tracker.on_control_report(true);
+            send(&mut tracker, CuSessionCommand::AcquireControl, 1);
+            if via_report {
+                tracker.on_control_report(true);
+            } else {
+                tracker.on_acknowledged(1);
+            }
+            assert_eq!(tracker.state().result, CuSessionResult::Acknowledged);
+            assert_eq!(tracker.shutdown_step(), None);
+        }
     }
 
     #[test]

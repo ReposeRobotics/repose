@@ -202,7 +202,7 @@ impl CuSessionTracker {
         match self.state.command {
             Some(CuSessionCommand::AcquireControl) => {
                 self.state.control_acquired = true;
-                self.acquired_here = !self.held_before_acquire;
+                self.acquired_here |= !self.held_before_acquire;
             }
             Some(CuSessionCommand::ReleaseControl) => self.lose_control(),
             Some(CuSessionCommand::EnableDrives) => self.state.drives_enabled = true,
@@ -231,7 +231,7 @@ impl CuSessionTracker {
             match (self.state.command, in_control) {
                 (Some(CuSessionCommand::AcquireControl), true) => {
                     self.state.result = CuSessionResult::Acknowledged;
-                    self.acquired_here = !self.held_before_acquire;
+                    self.acquired_here |= !self.held_before_acquire;
                 }
                 (Some(CuSessionCommand::ReleaseControl), false) => {
                     self.state.result = CuSessionResult::Acknowledged;
@@ -449,6 +449,20 @@ mod tests {
             assert_eq!(tracker.state().result, CuSessionResult::Acknowledged);
             assert_eq!(tracker.shutdown_step(), None);
         }
+    }
+
+    #[test]
+    fn test_reacquire_keeps_ownership() {
+        let mut tracker = CuSessionTracker::default();
+        tracker.on_control_report(false);
+        send(&mut tracker, CuSessionCommand::AcquireControl, 1);
+        tracker.on_control_report(true);
+        send(&mut tracker, CuSessionCommand::AcquireControl, 2);
+        tracker.on_acknowledged(2);
+        assert_eq!(
+            tracker.shutdown_step(),
+            Some(CuSessionCommand::ReleaseControl)
+        );
     }
 
     #[test]

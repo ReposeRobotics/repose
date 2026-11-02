@@ -7,6 +7,17 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- `repose-robot-interface` (re-exported as `repose::robot_interface`): the
+  vendor-neutral robot bridge contract. It documents the standard channel set
+  (`joint_state`, `joint_command`, `session`, `session_state`) and adds the
+  session lifecycle payloads `CuSessionCommand` (acquire/release control,
+  clear faults, enable/disable drives) and `CuSessionState`, plus
+  `CuSessionTracker`, the protocol-independent session rules every hardware
+  bridge shares (one command in flight, refuse while not in control,
+  sequence-matched answers, wind-down order). `no_std`.
+
 ### Changed
 
 - `master` is protected; changes land through squash-merged PRs from

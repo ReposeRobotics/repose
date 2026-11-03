@@ -2,6 +2,12 @@
 
 This repository follows the exact contribution workflow and design standards of [`copper-project/copper-rs`](https://github.com/copper-project/copper-rs/blob/master/CONTRIBUTING.md) so crates developed here can be upstreamed directly into `copper-rs`.
 
+## Getting Help
+
+Questions, design discussion and "how do I…" belong in the
+[Repose Zulip chat](https://repose.zulipchat.com/#narrow/channel/651417-general).
+Use GitHub Issues for reproducible bugs and concrete feature requests.
+
 ## Contribution Workflow
 
 AI agents and tools follow the same rules, spelled out in `AGENTS.md`.

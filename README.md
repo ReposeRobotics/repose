@@ -1,5 +1,9 @@
 # Repose
 
+[![Chat on Zulip](https://img.shields.io/badge/chat-on%20Zulip-6492fe?logo=zulip&logoColor=white)](https://repose.zulipchat.com/#narrow/channel/651417-general)
+
+Questions, ideas, or want to follow along? Join the chat on [Zulip](https://repose.zulipchat.com/#narrow/channel/651417-general).
+
 **Repose** by [Repose Robotics](https://reposerobotics.org) is a deterministic, real-time manipulation stack for robot arms: kinematics, collision checking, motion planning, trajectory timing, and control as zero-allocation components for [`copper-rs` (`cu29`)](https://github.com/copper-project/copper-rs), designed from the ground up to follow Copper's `std`/`no_std`, compile-time static graph, and replay-deterministic architecture.
 
 Studio is available as the private `studio` submodule. Clone with `git clone --recurse-submodules` or run `git submodule update --init` in an existing checkout; access requires permission to the Studio repository. See [Studio’s README](studio/README.md) for setup.

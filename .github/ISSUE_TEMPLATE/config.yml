@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and discussion (Zulip)
+    url: https://repose.zulipchat.com/#narrow/channel/651417-general
+    about: Ask questions and discuss ideas in the Repose Zulip chat. Use Issues for bugs and feature requests.

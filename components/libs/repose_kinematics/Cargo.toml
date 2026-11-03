@@ -28,4 +28,9 @@ default = ["std"]
 std = ["cu29/std", "bincode/std", "serde/std"]
 
 [dev-dependencies]
+divan = { version = "6", package = "codspeed-divan-compat" }
 ron = "0.12"
+
+[[bench]]
+name = "ik"
+harness = false

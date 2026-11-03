@@ -26,6 +26,17 @@ test:
 bench:
     cargo bench -p repose
 
+# Build and run the CodSpeed IK benchmarks for repose-kinematics (needs cargo-codspeed).
+# Locally this only validates the benches; CI reports measurements to CodSpeed.
+bench-ik:
+    cargo codspeed build -p repose-kinematics
+    cargo codspeed run -p repose-kinematics
+
+# Fuzz the repose-kinematics IK target locally (needs cargo-fuzz + nightly).
+# Extra args go to libFuzzer, e.g. `just fuzz-ik -- -runs=10000`.
+fuzz-ik *args:
+    cargo +nightly fuzz run ik --fuzz-dir components/libs/repose_kinematics/fuzz -- {{args}}
+
 # Print the current public API for review (needs cargo-public-api + pinned nightly; see copper-workflow).
 # Pre-1.0 this is advisory; at 1.0, diff its output against the previous release before tagging.
 api-check:

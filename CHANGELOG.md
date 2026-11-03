@@ -7,6 +7,21 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- CodSpeed continuous benchmarking for `repose-kinematics` inverse kinematics:
+  Divan benches (`benches/ik.rs`) for DLS IK, pseudoinverse IK, and
+  differential IK on the igus ReBeL chain, run by a dedicated
+  `.github/workflows/codspeed.yml` workflow in simulation mode. The harness is
+  a dev-dependency only, so the `no_std` library surface is unchanged.
+- ClusterFuzzLite (OSS-Fuzz) fuzzing for `repose-kinematics`: a cargo-fuzz
+  target (`fuzz/fuzz_targets/ik.rs`) driving FK, Jacobians, manipulability,
+  differential IK, and DLS/pseudoinverse IK with bounded inputs and
+  finite-output/joint-limit oracles. PR fuzzing (`.github/workflows/cflite_pr.yml`)
+  and weekly batch fuzzing (`.github/workflows/cflite_batch.yml`) build from
+  `.clusterfuzzlite/`. The fuzz crate is detached from the workspace and
+  nightly-only, so it never affects the library builds.
+
 ### Changed
 
 - Umbrella crate doc example now points at the `v0.7.1` tag.

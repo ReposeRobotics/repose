@@ -51,4 +51,26 @@ std = [
 mujoco-sim = ["std", "dep:repose-mujoco-sim", "repose-mujoco-sim/std"]
 
 [dev-dependencies]
+cu-spatial-payloads.workspace = true
+divan = { version = "6.0.0", package = "codspeed-divan-compat" }
 ron = "0.12"
+
+[[bench]]
+name = "kinematics"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "collision"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "planning"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "trajectory"
+harness = false
+required-features = ["std"]

@@ -1,0 +1,31 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # Lets CodSpeed trigger backtest runs to build initial performance data.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OpenID Connect authentication with CodSpeed
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - name: Build the benchmark targets
+        run: cargo codspeed build -m simulation -p repose
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run -p repose

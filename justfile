@@ -22,6 +22,10 @@ test:
     cargo test --workspace --doc --features std
     cargo nextest run --workspace --features std,cu29/reflect
 
+# Run the divan benchmarks (kinematics, collision, planning, trajectory); CI runs them under CodSpeed.
+bench:
+    cargo bench -p repose
+
 # Print the current public API for review (needs cargo-public-api + pinned nightly; see copper-workflow).
 # Pre-1.0 this is advisory; at 1.0, diff its output against the previous release before tagging.
 api-check:

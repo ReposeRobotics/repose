@@ -53,6 +53,14 @@ two worktrees.
 5. PRs are **squash-merged**, so `master` gets one commit per PR and stays
    linear. Delete the branch after merging.
 
+### Benchmarks
+
+Performance-sensitive paths (FK/IK, collision checks, every planner, trajectory
+timing) have [divan](https://github.com/nvzqz/divan) benchmarks in
+`components/libs/repose/benches/`. Run them locally with `just bench`. The
+`CodSpeed` workflow runs them on every PR and reports regressions on
+[CodSpeed](https://app.codspeed.io/ReposeRobotics/repose).
+
 ### Releases
 
 Releases go through a PR too; see `docs/versioning.md`.

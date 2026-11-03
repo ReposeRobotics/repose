@@ -7,6 +7,11 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- Zulip community chat (`repose.zulipchat.com`) linked from the README,
+  `CONTRIBUTING.md` and the GitHub issue chooser.
+
 ### Changed
 
 - Umbrella crate doc example now points at the `v0.7.1` tag.

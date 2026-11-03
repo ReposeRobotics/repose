@@ -54,7 +54,8 @@ fn inverse_kinematics_dls(bencher: divan::Bencher) {
                 &cfg,
                 &mut out_q,
             )
-            .expect("IK fixture must converge");
+            .expect("IK fixture must solve");
+        assert!(status.is_converged(), "IK fixture did not converge");
         divan::black_box((status, out_q))
     });
 }
@@ -76,7 +77,8 @@ fn inverse_kinematics_pseudoinverse(bencher: divan::Bencher) {
                 &cfg,
                 &mut out_q,
             )
-            .expect("IK fixture must converge");
+            .expect("IK fixture must solve");
+        assert!(status.is_converged(), "IK fixture did not converge");
         divan::black_box((status, out_q))
     });
 }

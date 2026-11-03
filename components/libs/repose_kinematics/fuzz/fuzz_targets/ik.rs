@@ -23,25 +23,26 @@ use repose_kinematics::CuIkParams;
 use repose_kinematics::CuIkSolver;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointVelocity;
+use repose_kinematics::CuKinematicChain;
 use repose_kinematics::CuTwist6D;
 use repose_kinematics::CuTwistFrame;
 use repose_kinematics::igus_rebel_chain;
 
-/// Maps a byte to a joint angle in `[-2.8, 2.8]` rad, inside ReBeL limits.
-fn angle(byte: u8) -> CuJointPosition {
-    let radians = -2.8 + (f64::from(byte) / 255.0) * 5.6;
-    Angle::new::<radian>(radians).into()
+/// Maps a byte across one joint's configured limits, endpoints included.
+fn angle(byte: u8, lower: f64, upper: f64) -> CuJointPosition {
+    let fraction = f64::from(byte) / 255.0;
+    Angle::new::<radian>(lower + fraction * (upper - lower)).into()
 }
 
-fn positions(bytes: &[u8]) -> [CuJointPosition; 6] {
-    [
-        angle(bytes[0]),
-        angle(bytes[1]),
-        angle(bytes[2]),
-        angle(bytes[3]),
-        angle(bytes[4]),
-        angle(bytes[5]),
-    ]
+fn positions(chain: &CuKinematicChain<6>, bytes: &[u8]) -> [CuJointPosition; 6] {
+    let joints = chain.joints();
+    core::array::from_fn(|i| {
+        angle(
+            bytes[i],
+            joints[i].limits.lower().si_value(),
+            joints[i].limits.upper().si_value(),
+        )
+    })
 }
 
 /// Maps a byte to a centred, bounded twist component.
@@ -54,8 +55,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let chain = igus_rebel_chain();
-    let seed = positions(&data[0..6]);
-    let goal = positions(&data[6..12]);
+    let seed = positions(&chain, &data[0..6]);
+    let goal = positions(&chain, &data[6..12]);
 
     let mut target = Transform3D::<f64>::identity();
     if chain.forward_kinematics(&goal, &mut target).is_err() {

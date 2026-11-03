@@ -1,0 +1,27 @@
+[package]
+name = "repose-kinematics-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Detached from the Repose workspace: fuzzing needs nightly + libFuzzer and
+# must never leak into the std/no_std library builds.
+[workspace]
+
+[dependencies]
+cu-spatial-payloads = { version = "1.3.0", default-features = false }
+cu29 = { version = "1.3.1", default-features = false, features = ["units", "std"] }
+libfuzzer-sys = "0.4"
+repose-kinematics = { path = ".." }
+
+[[bin]]
+name = "ik"
+path = "fuzz_targets/ik.rs"
+test = false
+doc = false
+bench = false

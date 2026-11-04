@@ -7,23 +7,15 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-04
+
 ### Breaking
 
 - Add `CuPlanStatus::NoIkSolution` for bounded pose-goal IK failure. Exhaustive
   status matches must handle the new variant; existing joint planning requests
   and paths keep their fields and existing enum discriminants.
 
-### Changed
-
-- Correct the SemVer recipe to use the checker's breaking API category for
-  documented pre-1.0 breaking changes, without changing crate versions.
-
 ### Added
-
-- README Benchmarks section: CodSpeed methodology and scenarios (igus ReBeL
-  6-DOF, 11-obstacle collision scene, anytime planner jobs, 5-waypoint
-  trajectory), a local wall-clock median snapshot (Apple M4, rustc 1.99.0,
-  2026-11-04), and a link to the live CodSpeed dashboard.
 
 - Pose-goal planning through `CuPoseGoalTask` and `CuPosePlannerTask`, with
   seeded bounded IK retries and any existing joint planner.
@@ -33,6 +25,10 @@ may be breaking.
   results preserve that metadata and expose explicit failure statuses;
   `CuCartesianTrajectoryTask` connects successful results to the follower.
 
+- README Benchmarks section: CodSpeed methodology and scenarios (igus ReBeL
+  6-DOF, 11-obstacle collision scene, anytime planner jobs, 5-waypoint
+  trajectory), a local wall-clock median snapshot (Apple M4, rustc 1.99.0,
+  2026-11-04), and a link to the live CodSpeed dashboard.
 - CodSpeed continuous benchmarking for `repose-kinematics` inverse kinematics:
   Divan benches (`benches/ik.rs`) for DLS IK, pseudoinverse IK, and
   differential IK on the igus ReBeL chain, run by a dedicated
@@ -48,7 +44,9 @@ may be breaking.
 
 ### Changed
 
-- Umbrella crate doc example now points at the `v0.7.1` tag.
+- Correct the SemVer recipe to use the checker's breaking API category for
+  documented pre-1.0 breaking changes, without changing crate versions.
+- Umbrella crate doc example now points at the `v0.8.0` tag.
 
 ## [0.7.1] - 2026-11-02
 
@@ -126,7 +124,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ReposeRobotics/repose/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ReposeRobotics/repose/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ReposeRobotics/repose/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ReposeRobotics/repose/compare/v0.5.0...v0.6.0

@@ -5,7 +5,7 @@
 //! dependency, so an application needs a single line in `Cargo.toml`:
 //!
 //! ```toml
-//! repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.7.1" }
+//! repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.0" }
 //! ```
 //!
 //! | Module | Crate | Provides |

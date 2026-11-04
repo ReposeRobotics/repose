@@ -11,7 +11,8 @@ may be breaking.
 
 ### Changed
 
-- Skip Euler trigonometry when a joint origin has an exactly zero rotation.
+- Skip Euler trigonometry when a joint origin has an exactly zero rotation,
+  preserving the constructor's matrix bits, including signed zeros.
 
 ## [0.8.0] - 2026-11-04
 

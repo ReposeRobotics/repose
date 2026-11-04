@@ -164,10 +164,14 @@ impl CuJointSpec {
             .all(|angle| angle.get::<radian>() == 0.0)
         {
             let translation = self.origin_translation.map(|length| length.get::<meter>());
+            // At zero angles sin(angle) is the angle itself and cos(angle) is
+            // one. Retain the Euler arithmetic's signed zeros for every input
+            // sign combination, including matrices recorded in Copper logs.
+            let [sx, sy, sz] = self.origin_rpy.map(|angle| angle.get::<radian>());
             return Transform3D::<f64>::from_matrix([
-                [1.0, 0.0, 0.0, translation[0]],
-                [0.0, 1.0, 0.0, translation[1]],
-                [0.0, 0.0, 1.0, translation[2]],
+                [1.0, sx * sy - sz, sx * sz + sy, translation[0]],
+                [sz, 1.0, sy * sz - sx, translation[1]],
+                [-sy, sx, 1.0, translation[2]],
                 [0.0, 0.0, 0.0, 1.0],
             ]);
         }
@@ -535,6 +539,7 @@ mod tests {
     use cu29::units::si::f64::Length as Length64;
     use cu29::units::si::length::meter;
 
+    /// Checks floating-point representation, including zero signs and NaNs.
     fn assert_same_matrix_bits(left: [[f64; 4]; 4], right: [[f64; 4]; 4]) {
         for row in 0..4 {
             for column in 0..4 {
@@ -543,31 +548,32 @@ mod tests {
         }
     }
 
+    /// Every sign combination must preserve the constructor's encoded matrix.
     #[test]
     fn zero_origin_rotation_preserves_translation_and_signed_zero() {
-        let spec = CuJointSpec {
-            origin_translation: [
-                Length64::new::<meter>(-0.0),
-                Length64::new::<meter>(0.25),
-                Length64::new::<meter>(-0.5),
-            ],
-            origin_rpy: [
-                Angle64::new::<radian>(-0.0),
-                Angle64::new::<radian>(0.0),
-                Angle64::new::<radian>(-0.0),
-            ],
-            ..Default::default()
-        };
-        let actual = spec.origin_transform().to_matrix();
-        let expected = Transform3D::<f64>::from_translation_euler_xyz(
-            spec.origin_translation,
-            spec.origin_rpy,
-        )
-        .to_matrix();
-        assert_eq!(actual, expected);
-        assert_eq!(actual[0][3].to_bits(), (-0.0_f64).to_bits());
+        for signs in 0..8 {
+            let spec = CuJointSpec {
+                origin_translation: [
+                    Length64::new::<meter>(-0.0),
+                    Length64::new::<meter>(0.25),
+                    Length64::new::<meter>(-0.5),
+                ],
+                origin_rpy: core::array::from_fn(|i| {
+                    Angle64::new::<radian>(if signs & (1 << i) == 0 { 0.0 } else { -0.0 })
+                }),
+                ..Default::default()
+            };
+            let actual = spec.origin_transform().to_matrix();
+            let expected = Transform3D::<f64>::from_translation_euler_xyz(
+                spec.origin_translation,
+                spec.origin_rpy,
+            )
+            .to_matrix();
+            assert_same_matrix_bits(actual, expected);
+        }
     }
 
+    /// Nonfinite translations retain the original representation.
     #[test]
     fn zero_origin_rotation_preserves_nonfinite_translation() {
         let spec = CuJointSpec {
@@ -585,14 +591,10 @@ mod tests {
             spec.origin_rpy,
         )
         .to_matrix();
-        for row in 0..3 {
-            for column in 0..3 {
-                assert_eq!(actual[row][column], expected[row][column]);
-            }
-            assert_eq!(actual[row][3].to_bits(), expected[row][3].to_bits());
-        }
+        assert_same_matrix_bits(actual, expected);
     }
 
+    /// All other rotations must still use the unchanged constructor path.
     #[test]
     fn nonzero_or_nonfinite_origin_rotation_uses_euler_constructor() {
         for rpy in [

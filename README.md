@@ -44,7 +44,8 @@ TCP path of the straight joint line; trajectory parameterization uses a
 5-waypoint path.
 
 The table below is a local wall-clock snapshot (Divan median of 100 samples)
-for orientation. Reproduce it with `just bench` and `just bench-ik`.
+for orientation. Reproduce it with `just bench` and
+`cargo bench -p repose-kinematics --bench ik`.
 
 | Benchmark | Scenario | Median |
 |---|---|---|

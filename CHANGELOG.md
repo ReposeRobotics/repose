@@ -7,6 +7,11 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Construct the damped least-squares IK normal matrix from its symmetric
+  triangle, reducing its Jacobian dot products from 36 to 21.
+
 ## [0.8.1] - 2026-11-04
 
 ### Changed

@@ -466,24 +466,8 @@ impl<const N: usize> CuKinematicChain<N> {
 
             self.geometric_jacobian(out_q, &mut jac)?;
 
-            // Build 6x6 damped normal matrix A = J * J^T + lambda^2 * I
-            let mut a = [[0.0_f64; 6]; 6];
-            let mut r = 0;
-            while r < 6 {
-                let mut c = 0;
-                while c < 6 {
-                    let mut sum = 0.0;
-                    let mut k = 0;
-                    while k < N {
-                        sum += jac[r][k] * jac[c][k];
-                        k += 1;
-                    }
-                    a[r][c] = sum;
-                    c += 1;
-                }
-                a[r][r] += lambda_sq;
-                r += 1;
-            }
+            // Build 6x6 damped normal matrix A = J * J^T + lambda^2 * I.
+            let mut a = damped_normal_matrix(&jac, lambda_sq);
 
             let y = solve_6x6(&mut a, &err_vec)?;
 
@@ -546,6 +530,30 @@ impl<const N: usize> CuKinematicChain<N> {
             })
         }
     }
+}
+
+fn damped_normal_matrix<const N: usize>(jac: &[[f64; N]; 6], lambda_sq: f64) -> [[f64; 6]; 6] {
+    let mut a = [[0.0_f64; 6]; 6];
+    let mut r = 0;
+    while r < 6 {
+        let mut c = r;
+        while c < 6 {
+            let mut sum = 0.0;
+            let mut k = 0;
+            while k < N {
+                sum += jac[r][k] * jac[c][k];
+                k += 1;
+            }
+            if r == c {
+                sum += lambda_sq;
+            }
+            a[r][c] = sum;
+            a[c][r] = sum;
+            c += 1;
+        }
+        r += 1;
+    }
+    a
 }
 
 fn manipulability_sq_from_jacobian<const N: usize>(jac: &[[f64; N]; 6]) -> f64 {
@@ -733,4 +741,80 @@ fn solve_6x6(a: &mut [[f64; 6]; 6], b: &[f64; 6]) -> CuResult<[f64; 6]> {
         x[idx] = sum / a[idx][idx];
     }
     Ok(x)
+}
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::damped_normal_matrix;
+
+    fn full_damped_normal_matrix<const N: usize>(
+        jac: &[[f64; N]; 6],
+        lambda_sq: f64,
+    ) -> [[f64; 6]; 6] {
+        let mut a = [[0.0_f64; 6]; 6];
+        let mut r = 0;
+        while r < 6 {
+            let mut c = 0;
+            while c < 6 {
+                let mut sum = 0.0;
+                let mut k = 0;
+                while k < N {
+                    sum += jac[r][k] * jac[c][k];
+                    k += 1;
+                }
+                a[r][c] = sum;
+                c += 1;
+            }
+            a[r][r] += lambda_sq;
+            r += 1;
+        }
+        a
+    }
+
+    fn assert_matches_full<const N: usize>(jac: &[[f64; N]; 6], lambda_sq: f64) {
+        let symmetric = damped_normal_matrix(jac, lambda_sq);
+        let full = full_damped_normal_matrix(jac, lambda_sq);
+        let mut r = 0;
+        while r < 6 {
+            let mut c = 0;
+            while c < 6 {
+                assert_eq!(symmetric[r][c].to_bits(), full[r][c].to_bits());
+                c += 1;
+            }
+            r += 1;
+        }
+    }
+
+    #[test]
+    fn symmetric_damped_matrix_matches_full_construction_for_multiple_widths() {
+        let jac2 = [
+            [1.25, -2.0],
+            [-0.5, 0.0],
+            [3.0, -0.0],
+            [0.0, 4.5],
+            [-1.75, 2.25],
+            [0.0, -0.0],
+        ];
+        assert_matches_full(&jac2, 0.125);
+
+        let jac6 = [
+            [1.0, -2.0, 0.0, -0.0, 3.5, -4.25],
+            [-0.5, 1.25, -3.0, 2.0, -0.0, 0.125],
+            [4.0, 0.0, -1.5, 0.5, -2.25, 3.0],
+            [-2.0, 5.0, 1.0, -3.5, 0.0, -0.25],
+            [0.0, -1.0, 2.0, -4.0, 0.5, -3.0],
+            [3.0, -0.0, -2.0, 1.5, -5.0, 0.75],
+        ];
+        assert_matches_full(&jac6, 0.0025);
+
+        let jac7 = [
+            [1.0, -2.0, 0.0, -0.0, 3.5, -4.25, 0.75],
+            [-0.5, 1.25, -3.0, 2.0, -0.0, 0.125, -6.0],
+            [4.0, 0.0, -1.5, 0.5, -2.25, 3.0, -0.0],
+            [-2.0, 5.0, 1.0, -3.5, 0.0, -0.25, 4.0],
+            [0.0, -1.0, 2.0, -4.0, 0.5, -3.0, 1.25],
+            [3.0, -0.0, -2.0, 1.5, -5.0, 0.75, -1.0],
+        ];
+        assert_matches_full(&jac7, 0.0375);
+    }
 }

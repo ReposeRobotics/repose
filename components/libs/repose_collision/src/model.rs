@@ -363,6 +363,16 @@ impl<const N: usize, const M: usize> CuRobotCollisionModel<N, M> {
         env: &CuCollisionEnv<'_>,
     ) -> CuResult<bool> {
         self.validate_env(env)?;
+        self.is_configuration_collision_free_validated_env(chain, q, env)
+    }
+
+    /// Evaluates a configuration after the caller has validated `env` for this model.
+    fn is_configuration_collision_free_validated_env(
+        &self,
+        chain: &CuKinematicChain<N>,
+        q: &[CuJointPosition; N],
+        env: &CuCollisionEnv<'_>,
+    ) -> CuResult<bool> {
         if !chain.is_within_limits(q) {
             return Ok(false);
         }
@@ -403,13 +413,18 @@ impl<const N: usize, const M: usize> CuRobotCollisionModel<N, M> {
             return Err(CuError::from("Collision segment requires too many samples"));
         }
         let steps = (libm::ceil(max_delta) as usize).max(1);
+        let mut env_validated = false;
         for s in 0..=steps {
             let alpha = (s as f64) / (steps as f64);
             let mut q_interp = [CuJointPosition::default(); N];
             for k in 0..N {
                 q_interp[k] = q_start[k].interpolate(q_end[k], alpha)?;
             }
-            if !self.is_configuration_collision_free(chain, &q_interp, env)? {
+            if !env_validated {
+                self.validate_env(env)?;
+                env_validated = true;
+            }
+            if !self.is_configuration_collision_free_validated_env(chain, &q_interp, env)? {
                 return Ok(false);
             }
         }

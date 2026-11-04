@@ -7,6 +7,11 @@ may be breaking.
 
 ## [Unreleased]
 
+### Performance
+
+- Segment collision checks validate the scene and exclusions once per segment,
+  while preserving per-configuration validation for standalone checks.
+
 ## [0.8.0] - 2026-11-04
 
 ### Breaking

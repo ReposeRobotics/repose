@@ -285,6 +285,39 @@ mod tests {
                 .unwrap()
         );
 
+        // The segment validates a scene once it reaches its first interpolated configuration.
+        let mut invalid_exclusions = CuSceneExclusions::<1>::new();
+        invalid_exclusions
+            .add(CuSceneExclusion::robot(CuObjectId::new(99), 0))
+            .unwrap();
+        let invalid_env = CuCollisionEnv::EMPTY.with_exclusions(&invalid_exclusions);
+        assert!(
+            model
+                .is_segment_collision_free(
+                    &chain,
+                    &q_start,
+                    &q_end,
+                    Angle64::new::<radian>(0.05),
+                    &invalid_env,
+                )
+                .is_err()
+        );
+
+        // Endpoint coordinate errors retain precedence over invalid scene exclusions.
+        let mut invalid_start = q_start;
+        invalid_start[0] = Angle64::new::<radian>(f64::NAN).into();
+        assert!(
+            model
+                .is_segment_collision_free(
+                    &chain,
+                    &invalid_start,
+                    &q_end,
+                    Angle64::new::<radian>(0.05),
+                    &invalid_env,
+                )
+                .is_err()
+        );
+
         // Place an obstacle sphere right on the end-effector at q_home (z ≈ 0.87 m)
         let obstacles = [sphere([0.0, 0.0, 0.87], 0.08)];
         let env = CuCollisionEnv::new(&obstacles);

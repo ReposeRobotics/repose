@@ -9,6 +9,13 @@ may be breaking.
 
 ### Added
 
+- README Benchmarks section: CodSpeed methodology and scenarios (igus ReBeL
+  6-DOF, 11-obstacle collision scene, anytime planner jobs, 5-waypoint
+  trajectory), a local wall-clock median snapshot (Apple M4, rustc 1.99.0,
+  2026-11-04), and a link to the live CodSpeed dashboard.
+
+### Added
+
 - CodSpeed continuous benchmarking for `repose-kinematics` inverse kinematics:
   Divan benches (`benches/ik.rs`) for DLS IK, pseudoinverse IK, and
   differential IK on the igus ReBeL chain, run by a dedicated

@@ -77,18 +77,18 @@ Nothing is published to crates.io yet (`publish = false` workspace-wide; the API
 is pre-1.0 and may change). Depend on the git repository instead:
 
 ```toml
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.7.1" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.0" }
 ```
 
 The workspace is versioned and tagged as a whole (`vX.Y.Z`), never per crate;
-`repose` carries the product version. Pre-1.0, a minor bump (0.6 → 0.7) may
+`repose` carries the product version. Pre-1.0, a minor bump (0.7 → 0.8) may
 break the Rust API, payload encoding, or RON config; patch releases never do.
 The full policy is in [docs/versioning.md](docs/versioning.md), and every
 release is recorded in [CHANGELOG.md](CHANGELOG.md).
 
 | Repose | Copper (`cu29`) | Rust (MSRV) |
 |---|---|---|
-| 0.7 (as `repose-*`) | 1.3 | 1.95 |
+| 0.7 – 0.8 (as `repose-*`) | 1.3 | 1.95 |
 | 0.1 – 0.6 (as `cu-*`) | 1.3 | 1.95 |
 
 ## Quick Start

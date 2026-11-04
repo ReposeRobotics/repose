@@ -158,19 +158,6 @@ impl CuJointSpec {
 
     /// Computes the static parent-to-joint origin transform.
     pub fn origin_transform(&self) -> Transform3D<f64> {
-        if self
-            .origin_rpy
-            .iter()
-            .all(|angle| angle.get::<radian>() == 0.0)
-        {
-            let translation = self.origin_translation.map(|length| length.get::<meter>());
-            return Transform3D::<f64>::from_matrix([
-                [1.0, 0.0, 0.0, translation[0]],
-                [0.0, 1.0, 0.0, translation[1]],
-                [0.0, 0.0, 1.0, translation[2]],
-                [0.0, 0.0, 0.0, 1.0],
-            ]);
-        }
         Transform3D::<f64>::from_translation_euler_xyz(self.origin_translation, self.origin_rpy)
     }
 
@@ -524,94 +511,4 @@ fn axis_angle_transform(axis: [f64; 3], angle_rad: f64) -> Transform3D<f64> {
         ],
         [0.0, 0.0, 0.0, 1.0],
     ])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::CuJointSpec;
-    use super::Transform3D;
-    use cu29::units::si::angle::radian;
-    use cu29::units::si::f64::Angle as Angle64;
-    use cu29::units::si::f64::Length as Length64;
-    use cu29::units::si::length::meter;
-
-    fn assert_same_matrix_bits(left: [[f64; 4]; 4], right: [[f64; 4]; 4]) {
-        for row in 0..4 {
-            for column in 0..4 {
-                assert_eq!(left[row][column].to_bits(), right[row][column].to_bits());
-            }
-        }
-    }
-
-    #[test]
-    fn zero_origin_rotation_preserves_translation_and_signed_zero() {
-        let spec = CuJointSpec {
-            origin_translation: [
-                Length64::new::<meter>(-0.0),
-                Length64::new::<meter>(0.25),
-                Length64::new::<meter>(-0.5),
-            ],
-            origin_rpy: [
-                Angle64::new::<radian>(-0.0),
-                Angle64::new::<radian>(0.0),
-                Angle64::new::<radian>(-0.0),
-            ],
-            ..Default::default()
-        };
-        let actual = spec.origin_transform().to_matrix();
-        let expected = Transform3D::<f64>::from_translation_euler_xyz(
-            spec.origin_translation,
-            spec.origin_rpy,
-        )
-        .to_matrix();
-        assert_eq!(actual, expected);
-        assert_eq!(actual[0][3].to_bits(), (-0.0_f64).to_bits());
-    }
-
-    #[test]
-    fn zero_origin_rotation_preserves_nonfinite_translation() {
-        let spec = CuJointSpec {
-            origin_translation: [
-                Length64::new::<meter>(f64::INFINITY),
-                Length64::new::<meter>(f64::NEG_INFINITY),
-                Length64::new::<meter>(f64::NAN),
-            ],
-            origin_rpy: [Angle64::new::<radian>(-0.0); 3],
-            ..Default::default()
-        };
-        let actual = spec.origin_transform().to_matrix();
-        let expected = Transform3D::<f64>::from_translation_euler_xyz(
-            spec.origin_translation,
-            spec.origin_rpy,
-        )
-        .to_matrix();
-        for row in 0..3 {
-            for column in 0..3 {
-                assert_eq!(actual[row][column], expected[row][column]);
-            }
-            assert_eq!(actual[row][3].to_bits(), expected[row][3].to_bits());
-        }
-    }
-
-    #[test]
-    fn nonzero_or_nonfinite_origin_rotation_uses_euler_constructor() {
-        for rpy in [
-            [0.0, 0.0, core::f64::consts::FRAC_PI_2],
-            [0.0, f64::INFINITY, 0.0],
-            [f64::NAN, 0.0, 0.0],
-        ] {
-            let spec = CuJointSpec {
-                origin_translation: [Length64::new::<meter>(f64::NAN); 3],
-                origin_rpy: rpy.map(Angle64::new::<radian>),
-                ..Default::default()
-            };
-            let actual = spec.origin_transform().to_matrix();
-            let expected = Transform3D::<f64>::from_translation_euler_xyz(
-                spec.origin_translation,
-                spec.origin_rpy,
-            )
-            .to_matrix();
-            assert_same_matrix_bits(actual, expected);
-        }
-    }
 }

@@ -7,6 +7,10 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Skip Euler trigonometry when a joint origin has an exactly zero rotation.
+
 ## [0.8.0] - 2026-11-04
 
 ### Breaking

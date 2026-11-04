@@ -88,10 +88,12 @@ macro_rules! impl_planner_type_path {
 }
 
 mod astar;
+mod cartesian_task;
 mod common;
 mod direct;
 mod goal_task;
 mod optimizer;
+mod pose;
 mod prm;
 mod rrt_connect;
 mod stomp;
@@ -103,6 +105,10 @@ pub use astar::ASTAR_MAX_NODES;
 pub use astar::CuJointAStar;
 pub use astar::CuJointAStarParams;
 pub use astar::CuJointAStarTask;
+pub use cartesian_task::CuCartesianPlanParams;
+pub use cartesian_task::CuCartesianPlanResult;
+pub use cartesian_task::CuCartesianPlanTask;
+pub use cartesian_task::CuCartesianTrajectoryTask;
 pub use direct::CuJointDirect;
 pub use direct::CuJointDirectParams;
 pub use direct::CuJointDirectTask;
@@ -111,6 +117,13 @@ pub use goal_task::CuJointGoalTask;
 pub use optimizer::CuJointPathOptimizer;
 pub use optimizer::CuJointPathOptimizerParams;
 pub use optimizer::CuJointPathOptimizerTask;
+pub use pose::CuPoseGoalParams;
+pub use pose::CuPoseGoalTask;
+pub use pose::CuPoseIkParams;
+pub use pose::CuPosePlanRequest;
+pub use pose::CuPosePlannerParams;
+pub use pose::CuPosePlannerTask;
+pub use pose::CuTcpPose;
 pub use prm::CuJointPrm;
 pub use prm::CuJointPrmParams;
 pub use prm::CuJointPrmTask;
@@ -203,6 +216,8 @@ pub enum CuPlanStatus {
     InvalidGoal,
     /// A path exists but does not fit [`MAX_WAYPOINTS`].
     CapacityExceeded,
+    /// None of the bounded IK attempts reached the target pose.
+    NoIkSolution,
 }
 
 impl CuPlanStatus {
@@ -319,3 +334,6 @@ pub trait CuJointPlanner<const N: usize, const M: usize = N>: Sized + TypePath {
     /// Quality of the best path in `0.0..=1.0` (`0.0` without a path).
     fn quality(&self) -> Quality;
 }
+
+#[cfg(test)]
+mod pose_tests;

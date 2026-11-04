@@ -251,6 +251,11 @@ planners ignore it. New planners implement the trait, share
 `CuSceneValidity` for collision and clearance queries, and are registered in
 `repose::planners`.
 
+Pose goals and straight TCP moves are available through `CuPoseGoalTask`,
+`CuPosePlannerTask`, and `CuCartesianPlanTask`. Both planning paths carry scene
+revisions and use attached-object and exclusion checks. See
+[Pose planning](docs/pose-planning.md) for request types, failures, and RON wiring.
+
 ## Planning scene snapshots
 
 `CuPlanningScene<O, A>` stores fixed-capacity obstacle and attached-shape

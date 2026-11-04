@@ -60,8 +60,11 @@ semver-check baseline=`git describe --tags --abbrev=0 --match 'v*'`:
     release_type="${SEMVER_RELEASE_TYPE:-}"
     # A `### Breaking` section under Unreleased means the next release is a minor (pre-1.0).
     if [ -z "$release_type" ] && awk '/^## \[Unreleased\]/{u=1;next} /^## \[/{u=0} u && /^### Breaking/{f=1} END{exit !f}' CHANGELOG.md; then
-        release_type=minor
-        echo "semver-check: CHANGELOG has unreleased breaking changes; checking as a minor release"
+        # The checker's categories describe API compatibility, not the numeric
+        # component bumped for a pre-1.0 release. Documented breaking changes
+        # are a breaking API release (our next 0.x minor).
+        release_type=major
+        echo "semver-check: CHANGELOG declares breaking API changes for the next pre-1.0 minor"
     fi
     args=()
     for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name'); do

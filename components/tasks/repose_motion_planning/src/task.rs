@@ -105,7 +105,7 @@ impl<P, const N: usize, const M: usize> CuJointPlannerParams<P, N, M> {
         Ok(())
     }
 
-    fn resolve_models(
+    pub(crate) fn resolve_models(
         &self,
     ) -> CuResult<(
         repose_kinematics::CuKinematicChain<N>,
@@ -198,6 +198,26 @@ impl<P: CuJointPlanner<N, M>, const N: usize, const M: usize> CuJointPlannerTask
             params.refine_budget.unwrap_or(refine),
             base_seed,
         )
+    }
+
+    pub(crate) fn next_seed(&self) -> u64 {
+        self.base_seed
+            .wrapping_add(self.job_counter.wrapping_add(1))
+    }
+
+    pub(crate) fn begin_request(
+        &mut self,
+        request: &CuJointPlanRequest<N>,
+        output: &mut CuMsg<CuJointPlanPath<N>>,
+    ) -> CuResult<AnytimeStatus<Quality>> {
+        self.reset_published(output);
+        self.job_counter = self.job_counter.wrapping_add(1);
+        let seed = self.base_seed.wrapping_add(self.job_counter);
+        let status = self.planner.begin(request, seed)?;
+        if !status.is_final() {
+            self.planner.step(self.base_budget)?;
+        }
+        Ok(self.publish(output))
     }
 
     /// The wrapped planner.
@@ -313,13 +333,7 @@ where
             self.status = CuPlanStatus::default();
             return Ok(AnytimeStatus::Aborted);
         };
-        self.job_counter = self.job_counter.wrapping_add(1);
-        let seed = self.base_seed.wrapping_add(self.job_counter);
-        let status = self.planner.begin(request, seed)?;
-        if !status.is_final() {
-            self.planner.step(self.base_budget)?;
-        }
-        Ok(self.publish(output))
+        self.begin_request(request, output)
     }
 
     fn refine<'o>(

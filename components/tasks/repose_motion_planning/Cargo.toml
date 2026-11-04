@@ -17,6 +17,7 @@ domains = ["algorithm/planning", "algorithm/manipulation"]
 environments = ["host", "embedded"]
 
 [dependencies]
+cu-spatial-payloads = { workspace = true }
 bincode = { workspace = true }
 repose-collision = { version = "0.7.1", path = "../../libs/repose_collision", default-features = false }
 repose-kinematics = { version = "0.7.1", path = "../../libs/repose_kinematics", default-features = false }

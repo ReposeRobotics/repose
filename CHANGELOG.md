@@ -7,6 +7,17 @@ may be breaking.
 
 ## [Unreleased]
 
+### Breaking
+
+- Add `CuPlanStatus::NoIkSolution` for bounded pose-goal IK failure. Exhaustive
+  status matches must handle the new variant; existing joint planning requests
+  and paths keep their fields and existing enum discriminants.
+
+### Changed
+
+- Correct the SemVer recipe to use the checker's breaking API category for
+  documented pre-1.0 breaking changes, without changing crate versions.
+
 ### Added
 
 - README Benchmarks section: CodSpeed methodology and scenarios (igus ReBeL
@@ -14,7 +25,13 @@ may be breaking.
   trajectory), a local wall-clock median snapshot (Apple M4, rustc 1.99.0,
   2026-11-04), and a link to the live CodSpeed dashboard.
 
-### Added
+- Pose-goal planning through `CuPoseGoalTask` and `CuPosePlannerTask`, with
+  seeded bounded IK retries and any existing joint planner.
+- `CuCartesianPlanTask` accepts TCP poses and builds collision-checked straight
+  Cartesian moves with trajectory timing. Both planning paths use the request's
+  scene snapshot, attached shapes, exclusions, and scene revision. Cartesian
+  results preserve that metadata and expose explicit failure statuses;
+  `CuCartesianTrajectoryTask` connects successful results to the follower.
 
 - CodSpeed continuous benchmarking for `repose-kinematics` inverse kinematics:
   Divan benches (`benches/ik.rs`) for DLS IK, pseudoinverse IK, and

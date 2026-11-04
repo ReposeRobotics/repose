@@ -7,6 +7,13 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Reuse kinematics traversal in `CuKinematicChain::inverse_kinematics_dls` by
+  combining Jacobian and pose computation into a single pass on unconverged
+  iterations, while preserving the cheap forward kinematics check for
+  already-converged seeds.
+
 ## [0.8.1] - 2026-11-04
 
 ### Changed

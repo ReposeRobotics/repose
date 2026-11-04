@@ -451,20 +451,41 @@ impl<const N: usize> CuKinematicChain<N> {
             CuIkSolver::Pseudoinverse => 0.0,
         };
 
+        // Cheap already-converged check: avoid computing Jacobian if the seed already meets tolerances.
+        self.forward_kinematics(out_q, &mut current_pose)?;
+        let (mut err_vec, mut pos_err, mut ori_err) = pose_error_world(&current_pose, target);
+        if pos_err <= pos_tol && ori_err <= ori_tol {
+            return Ok(CuIkStatus::Converged {
+                iterations: 0,
+                position_error: Length64::new::<meter>(pos_err),
+                orientation_error: Angle64::new::<radian>(ori_err),
+            });
+        }
+
         let mut iter = 0;
         while iter < cfg.max_iterations {
-            self.forward_kinematics(out_q, &mut current_pose)?;
-            let (err_vec, pos_err, ori_err) = pose_error_world(&current_pose, target);
+            if iter == 0 {
+                // Seed was already verified unconverged using cheap forward_kinematics above;
+                // compute the Jacobian for this first step.
+                self.geometric_jacobian(out_q, &mut jac)?;
+            } else {
+                // Reuse kinematics traversal: compute both the Jacobian and current pose
+                // in a single pass instead of separate forward_kinematics and geometric_jacobian calls.
+                self.geometric_jacobian_and_pose(out_q, &mut jac, &mut current_pose)?;
+                let (new_err_vec, new_pos_err, new_ori_err) =
+                    pose_error_world(&current_pose, target);
+                err_vec = new_err_vec;
+                pos_err = new_pos_err;
+                ori_err = new_ori_err;
 
-            if pos_err <= pos_tol && ori_err <= ori_tol {
-                return Ok(CuIkStatus::Converged {
-                    iterations: iter,
-                    position_error: Length64::new::<meter>(pos_err),
-                    orientation_error: Angle64::new::<radian>(ori_err),
-                });
+                if pos_err <= pos_tol && ori_err <= ori_tol {
+                    return Ok(CuIkStatus::Converged {
+                        iterations: iter,
+                        position_error: Length64::new::<meter>(pos_err),
+                        orientation_error: Angle64::new::<radian>(ori_err),
+                    });
+                }
             }
-
-            self.geometric_jacobian(out_q, &mut jac)?;
 
             // Build 6x6 damped normal matrix A = J * J^T + lambda^2 * I
             let mut a = [[0.0_f64; 6]; 6];

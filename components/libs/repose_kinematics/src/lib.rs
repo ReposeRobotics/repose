@@ -50,6 +50,7 @@ mod tests {
     use crate::CuDiffIkStatus;
     use crate::CuIkParams;
     use crate::CuIkSolver;
+    use crate::CuIkStatus;
     use crate::CuInverseKinematicsTask;
     use crate::CuJointAxis;
     use crate::CuJointLimits;
@@ -497,5 +498,239 @@ mod tests {
         let m = ee.to_matrix();
         assert!(m[0][3].abs() < 1e-12);
         assert!((m[1][3] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ik_dls_already_converged_seed_preserves_zero_iterations() {
+        let chain = igus_rebel_chain();
+        let q_goal = [
+            Angle64::new::<radian>(0.25).into(),
+            Angle64::new::<radian>(-0.3).into(),
+            Angle64::new::<radian>(0.4).into(),
+            Angle64::new::<radian>(0.1).into(),
+            Angle64::new::<radian>(-0.2).into(),
+            Angle64::new::<radian>(0.35).into(),
+        ];
+        let mut target_pose = Transform3D::<f64>::identity();
+        chain.forward_kinematics(&q_goal, &mut target_pose).unwrap();
+
+        // 1. Default DLS solver with already-converged seed
+        let cfg = CuIkParams::default();
+        let mut q_sol = [CuJointPosition::default(); 6];
+        let status = chain
+            .inverse_kinematics_dls(&target_pose, &q_goal, &cfg, &mut q_sol)
+            .unwrap();
+        match status {
+            CuIkStatus::Converged { iterations, .. } => {
+                assert_eq!(
+                    iterations, 0,
+                    "Already-converged seed must return 0 iterations"
+                );
+            }
+            other => panic!("Expected Converged status, got {other:?}"),
+        }
+        for (sol, exp) in q_sol.iter().zip(q_goal.iter()) {
+            assert!((sol.si_value() - exp.si_value()).abs() < 1e-12);
+        }
+
+        // 2. Pseudoinverse solver with already-converged seed
+        let cfg_pinv = CuIkParams {
+            solver: CuIkSolver::Pseudoinverse,
+            ..CuIkParams::default()
+        };
+        let status_pinv = chain
+            .inverse_kinematics_dls(&target_pose, &q_goal, &cfg_pinv, &mut q_sol)
+            .unwrap();
+        match status_pinv {
+            CuIkStatus::Converged { iterations, .. } => {
+                assert_eq!(
+                    iterations, 0,
+                    "Pseudoinverse with already-converged seed must return 0 iterations"
+                );
+            }
+            other => panic!("Expected Converged status, got {other:?}"),
+        }
+
+        // 3. max_iterations = 0: an already-converged seed still succeeds with 0 iterations
+        let cfg_zero_iter = CuIkParams {
+            max_iterations: 0,
+            ..CuIkParams::default()
+        };
+        let status_zero = chain
+            .inverse_kinematics_dls(&target_pose, &q_goal, &cfg_zero_iter, &mut q_sol)
+            .unwrap();
+        match status_zero {
+            CuIkStatus::Converged { iterations, .. } => {
+                assert_eq!(iterations, 0);
+            }
+            other => panic!("Expected Converged status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_forward_kinematics_and_geometric_jacobian_pose_equivalence() {
+        let chain = igus_rebel_chain();
+        let test_configs = [
+            // Home / zero pose
+            [Angle64::new::<radian>(0.0).into(); 6],
+            // Negative angles and signed zeros
+            [
+                Angle64::new::<radian>(-0.0).into(),
+                Angle64::new::<radian>(-0.45).into(),
+                Angle64::new::<radian>(0.35).into(),
+                Angle64::new::<radian>(-0.25).into(),
+                Angle64::new::<radian>(0.5).into(),
+                Angle64::new::<radian>(-0.15).into(),
+            ],
+            // Asymmetric mixed configuration
+            [
+                Angle64::new::<radian>(0.7).into(),
+                Angle64::new::<radian>(-0.8).into(),
+                Angle64::new::<radian>(1.2).into(),
+                Angle64::new::<radian>(-0.5).into(),
+                Angle64::new::<radian>(0.9).into(),
+                Angle64::new::<radian>(-1.1).into(),
+            ],
+        ];
+
+        for q in &test_configs {
+            let mut pose_fk = Transform3D::<f64>::identity();
+            chain.forward_kinematics(q, &mut pose_fk).unwrap();
+
+            let mut jac = [[0.0_f64; 6]; 6];
+            let mut pose_jac = Transform3D::<f64>::identity();
+            chain
+                .geometric_jacobian_and_pose(q, &mut jac, &mut pose_jac)
+                .unwrap();
+
+            let m_fk = pose_fk.to_matrix();
+            let m_jac = pose_jac.to_matrix();
+
+            for r in 0..4 {
+                for c in 0..4 {
+                    // Because FK groups as acc * (origin * motion) and Jacobian groups as
+                    // (acc * origin) * motion, floating-point associativity differences are
+                    // bounded by machine precision (< 1e-14).
+                    let diff = (m_fk[r][c] - m_jac[r][c]).abs();
+                    assert!(
+                        diff < 1e-14,
+                        "Mismatch at [{r}][{c}]: FK={}, JacPose={}, diff={diff}",
+                        m_fk[r][c],
+                        m_jac[r][c]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ik_dls_mixed_revolute_prismatic_fixed_chain() {
+        let chain = CuKinematicChain::new([
+            CuJointSpec::revolute(
+                m3([0.0, 0.0, 0.1]),
+                rad3([0.0, 0.0, 0.0]),
+                CuJointAxis::PosZ,
+                rad_limits(-core::f64::consts::PI, core::f64::consts::PI, 1.0),
+            ),
+            CuJointSpec {
+                joint_type: crate::CuJointType::Fixed,
+                origin_translation: m3([0.2, 0.0, 0.0]),
+                ..Default::default()
+            },
+            CuJointSpec::prismatic(
+                m3([0.0, 0.0, 0.0]),
+                rad3([0.0, 0.0, 0.0]),
+                CuJointAxis::PosZ,
+                CuJointLimits::prismatic(
+                    Length::new::<meter>(0.0),
+                    Length::new::<meter>(0.5),
+                    Velocity::new::<meter_per_second>(0.2),
+                ),
+            ),
+        ]);
+
+        let q_goal = [
+            Angle64::new::<radian>(0.5).into(),
+            CuJointPosition::Fixed,
+            Length::new::<meter>(0.3).into(),
+        ];
+        let mut target_pose = Transform3D::<f64>::identity();
+        chain.forward_kinematics(&q_goal, &mut target_pose).unwrap();
+
+        let q_seed = [
+            Angle64::new::<radian>(0.1).into(),
+            CuJointPosition::Fixed,
+            Length::new::<meter>(0.1).into(),
+        ];
+
+        let cfg = CuIkParams::default();
+        let mut q_sol = [CuJointPosition::default(); 3];
+        let status = chain
+            .inverse_kinematics_dls(&target_pose, &q_seed, &cfg, &mut q_sol)
+            .unwrap();
+
+        assert!(
+            status.is_converged(),
+            "IK on mixed chain must converge: {status:?}"
+        );
+        assert!(chain.is_within_limits(&q_sol));
+        assert!(matches!(q_sol[1], CuJointPosition::Fixed));
+
+        let mut solved_pose = Transform3D::<f64>::identity();
+        chain.forward_kinematics(&q_sol, &mut solved_pose).unwrap();
+        let m_tgt = target_pose.to_matrix();
+        let m_sol = solved_pose.to_matrix();
+        for r in 0..3 {
+            assert!((m_tgt[r][3] - m_sol[r][3]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_ik_dls_near_singular_and_negative_coordinates() {
+        let chain = igus_rebel_chain();
+        // Near-wrist-singularity configuration: joint 4 is very close to 0 rad
+        let q_goal = [
+            Angle64::new::<radian>(-0.4).into(),
+            Angle64::new::<radian>(0.3).into(),
+            Angle64::new::<radian>(-0.5).into(),
+            Angle64::new::<radian>(0.2).into(),
+            Angle64::new::<radian>(0.005).into(), // near wrist singularity
+            Angle64::new::<radian>(-0.3).into(),
+        ];
+        let mut target_pose = Transform3D::<f64>::identity();
+        chain.forward_kinematics(&q_goal, &mut target_pose).unwrap();
+
+        let q_seed = [
+            Angle64::new::<radian>(-0.2).into(),
+            Angle64::new::<radian>(0.1).into(),
+            Angle64::new::<radian>(-0.2).into(),
+            Angle64::new::<radian>(0.0).into(),
+            Angle64::new::<radian>(0.05).into(),
+            Angle64::new::<radian>(-0.1).into(),
+        ];
+
+        let cfg = CuIkParams {
+            max_iterations: 100,
+            damping: 0.05,
+            ..CuIkParams::default()
+        };
+        let mut q_sol = [CuJointPosition::default(); 6];
+        let status = chain
+            .inverse_kinematics_dls(&target_pose, &q_seed, &cfg, &mut q_sol)
+            .unwrap();
+
+        assert!(
+            status.is_converged(),
+            "Near-singular IK must converge with DLS damping: {status:?}"
+        );
+        assert!(chain.is_within_limits(&q_sol));
+
+        let mut solved_pose = Transform3D::<f64>::identity();
+        chain.forward_kinematics(&q_sol, &mut solved_pose).unwrap();
+        let m_tgt = target_pose.to_matrix();
+        let m_sol = solved_pose.to_matrix();
+        for r in 0..3 {
+            assert!((m_tgt[r][3] - m_sol[r][3]).abs() < 1e-3);
+        }
     }
 }

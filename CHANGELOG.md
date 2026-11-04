@@ -7,6 +7,23 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- Additive kinematics/collision API to reuse fixed joint origins across many
+  configurations: `CuKinematicChain::snapshot_origins`,
+  `CuKinematicChain::forward_frames_with_origins`, and
+  `CuRobotCollisionModel::is_configuration_collision_free_with_origins`.
+  Existing signatures and behavior are unchanged.
+
+### Changed
+
+- Hoist fixed joint-origin transforms out of repeated collision segment
+  sampling: `CuRobotCollisionModel::is_segment_collision_free` and the planner
+  validity segment loop snapshot origins once per segment instead of
+  recomputing them (including Euler trigonometry) per sample. Results are
+  bit-identical; no API, payload encoding, RON config, or replay behavior
+  changed.
+
 ## [0.8.2] - 2026-11-04
 
 ### Changed

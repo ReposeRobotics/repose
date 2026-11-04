@@ -8,6 +8,7 @@
 use crate::MAX_ATTACHED_SHAPES;
 use crate::MAX_EXCLUSIONS;
 use crate::MAX_OBSTACLES;
+use cu_spatial_payloads::Transform3D;
 use cu29::units::si::length::meter;
 use repose_collision::CuCollisionEnv;
 use repose_collision::CuCollisionReport;
@@ -112,6 +113,20 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
                 .unwrap_or(false)
     }
 
+    /// [`is_configuration_free`](Self::is_configuration_free) reusing `origins`
+    /// previously written by [`CuKinematicChain::snapshot_origins`] for this checker's chain.
+    fn is_configuration_free_with_origins(
+        &self,
+        q: &[CuJointPosition; N],
+        origins: &[Transform3D<f64>; N],
+    ) -> bool {
+        self.captured
+            && self
+                .model
+                .is_configuration_collision_free_with_origins(&self.chain, q, origins, &self.env())
+                .unwrap_or(false)
+    }
+
     /// `true` when the joint-space line from `a` to `b` is free at the
     /// configured resolution (discrete sampling, not swept volumes).
     pub fn is_segment_free(&self, a: &[CuJointPosition; N], b: &[CuJointPosition; N]) -> bool {
@@ -131,6 +146,8 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
             return false;
         }
         let steps = (libm::ceil(max_delta) as usize).max(1);
+        let mut origins = [Transform3D::<f64>::identity(); N];
+        self.chain.snapshot_origins(&mut origins);
         for s in 0..=steps {
             let alpha = s as f64 / steps as f64;
             let mut q = [CuJointPosition::default(); N];
@@ -140,7 +157,7 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
                     Err(_) => return false,
                 }
             }
-            if !self.is_configuration_free(&q) {
+            if !self.is_configuration_free_with_origins(&q, &origins) {
                 return false;
             }
         }

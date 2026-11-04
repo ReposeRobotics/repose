@@ -101,6 +101,7 @@ mod tests {
     use crate::shapes::capsule_m;
     use crate::shapes::sphere_m;
     use crate::sphere_sphere_signed_distance;
+    use cu_spatial_payloads::Transform3D;
     use cu29::prelude::*;
     use cu29::units::si::angle::radian;
     use cu29::units::si::f64::Angle as Angle64;
@@ -302,6 +303,102 @@ mod tests {
                     &q_end,
                     Angle64::new::<radian>(0.05),
                     &env,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn precomputed_origins_match_direct_collision_reports_bits() {
+        let chain = igus_rebel_chain();
+        let model = igus_rebel_collision_model();
+        let q_home = [Angle64::new::<radian>(0.0).into(); 6];
+        let q_mid = [
+            Angle64::new::<radian>(0.8).into(),
+            Angle64::new::<radian>(0.5).into(),
+            Angle64::new::<radian>(-0.4).into(),
+            Angle64::new::<radian>(0.0).into(),
+            Angle64::new::<radian>(0.0).into(),
+            Angle64::new::<radian>(0.0).into(),
+        ];
+        let q_folded = [
+            Angle64::new::<radian>(0.0).into(),
+            Angle64::new::<radian>(1.25).into(),
+            Angle64::new::<radian>(2.35).into(),
+            Angle64::new::<radian>(0.0).into(),
+            Angle64::new::<radian>(1.4).into(),
+            Angle64::new::<radian>(0.0).into(),
+        ];
+        // Obstacle sphere right on the end-effector at q_home (z ≈ 0.87 m).
+        let obstacles = [sphere([0.0, 0.0, 0.87], 0.08)];
+        let scene_env = CuCollisionEnv::new(&obstacles);
+        let envs = [&CuCollisionEnv::EMPTY, &scene_env];
+
+        for q in [&q_home, &q_mid, &q_folded] {
+            let mut origins = [Transform3D::<f64>::identity(); 6];
+            chain.snapshot_origins(&mut origins);
+            for env in envs {
+                let mut frames = [Transform3D::<f64>::identity(); 6];
+                let mut ee = Transform3D::<f64>::identity();
+                chain.forward_frames(q, &mut frames, &mut ee).unwrap();
+                let mut pre_frames = [Transform3D::<f64>::identity(); 6];
+                let mut pre_ee = Transform3D::<f64>::identity();
+                chain
+                    .forward_frames_with_origins(q, &origins, &mut pre_frames, &mut pre_ee)
+                    .unwrap();
+                let mut direct = CuCollisionReport::<16>::default();
+                let mut precomputed = CuCollisionReport::<16>::default();
+                model.check_frames(&frames, env, &mut direct).unwrap();
+                model
+                    .check_frames(&pre_frames, env, &mut precomputed)
+                    .unwrap();
+                assert_eq!(direct.total_contacts(), precomputed.total_contacts());
+                assert_eq!(
+                    direct.min_signed_distance().get::<meter>().to_bits(),
+                    precomputed.min_signed_distance().get::<meter>().to_bits()
+                );
+                let (a, b) = (direct.as_slice(), precomputed.as_slice());
+                assert_eq!(a.len(), b.len());
+                for (x, y) in a.iter().zip(b.iter()) {
+                    assert_eq!(x.kind, y.kind);
+                    assert_eq!(x.link_index, y.link_index);
+                    assert_eq!(x.partner_index, y.partner_index);
+                    assert_eq!(
+                        x.signed_distance.get::<meter>().to_bits(),
+                        y.signed_distance.get::<meter>().to_bits()
+                    );
+                }
+                assert_eq!(
+                    model
+                        .is_configuration_collision_free(&chain, q, env)
+                        .unwrap(),
+                    model
+                        .is_configuration_collision_free_with_origins(&chain, q, &origins, env)
+                        .unwrap()
+                );
+            }
+        }
+
+        // The hoisted segment loop still reports the known free and blocked outcomes.
+        assert!(
+            model
+                .is_segment_collision_free(
+                    &chain,
+                    &q_home,
+                    &q_mid,
+                    Angle64::new::<radian>(0.05),
+                    &CuCollisionEnv::EMPTY,
+                )
+                .unwrap()
+        );
+        assert!(
+            !model
+                .is_segment_collision_free(
+                    &chain,
+                    &q_home,
+                    &q_folded,
+                    Angle64::new::<radian>(0.05),
+                    &CuCollisionEnv::EMPTY,
                 )
                 .unwrap()
         );

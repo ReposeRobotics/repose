@@ -335,10 +335,50 @@ impl<const N: usize> CuKinematicChain<N> {
         Ok(())
     }
 
+    /// Snapshots the fixed parent-to-joint origin transform of every joint in place.
+    ///
+    /// Entry `i` is exactly `self.joints()[i].origin_transform()`: the static URDF origin
+    /// (`xyz`, `rpy`) part of each per-joint step, which never varies with the joint
+    /// configuration `q`. Snapshot once before a loop over many configurations and pass the
+    /// buffer to [`forward_frames_with_origins`](Self::forward_frames_with_origins) to avoid
+    /// recomputing the origins (including their Euler trigonometry) per sample.
+    pub fn snapshot_origins(&self, out_origins: &mut [Transform3D<f64>; N]) {
+        let mut i = 0;
+        while i < N {
+            out_origins[i] = self.joints[i].origin_transform();
+            i += 1;
+        }
+    }
+
     /// Computes every intermediate link frame (`0..N`) and the final end-effector frame in place.
     pub fn forward_frames(
         &self,
         q: &[CuJointPosition; N],
+        out_frames: &mut [Transform3D<f64>; N],
+        out_ee: &mut Transform3D<f64>,
+    ) -> CuResult<()> {
+        let mut origins = [Transform3D::<f64>::identity(); N];
+        self.snapshot_origins(&mut origins);
+        self.forward_frames_with_origins(q, &origins, out_frames, out_ee)
+    }
+
+    /// Computes every intermediate link frame (`0..N`) and the final end-effector frame in place,
+    /// reusing precomputed joint origins.
+    ///
+    /// This is [`forward_frames`](Self::forward_frames) with the fixed origin part hoisted out:
+    /// `origins[i]` takes the place of `self.joints()[i].origin_transform()`. When the
+    /// precondition holds, results are bit-identical to [`forward_frames`](Self::forward_frames).
+    ///
+    /// # Precondition
+    ///
+    /// `origins` must hold this chain's joint origins, with entry `i` equal to
+    /// `self.joints()[i].origin_transform()` (as written by
+    /// [`snapshot_origins`](Self::snapshot_origins)). Origins from another chain silently
+    /// produce wrong frames.
+    pub fn forward_frames_with_origins(
+        &self,
+        q: &[CuJointPosition; N],
+        origins: &[Transform3D<f64>; N],
         out_frames: &mut [Transform3D<f64>; N],
         out_ee: &mut Transform3D<f64>,
     ) -> CuResult<()> {
@@ -348,9 +388,7 @@ impl<const N: usize> CuKinematicChain<N> {
             if !q[i].si_value().is_finite() {
                 return Err(CuError::from("repose_kinematics: non-finite joint angle"));
             }
-            let step = self.joints[i]
-                .origin_transform()
-                .compose(self.joints[i].motion_transform(q[i])?);
+            let step = origins[i].compose(self.joints[i].motion_transform(q[i])?);
             acc = acc.compose(step);
             out_frames[i] = acc;
             i += 1;
@@ -533,11 +571,21 @@ fn axis_angle_transform(axis: [f64; 3], angle_rad: f64) -> Transform3D<f64> {
 #[cfg(test)]
 mod tests {
     use super::CuJointSpec;
+    use super::CuKinematicChain;
     use super::Transform3D;
+    use crate::CuJointAxis;
+    use crate::CuJointLimits;
+    use crate::CuJointPosition;
+    use crate::CuJointType;
+    use crate::igus_rebel_chain;
     use cu29::units::si::angle::radian;
+    use cu29::units::si::angular_velocity::radian_per_second;
     use cu29::units::si::f64::Angle as Angle64;
+    use cu29::units::si::f64::AngularVelocity;
     use cu29::units::si::f64::Length as Length64;
+    use cu29::units::si::f64::Velocity;
     use cu29::units::si::length::meter;
+    use cu29::units::si::velocity::meter_per_second;
 
     /// Checks floating-point representation, including zero signs and NaNs.
     fn assert_same_matrix_bits(left: [[f64; 4]; 4], right: [[f64; 4]; 4]) {
@@ -592,6 +640,155 @@ mod tests {
         )
         .to_matrix();
         assert_same_matrix_bits(actual, expected);
+    }
+
+    /// Reference implementation of the pre-hoist per-sample loop: origin plus motion
+    /// recomputed for every joint. Serves as the bitwise oracle for both FK paths.
+    fn direct_forward_frames<const N: usize>(
+        chain: &CuKinematicChain<N>,
+        q: &[CuJointPosition; N],
+        out_frames: &mut [Transform3D<f64>; N],
+        out_ee: &mut Transform3D<f64>,
+    ) {
+        let mut acc = Transform3D::<f64>::identity();
+        let mut i = 0;
+        while i < N {
+            let step = chain.joints()[i]
+                .origin_transform()
+                .compose(chain.joints()[i].motion_transform(q[i]).unwrap());
+            acc = acc.compose(step);
+            out_frames[i] = acc;
+            i += 1;
+        }
+        *out_ee = acc.compose(*chain.tool_offset());
+    }
+
+    /// Both `forward_frames` and the precomputed-origin path must reproduce the
+    /// direct per-joint computation bit-for-bit on every configuration.
+    fn assert_frames_match_direct<const N: usize>(
+        chain: &CuKinematicChain<N>,
+        configs: &[[CuJointPosition; N]],
+    ) {
+        for q in configs {
+            let mut origins = [Transform3D::<f64>::identity(); N];
+            chain.snapshot_origins(&mut origins);
+            for (i, origin) in origins.iter().enumerate() {
+                assert_same_matrix_bits(
+                    origin.to_matrix(),
+                    chain.joints()[i].origin_transform().to_matrix(),
+                );
+            }
+
+            let mut expected_frames = [Transform3D::<f64>::identity(); N];
+            let mut expected_ee = Transform3D::<f64>::identity();
+            direct_forward_frames(chain, q, &mut expected_frames, &mut expected_ee);
+
+            let mut frames = [Transform3D::<f64>::identity(); N];
+            let mut ee = Transform3D::<f64>::identity();
+            chain.forward_frames(q, &mut frames, &mut ee).unwrap();
+
+            let mut pre_frames = [Transform3D::<f64>::identity(); N];
+            let mut pre_ee = Transform3D::<f64>::identity();
+            chain
+                .forward_frames_with_origins(q, &origins, &mut pre_frames, &mut pre_ee)
+                .unwrap();
+
+            for i in 0..N {
+                assert_same_matrix_bits(frames[i].to_matrix(), expected_frames[i].to_matrix());
+                assert_same_matrix_bits(pre_frames[i].to_matrix(), expected_frames[i].to_matrix());
+            }
+            assert_same_matrix_bits(ee.to_matrix(), expected_ee.to_matrix());
+            assert_same_matrix_bits(pre_ee.to_matrix(), expected_ee.to_matrix());
+        }
+    }
+
+    /// The igus ReBeL chain mixes a nonzero-RPY origin (joint 0, yaw pi) with zero-RPY
+    /// origins; joint motion must not disturb the snapshot.
+    #[test]
+    fn precomputed_origins_match_direct_frames_on_rebel() {
+        let chain = igus_rebel_chain();
+        let q = |v: [f64; 6]| v.map(|a| CuJointPosition::Revolute(Angle64::new::<radian>(a)));
+        assert_frames_match_direct(
+            &chain,
+            &[
+                q([0.0; 6]),
+                q([0.25, -0.4, 0.55, -0.3, 0.45, 0.15]),
+                q([-3.0, 2.4, -1.3, 3.0, -1.6, 3.0]),
+            ],
+        );
+    }
+
+    /// A mixed revolute/prismatic/fixed chain with nonzero RPY on every origin and a
+    /// non-identity tool offset exercises every motion branch under the snapshot.
+    #[test]
+    fn precomputed_origins_match_direct_frames_on_mixed_chain() {
+        let m = Length64::new::<meter>;
+        let rad = Angle64::new::<radian>;
+        let chain = CuKinematicChain::new([
+            CuJointSpec::revolute(
+                [m(0.1), m(-0.2), m(0.3)],
+                [rad(0.3), rad(-0.5), rad(1.2)],
+                CuJointAxis::NegY,
+                CuJointLimits::revolute(
+                    rad(-3.0),
+                    rad(3.0),
+                    AngularVelocity::new::<radian_per_second>(2.0),
+                ),
+            ),
+            CuJointSpec::prismatic(
+                [m(0.0), m(0.05), m(-0.15)],
+                [rad(-1.1), rad(0.4), rad(2.6)],
+                CuJointAxis::Arbitrary([1.0, 2.0, 3.0]),
+                CuJointLimits::prismatic(m(-0.5), m(0.5), Velocity::new::<meter_per_second>(0.2)),
+            ),
+            CuJointSpec {
+                joint_type: CuJointType::Fixed,
+                origin_translation: [m(0.02), m(0.0), m(0.07)],
+                origin_rpy: [rad(0.9), rad(0.0), rad(-0.7)],
+                ..Default::default()
+            },
+        ])
+        .with_tool_offset(Transform3D::<f64>::from_translation_euler_xyz(
+            [m(0.01), m(-0.03), m(0.05)],
+            [rad(0.2), rad(-0.4), rad(0.6)],
+        ));
+        assert_frames_match_direct(
+            &chain,
+            &[
+                [
+                    CuJointPosition::Revolute(rad(0.0)),
+                    CuJointPosition::Prismatic(m(0.0)),
+                    CuJointPosition::Fixed,
+                ],
+                [
+                    CuJointPosition::Revolute(rad(1.25)),
+                    CuJointPosition::Prismatic(m(-0.35)),
+                    CuJointPosition::Fixed,
+                ],
+                [
+                    CuJointPosition::Revolute(rad(-2.5)),
+                    CuJointPosition::Prismatic(m(0.45)),
+                    CuJointPosition::Fixed,
+                ],
+            ],
+        );
+    }
+
+    /// Both FK paths reject non-finite joint values identically.
+    #[test]
+    fn precomputed_origins_preserve_fk_errors() {
+        let chain = igus_rebel_chain();
+        let bad = [CuJointPosition::Revolute(Angle64::new::<radian>(f64::NAN)); 6];
+        let mut origins = [Transform3D::<f64>::identity(); 6];
+        chain.snapshot_origins(&mut origins);
+        let mut frames = [Transform3D::<f64>::identity(); 6];
+        let mut ee = Transform3D::<f64>::identity();
+        assert!(chain.forward_frames(&bad, &mut frames, &mut ee).is_err());
+        assert!(
+            chain
+                .forward_frames_with_origins(&bad, &origins, &mut frames, &mut ee)
+                .is_err()
+        );
     }
 
     /// All other rotations must still use the unchanged constructor path.

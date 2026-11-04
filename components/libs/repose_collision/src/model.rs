@@ -362,13 +362,38 @@ impl<const N: usize, const M: usize> CuRobotCollisionModel<N, M> {
         q: &[CuJointPosition; N],
         env: &CuCollisionEnv<'_>,
     ) -> CuResult<bool> {
+        let mut origins = [Transform3D::<f64>::identity(); N];
+        chain.snapshot_origins(&mut origins);
+        self.is_configuration_collision_free_with_origins(chain, q, &origins, env)
+    }
+
+    /// [`is_configuration_collision_free`](Self::is_configuration_collision_free) reusing
+    /// precomputed joint origins from [`CuKinematicChain::snapshot_origins`].
+    ///
+    /// Snapshot once before a loop over many configurations (see
+    /// [`is_segment_collision_free`](Self::is_segment_collision_free)) to avoid recomputing
+    /// the fixed origins per sample. When the precondition holds, results are bit-identical
+    /// to [`is_configuration_collision_free`](Self::is_configuration_collision_free).
+    ///
+    /// # Precondition
+    ///
+    /// `origins` must hold `chain`'s joint origins, with entry `i` equal to
+    /// `chain.joints()[i].origin_transform()`. Origins from another chain silently produce
+    /// wrong collision answers.
+    pub fn is_configuration_collision_free_with_origins(
+        &self,
+        chain: &CuKinematicChain<N>,
+        q: &[CuJointPosition; N],
+        origins: &[Transform3D<f64>; N],
+        env: &CuCollisionEnv<'_>,
+    ) -> CuResult<bool> {
         self.validate_env(env)?;
         if !chain.is_within_limits(q) {
             return Ok(false);
         }
         let mut frames = [Transform3D::<f64>::identity(); N];
         let mut ee = Transform3D::<f64>::identity();
-        chain.forward_frames(q, &mut frames, &mut ee)?;
+        chain.forward_frames_with_origins(q, origins, &mut frames, &mut ee)?;
         let margin_m = self.safety_margin.get::<meter>();
         let mut free = true;
         self.visit_pairs(&frames, env, |contact| {
@@ -403,13 +428,17 @@ impl<const N: usize, const M: usize> CuRobotCollisionModel<N, M> {
             return Err(CuError::from("Collision segment requires too many samples"));
         }
         let steps = (libm::ceil(max_delta) as usize).max(1);
+        let mut origins = [Transform3D::<f64>::identity(); N];
+        chain.snapshot_origins(&mut origins);
         for s in 0..=steps {
             let alpha = (s as f64) / (steps as f64);
             let mut q_interp = [CuJointPosition::default(); N];
             for k in 0..N {
                 q_interp[k] = q_start[k].interpolate(q_end[k], alpha)?;
             }
-            if !self.is_configuration_collision_free(chain, &q_interp, env)? {
+            if !self
+                .is_configuration_collision_free_with_origins(chain, &q_interp, &origins, env)?
+            {
                 return Ok(false);
             }
         }

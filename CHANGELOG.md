@@ -7,6 +7,13 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-04
+
+### Changed
+
+- Skip Euler trigonometry when a joint origin has an exactly zero rotation,
+  preserving the constructor's matrix bits, including signed zeros.
+
 ## [0.8.0] - 2026-11-04
 
 ### Breaking
@@ -124,7 +131,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/ReposeRobotics/repose/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ReposeRobotics/repose/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ReposeRobotics/repose/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ReposeRobotics/repose/compare/v0.6.0...v0.7.0

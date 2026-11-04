@@ -7,6 +7,8 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-04
+
 ### Changed
 
 - Reuse kinematics traversal in `CuKinematicChain::inverse_kinematics_dls` by
@@ -138,7 +140,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/ReposeRobotics/repose/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/ReposeRobotics/repose/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ReposeRobotics/repose/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ReposeRobotics/repose/compare/v0.7.0...v0.7.1

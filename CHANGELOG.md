@@ -7,6 +7,12 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- Manual `Benchmarks (wall-clock)` GitHub Actions workflow running
+  `cargo bench -p repose` on Linux, macOS, and Windows (x64 and ARM64)
+  GitHub-hosted runners, uploading per-system results as artifacts.
+
 ### Changed
 
 - Skip redundant endpoint collision checks in joint-space segment evaluation

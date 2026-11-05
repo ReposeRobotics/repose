@@ -1,0 +1,72 @@
+name: Benchmarks (wall-clock)
+
+# Manual only: wall-clock numbers on shared runners are noisy, so this is
+# for cross-machine comparison, not per-PR regression detection (that is
+# the CodSpeed simulation workflow). Public repo: GitHub-hosted standard
+# runners are free and unlimited.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-latest
+          - label: linux-arm64
+            os: ubuntu-24.04-arm
+          - label: macos-arm64
+            os: macos-latest
+          - label: macos-x64
+            os: macos-15-intel
+          - label: windows-x64
+            os: windows-latest
+          - label: windows-arm64
+            os: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System info
+        shell: bash
+        run: |
+          {
+            echo "label: ${{ matrix.label }}"
+            echo "os: ${{ matrix.os }}"
+            uname -a || true
+            rustc -vV
+            cargo --version
+          } | tee system-info.txt
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo bench -p repose 2>&1 | tee bench-${{ matrix.label }}.txt
+      - name: Summarize
+        shell: bash
+        run: |
+          {
+            echo "## Benchmarks · ${{ matrix.label }} (\`${{ matrix.os }}\`)"
+            echo ""
+            echo '```text'
+            cat system-info.txt
+            echo '```'
+            echo ""
+            echo '```text'
+            cat bench-${{ matrix.label }}.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.label }}
+          path: |
+            system-info.txt
+            bench-${{ matrix.label }}.txt
+          retention-days: 14

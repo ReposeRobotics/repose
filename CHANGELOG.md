@@ -7,6 +7,12 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Share a single `J·Jᵀ` build between the manipulability index and the damped
+  solve in `CuKinematicChain::differential_ik`. Bit-exact: identical summation
+  order, `det_6x6` on a copy, damping added to the diagonal afterwards.
+
 ## [0.8.2] - 2026-11-04
 
 ### Changed

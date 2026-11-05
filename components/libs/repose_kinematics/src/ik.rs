@@ -304,18 +304,9 @@ impl<const N: usize> CuKinematicChain<N> {
             CuTwistFrame::Body => self.body_jacobian(q, &mut jac)?,
         }
 
-        let w_sq = manipulability_sq_from_jacobian(&jac);
-        let (lambda_sq, singularity_damped, effective_damping) =
-            if cfg.singularity_threshold_sq > 0.0 && w_sq < cfg.singularity_threshold_sq {
-                let ratio = 1.0 - (w_sq / cfg.singularity_threshold_sq);
-                let l_sq = cfg.base_damping * cfg.base_damping
-                    + cfg.max_singularity_damping * cfg.max_singularity_damping * ratio * ratio;
-                (l_sq, true, libm::sqrt(l_sq))
-            } else {
-                (cfg.base_damping * cfg.base_damping, false, cfg.base_damping)
-            };
-
-        // Build 6x6 damped normal matrix A = J * J^T + lambda_eff^2 * I
+        // Build J * J^T once and share it between the manipulability index and the
+        // damped normal matrix. det_6x6 mutates its input, so it runs on a copy;
+        // lambda_sq is added to the diagonal of the original afterwards.
         let mut a = [[0.0_f64; 6]; 6];
         let mut r = 0;
         while r < 6 {
@@ -330,8 +321,30 @@ impl<const N: usize> CuKinematicChain<N> {
                 a[r][c] = sum;
                 c += 1;
             }
-            a[r][r] += lambda_sq;
             r += 1;
+        }
+
+        let w_sq = if N < 6 {
+            0.0
+        } else {
+            let mut for_det = a;
+            det_6x6(&mut for_det).max(0.0)
+        };
+        let (lambda_sq, singularity_damped, effective_damping) =
+            if cfg.singularity_threshold_sq > 0.0 && w_sq < cfg.singularity_threshold_sq {
+                let ratio = 1.0 - (w_sq / cfg.singularity_threshold_sq);
+                let l_sq = cfg.base_damping * cfg.base_damping
+                    + cfg.max_singularity_damping * cfg.max_singularity_damping * ratio * ratio;
+                (l_sq, true, libm::sqrt(l_sq))
+            } else {
+                (cfg.base_damping * cfg.base_damping, false, cfg.base_damping)
+            };
+
+        // Damp the shared normal matrix: A = J * J^T + lambda_eff^2 * I
+        let mut d = 0;
+        while d < 6 {
+            a[d][d] += lambda_sq;
+            d += 1;
         }
 
         let y = solve_6x6(&mut a, &v_raw)?;

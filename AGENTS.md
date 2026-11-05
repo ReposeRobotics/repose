@@ -77,6 +77,15 @@ Background: `CONTRIBUTING.md` and `docs/versioning.md`.
 `just release <patch|minor> --execute`; after the merge, `just tag` on a clean,
 up-to-date `master` tags it.
 
+**Release cadence:** Prefer grouped patch releases over releasing every merged
+PR. Small behavior-preserving fixes, proven performance improvements, tests,
+and compatible additions accumulate under `Unreleased` and ship together as a
+patch release once the bundle has enough user value—or sooner for an important
+fix. Do not bump the version merely because another focused PR merged. Reserve
+minor releases for a substantial, coherent theme, such as a meaningful new
+capability, broad verified improvement, public API expansion, or an intentional
+breaking change documented under `### Breaking`.
+
 ## Roadmap
 
 1. `components/libs/repose_kinematics` (`repose-kinematics`): Serial chain kinematics (`CuKinematicChain<N>`), Forward Kinematics, Geometric Jacobians, Damped Least-Squares Inverse Kinematics, `CuForwardKinematicsTask<N>`, and 6-DOF igus ReBeL preset.

@@ -186,7 +186,7 @@ impl<const N: usize, const M: usize> CuJointPathOptimizer<N, M> {
         (1..self.count - 1).all(|i| self.validity.is_configuration_free(&self.path[i]))
             && (0..self.count - 1).all(|i| {
                 self.validity
-                    .is_segment_free(&self.path[i], &self.path[i + 1])
+                    .is_segment_interior_free(&self.path[i], &self.path[i + 1])
             })
     }
 

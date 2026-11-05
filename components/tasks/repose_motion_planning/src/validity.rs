@@ -114,6 +114,10 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
 
     /// `true` when the joint-space line from `a` to `b` is free at the
     /// configured resolution (discrete sampling, not swept volumes).
+    ///
+    /// Samples both endpoints (`s = 0` and `s = steps`); use
+    /// [`Self::is_segment_interior_free`] instead when the caller has
+    /// already proven both endpoints free.
     pub fn is_segment_free(&self, a: &[CuJointPosition; N], b: &[CuJointPosition; N]) -> bool {
         let metric = self.resolution.metric();
         let mut max_delta = 0.0_f64;
@@ -132,6 +136,51 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
         }
         let steps = (libm::ceil(max_delta) as usize).max(1);
         for s in 0..=steps {
+            let alpha = s as f64 / steps as f64;
+            let mut q = [CuJointPosition::default(); N];
+            for j in 0..N {
+                match a[j].interpolate(b[j], alpha) {
+                    Ok(value) => q[j] = value,
+                    Err(_) => return false,
+                }
+            }
+            if !self.is_configuration_free(&q) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `true` when the interior of the joint-space line from `a` to `b`
+    /// is free at the configured resolution, skipping the `s = 0` and
+    /// `s = steps` endpoint evaluations.
+    ///
+    /// Boolean-exact with [`Self::is_segment_free`] when both endpoints
+    /// are already known free (joint limits valid and collision-free).
+    /// Only use at call sites that guarantee both endpoints; otherwise
+    /// keep [`Self::is_segment_free`].
+    pub fn is_segment_interior_free(
+        &self,
+        a: &[CuJointPosition; N],
+        b: &[CuJointPosition; N],
+    ) -> bool {
+        let metric = self.resolution.metric();
+        let mut max_delta = 0.0_f64;
+        for j in 0..N {
+            let joint = &self.chain.joints()[j];
+            if joint.validate_coordinate(a[j]).is_err() || joint.validate_coordinate(b[j]).is_err()
+            {
+                return false;
+            }
+            max_delta = max_delta.max(libm::fabs(
+                metric.normalized(b[j]) - metric.normalized(a[j]),
+            ));
+        }
+        if !max_delta.is_finite() || max_delta > 1_000_000.0 {
+            return false;
+        }
+        let steps = (libm::ceil(max_delta) as usize).max(1);
+        for s in 1..steps {
             let alpha = s as f64 / steps as f64;
             let mut q = [CuJointPosition::default(); N];
             for j in 0..N {

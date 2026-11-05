@@ -99,7 +99,10 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointDirect<N, M
     fn step(&mut self, budget: u32) -> CuResult<CuPlanStatus> {
         if self.status == CuPlanStatus::Searching && budget > 0 {
             self.effort = 1;
-            self.status = if self.validity.is_segment_free(&self.start, &self.goal) {
+            self.status = if self
+                .validity
+                .is_segment_interior_free(&self.start, &self.goal)
+            {
                 CuPlanStatus::Converged
             } else {
                 CuPlanStatus::Exhausted

@@ -223,7 +223,8 @@ impl<const N: usize, const M: usize> CuJointStomp<N, M> {
             *slot = self.configuration(x);
         }
         let free = (1..self.count - 1).all(|i| self.validity.is_configuration_free(&q[i]))
-            && (0..self.count - 1).all(|i| self.validity.is_segment_free(&q[i], &q[i + 1]));
+            && (0..self.count - 1)
+                .all(|i| self.validity.is_segment_interior_free(&q[i], &q[i + 1]));
         if !free {
             return;
         }

@@ -249,7 +249,7 @@ impl<const N: usize, const M: usize> CuJointAStar<N, M> {
         let cell = self.cells[current];
         let q = self.configuration(&cell);
         if joint_distance(&q, &self.goal, self.params.metric) <= self.goal_reach
-            && self.validity.is_segment_free(&q, &self.goal)
+            && self.validity.is_segment_interior_free(&q, &self.goal)
         {
             self.finish(current);
             return;

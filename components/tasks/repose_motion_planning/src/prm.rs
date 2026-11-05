@@ -180,7 +180,7 @@ impl<const N: usize, const M: usize> CuJointPrm<N, M> {
         for &(other, _) in nearest[..k].iter().take_while(|n| n.0 != usize::MAX) {
             if self
                 .validity
-                .is_segment_free(&self.nodes[idx], &self.nodes[other])
+                .is_segment_interior_free(&self.nodes[idx], &self.nodes[other])
             {
                 let before = self.degree[idx];
                 self.link(idx, other);
@@ -300,7 +300,10 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointPrm<N, M> {
         self.nodes[START] = request.start;
         self.nodes[GOAL] = request.goal;
         self.len = 2;
-        if self.validity.is_segment_free(&request.start, &request.goal) {
+        if self
+            .validity
+            .is_segment_interior_free(&request.start, &request.goal)
+        {
             self.link(START, GOAL);
             self.search();
         }

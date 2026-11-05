@@ -269,7 +269,10 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointRrtConnect<
         }
         self.trees[0].reset(request.start);
         self.trees[1].reset(request.goal);
-        if self.validity.is_segment_free(&request.start, &request.goal) {
+        if self
+            .validity
+            .is_segment_interior_free(&request.start, &request.goal)
+        {
             self.trees[1].parents[0] = u16::MAX;
             self.finish(0, 0);
         }

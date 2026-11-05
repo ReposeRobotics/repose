@@ -238,7 +238,7 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
 
             if !self
                 .validity
-                .is_segment_free(&self.nodes[nearest_idx].q, &q_new)
+                .is_segment_interior_free(&self.nodes[nearest_idx].q, &q_new)
             {
                 continue;
             }
@@ -250,7 +250,9 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                     if d <= rewire_radius {
                         let cand_cost = self.nodes[idx].cost + d;
                         if cand_cost < best_new_cost
-                            && self.validity.is_segment_free(&self.nodes[idx].q, &q_new)
+                            && self
+                                .validity
+                                .is_segment_interior_free(&self.nodes[idx].q, &q_new)
                         {
                             best_parent = idx;
                             best_new_cost = cand_cost;
@@ -278,7 +280,9 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                     if d <= rewire_radius
                         && best_new_cost + d < self.nodes[nbr].cost
                         && !self.is_ancestor_of(nbr, new_idx)
-                        && self.validity.is_segment_free(&q_new, &self.nodes[nbr].q)
+                        && self
+                            .validity
+                            .is_segment_interior_free(&q_new, &self.nodes[nbr].q)
                     {
                         self.nodes[nbr].parent = new_idx as u16;
                         self.nodes[nbr].cost = best_new_cost + d;
@@ -327,7 +331,7 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
             let dist_to_goal = joint_distance(&q_new, &self.goal, self.params.metric);
             if dist_to_goal <= goal_threshold
                 && best_new_cost + dist_to_goal < self.best_cost
-                && self.validity.is_segment_free(&q_new, &self.goal)
+                && self.validity.is_segment_interior_free(&q_new, &self.goal)
             {
                 if let Some(g_idx) = self.goal_node_idx {
                     self.nodes[g_idx].parent = new_idx as u16;
@@ -462,7 +466,7 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                 }
                 if self
                     .validity
-                    .is_segment_free(&self.nodes[anchor].q, &self.nodes[up as usize].q)
+                    .is_segment_interior_free(&self.nodes[anchor].q, &self.nodes[up as usize].q)
                 {
                     chosen = up as usize;
                 }
@@ -617,7 +621,10 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointRrtStar<N, 
         if self.straight_line_cost <= 1e-9 {
             self.goal_node_idx = Some(0);
             self.best_cost = 0.0;
-        } else if self.validity.is_segment_free(&self.start, &self.goal) {
+        } else if self
+            .validity
+            .is_segment_interior_free(&self.start, &self.goal)
+        {
             // Direct line of sight: the straight line is optimal.
             self.nodes[1] = RrtNode {
                 q: self.goal,

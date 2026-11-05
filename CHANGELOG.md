@@ -7,6 +7,13 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Skip redundant endpoint collision checks in joint-space segment evaluation
+  via `CuSceneValidity::is_segment_interior_free` at call sites with
+  already-proven-free endpoints. Boolean-exact given free endpoints;
+  deterministic paths and seeds unchanged.
+
 ## [0.8.2] - 2026-11-04
 
 ### Changed

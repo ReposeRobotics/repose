@@ -12,6 +12,9 @@ may be breaking.
 - Manual `Benchmarks (wall-clock)` GitHub Actions workflow running
   `cargo bench -p repose` on Linux, macOS, and Windows (x64 and ARM64)
   GitHub-hosted runners, uploading per-system results as artifacts.
+- Benchmark data pipeline: the wall-clock workflow now runs weekly, converts
+  Divan output to per-system JSON (`bench_to_json.py`), and publishes a merged
+  `benchmarks.json` to the `benchmark-data` branch for the website graph.
 
 ### Changed
 

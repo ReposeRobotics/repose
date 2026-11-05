@@ -7,6 +7,11 @@ may be breaking.
 
 ## [Unreleased]
 
+### Fixed
+
+- Set the git identity inside the benchmark publish repo so the first
+  `benchmark-data` publication can commit.
+
 ### Added
 
 - Manual `Benchmarks (wall-clock)` GitHub Actions workflow running

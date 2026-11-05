@@ -3,3 +3,4 @@ Cargo.lock
 *.copper
 logs/
 .DS_Store
+.local/

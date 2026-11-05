@@ -43,7 +43,7 @@ jobs:
           cpu=""
           case "$RUNNER_OS" in
             macOS) cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true) ;;
-            Linux) cpu=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- || true) ;;
+            Linux) cpu=$(grep -m1 -iE "model name|^model" /proc/cpuinfo 2>/dev/null | cut -d: -f2- || true); [ -z "$(echo "$cpu" | tr -d ' ')" ] && cpu=$(lscpu 2>/dev/null | grep -m1 "Model name" | cut -d: -f2- || true) ;;
             Windows) cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name" 2>/dev/null || true) ;;
           esac
           {

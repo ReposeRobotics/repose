@@ -1,11 +1,15 @@
 name: Benchmarks (wall-clock)
 
-# Manual only: wall-clock numbers on shared runners are noisy, so this is
-# for cross-machine comparison, not per-PR regression detection (that is
-# the CodSpeed simulation workflow). Public repo: GitHub-hosted standard
+# Wall-clock numbers on shared runners are noisy, so this is for
+# cross-machine comparison, not per-PR regression detection (that is the
+# CodSpeed simulation workflow). Runs weekly and on demand; results are
+# published as benchmarks.json on the `benchmark-data` branch, which
+# getrepose.dev/benchmarks graphs. Public repo: GitHub-hosted standard
 # runners are free and unlimited.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -36,18 +40,37 @@ jobs:
       - name: System info
         shell: bash
         run: |
+          cpu=""
+          case "$RUNNER_OS" in
+            macOS) cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true) ;;
+            Linux) cpu=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- || true) ;;
+            Windows) cpu=$(powershell -NoProfile -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name" 2>/dev/null || true) ;;
+          esac
           {
             echo "label: ${{ matrix.label }}"
             echo "os: ${{ matrix.os }}"
-            uname -a || true
-            rustc -vV
-            cargo --version
-          } | tee system-info.txt
+            echo "uname: $(uname -a 2>/dev/null || echo unknown)"
+            echo "arch: $(uname -m 2>/dev/null || echo unknown)"
+            echo "cpu: $(echo "$cpu" | sed 's/^ *//')"
+            echo "rustc: $(rustc -vV | head -1)"
+          } | tee system-info-${{ matrix.label }}.txt
       - name: Run benchmarks
         shell: bash
         run: |
           set -o pipefail
           cargo bench -p repose 2>&1 | tee bench-${{ matrix.label }}.txt
+      - name: Convert to JSON
+        shell: bash
+        run: |
+          version=$(grep -A5 '^\[workspace.package\]' Cargo.toml | grep -m1 '^version' | cut -d'"' -f2)
+          python3 .github/scripts/bench_to_json.py \
+            bench-${{ matrix.label }}.txt \
+            system-info-${{ matrix.label }}.txt \
+            benchmarks-${{ matrix.label }}.json \
+            --label "${{ matrix.label }}" \
+            --commit "${{ github.sha }}" \
+            --version "$version" \
+            --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       - name: Summarize
         shell: bash
         run: |
@@ -55,7 +78,7 @@ jobs:
             echo "## Benchmarks · ${{ matrix.label }} (\`${{ matrix.os }}\`)"
             echo ""
             echo '```text'
-            cat system-info.txt
+            cat system-info-${{ matrix.label }}.txt
             echo '```'
             echo ""
             echo '```text'
@@ -67,6 +90,49 @@ jobs:
         with:
           name: bench-${{ matrix.label }}
           path: |
-            system-info.txt
+            system-info-${{ matrix.label }}.txt
             bench-${{ matrix.label }}.txt
+            benchmarks-${{ matrix.label }}.json
+          retention-days: 14
+
+  publish:
+    name: Publish benchmarks.json
+    needs: bench
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download per-system results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          merge-multiple: true
+      - name: Merge into benchmarks.json
+        run: python3 .github/scripts/merge_benchmarks.py benchmarks.json benchmarks-*.json
+      - name: Push to benchmark-data branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir publish && cd publish
+          git init -b benchmark-data -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          if git fetch -q --depth 1 origin benchmark-data 2>/dev/null; then
+            git checkout -q -b benchmark-data origin/benchmark-data
+          fi
+          cp ../benchmarks.json benchmarks.json
+          git add benchmarks.json
+          if git diff --cached --quiet; then
+            echo "benchmarks.json unchanged"
+          else
+            git commit -qm "benchmarks: ${{ github.sha }}"
+            git push -q origin benchmark-data
+          fi
+      - name: Upload merged benchmarks.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-json
+          path: benchmarks.json
           retention-days: 14

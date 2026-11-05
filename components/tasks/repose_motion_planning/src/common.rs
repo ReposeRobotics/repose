@@ -109,7 +109,7 @@ pub(crate) fn write_shortcut<const N: usize, const M: usize>(
     while anchor + 1 < raw.len() {
         let mut next = anchor + 1;
         for candidate in (anchor + 2..raw.len()).rev() {
-            if validity.is_segment_free(&raw[anchor], &raw[candidate]) {
+            if validity.is_segment_interior_free(&raw[anchor], &raw[candidate]) {
                 next = candidate;
                 break;
             }

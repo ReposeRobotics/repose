@@ -23,6 +23,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL: mistral-small-latest
           MAX_DIFF_CHARS: "12000"
-        run: python ${{ github.action_path }}/../action/review.py
-        # If you copied only the action/ dir into .github/, use:
-        # run: python action/review.py
+        run: python action/review.py

@@ -33,6 +33,13 @@ pub enum CuIkSolver {
     Pseudoinverse,
 }
 
+/// Hard upper bound for [`CuIkParams::max_iterations`].
+///
+/// Keeps a hostile or misconfigured parameter object from running an
+/// effectively unbounded solve on the control thread. `0` stays legal and
+/// means a convergence check only.
+pub const MAX_IK_ITERATIONS: u32 = 10_000;
+
 /// Parameters of the inverse kinematics solver selected by `solver`.
 ///
 /// RON (every field optional, SI values):
@@ -44,7 +51,8 @@ pub enum CuIkSolver {
 pub struct CuIkParams {
     /// The solver algorithm.
     pub solver: CuIkSolver,
-    /// Maximum solver iterations per call.
+    /// Maximum solver iterations per call (`0..=MAX_IK_ITERATIONS`; `0` :=
+    /// convergence check only).
     pub max_iterations: u32,
     /// Position convergence threshold.
     pub position_tolerance: Length64,
@@ -76,13 +84,19 @@ impl Default for CuIkParams {
 }
 
 impl CuIkParams {
-    /// Rejects non-positive or non-finite damping, tolerances, and step sizes.
+    /// Rejects non-positive or non-finite damping, tolerances, and step sizes,
+    /// and caps `max_iterations` at [`MAX_IK_ITERATIONS`].
     pub fn validate(&self) -> CuResult<()> {
         if self.solver == CuIkSolver::DampedLeastSquares
             && (self.damping <= 0.0 || !self.damping.is_finite())
         {
             return Err(CuError::from(
                 "repose_kinematics: IK damping must be positive and finite",
+            ));
+        }
+        if self.max_iterations > MAX_IK_ITERATIONS {
+            return Err(CuError::from(
+                "repose_kinematics: IK max_iterations exceeds the supported maximum",
             ));
         }
         let positive = |v: f64| v.is_finite() && v > 0.0;

@@ -44,6 +44,12 @@ use repose_kinematics::CuKinematicChain;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// Hard upper bound on [`CuJointPathOptimizerParams::max_iterations`].
+///
+/// Keeps a hostile or misconfigured parameter object from stalling the
+/// control thread with an effectively unbounded optimization run.
+pub const PATH_OPTIMIZER_MAX_ITERATIONS: u32 = 10_000;
+
 /// Parameters of [`CuJointPathOptimizer`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Encode, Decode, Reflect)]
 #[serde(default, deny_unknown_fields)]
@@ -61,7 +67,7 @@ pub struct CuJointPathOptimizerParams {
     /// Finite-difference step for the clearance gradient (dimensionless,
     /// metric-scaled).
     pub gradient_step: f64,
-    /// Iterations after which the job ends.
+    /// Iterations after which the job ends (`1..=PATH_OPTIMIZER_MAX_ITERATIONS`).
     pub max_iterations: u32,
     /// Resolution of the segment collision checks.
     pub collision_check_step: CuJointResolution,
@@ -101,6 +107,7 @@ impl CuJointPathOptimizerParams {
                 && self.smoothness_weight >= 0.0
                 && positive(self.gradient_step)
                 && self.max_iterations > 0
+                && self.max_iterations <= PATH_OPTIMIZER_MAX_ITERATIONS
         };
         if valid {
             Ok(())
@@ -330,3 +337,27 @@ crate::impl_planner_type_path!(
     CuJointPathOptimizer,
     "repose_motion_planning::CuJointPathOptimizer"
 );
+
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+
+    #[test]
+    fn default_params_validate() {
+        CuJointPathOptimizerParams::default().validate().unwrap();
+    }
+
+    #[test]
+    fn iteration_budget_is_capped() {
+        let at_cap = CuJointPathOptimizerParams {
+            max_iterations: PATH_OPTIMIZER_MAX_ITERATIONS,
+            ..CuJointPathOptimizerParams::default()
+        };
+        at_cap.validate().unwrap();
+        let over_cap = CuJointPathOptimizerParams {
+            max_iterations: PATH_OPTIMIZER_MAX_ITERATIONS + 1,
+            ..CuJointPathOptimizerParams::default()
+        };
+        assert!(over_cap.validate().is_err());
+    }
+}

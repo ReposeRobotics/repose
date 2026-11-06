@@ -42,6 +42,12 @@ use serde::Serialize;
 /// Rollout capacity per iteration.
 pub const STOMP_MAX_ROLLOUTS: usize = 16;
 
+/// Hard upper bound on [`CuJointStompParams::max_iterations`].
+///
+/// Keeps a hostile or misconfigured parameter object from stalling the
+/// control thread with an effectively unbounded STOMP run.
+pub const STOMP_MAX_ITERATIONS: u32 = 10_000;
+
 /// Parameters of [`CuJointStomp`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Encode, Decode, Reflect)]
 #[serde(default, deny_unknown_fields)]
@@ -62,7 +68,7 @@ pub struct CuJointStompParams {
     pub obstacle_weight: f64,
     /// Weight of the smoothness cost (dimensionless, `>= 0`).
     pub smoothness_weight: f64,
-    /// Iterations after which the job ends.
+    /// Iterations after which the job ends (`1..=STOMP_MAX_ITERATIONS`).
     pub max_iterations: u32,
     /// Resolution of the segment collision checks.
     pub collision_check_step: CuJointResolution,
@@ -104,6 +110,7 @@ impl CuJointStompParams {
                 && self.smoothness_weight.is_finite()
                 && self.smoothness_weight >= 0.0
                 && self.max_iterations > 0
+                && self.max_iterations <= STOMP_MAX_ITERATIONS
         };
         if valid {
             Ok(())
@@ -374,3 +381,27 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointStomp<N, M>
 }
 
 crate::impl_planner_type_path!(CuJointStomp, "repose_motion_planning::CuJointStomp");
+
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+
+    #[test]
+    fn default_params_validate() {
+        CuJointStompParams::default().validate().unwrap();
+    }
+
+    #[test]
+    fn iteration_budget_is_capped() {
+        let at_cap = CuJointStompParams {
+            max_iterations: STOMP_MAX_ITERATIONS,
+            ..CuJointStompParams::default()
+        };
+        at_cap.validate().unwrap();
+        let over_cap = CuJointStompParams {
+            max_iterations: STOMP_MAX_ITERATIONS + 1,
+            ..CuJointStompParams::default()
+        };
+        assert!(over_cap.validate().is_err());
+    }
+}

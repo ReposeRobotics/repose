@@ -22,6 +22,7 @@ pub use ik::CuIkSolver;
 pub use ik::CuIkStatus;
 pub use ik::CuTwist6D;
 pub use ik::CuTwistFrame;
+pub use ik::MAX_IK_ITERATIONS;
 pub use joint::CuJointAcceleration;
 pub use joint::CuJointJerk;
 pub use joint::CuJointLimits;
@@ -62,6 +63,7 @@ mod tests {
     use crate::CuServoTask;
     use crate::CuTwist6D;
     use crate::CuTwistFrame;
+    use crate::MAX_IK_ITERATIONS;
     use crate::igus_rebel_chain;
     use cu_spatial_payloads::Transform3D;
     use cu29::prelude::*;
@@ -732,5 +734,24 @@ mod tests {
         for r in 0..3 {
             assert!((m_tgt[r][3] - m_sol[r][3]).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn test_ik_params_iteration_budget_bounds() {
+        CuIkParams::default().validate().unwrap();
+
+        // Default already below the cap; the cap itself is accepted.
+        let at_cap = CuIkParams {
+            max_iterations: MAX_IK_ITERATIONS,
+            ..CuIkParams::default()
+        };
+        at_cap.validate().unwrap();
+
+        // One past the cap is rejected.
+        let over_cap = CuIkParams {
+            max_iterations: MAX_IK_ITERATIONS + 1,
+            ..CuIkParams::default()
+        };
+        assert!(over_cap.validate().is_err());
     }
 }

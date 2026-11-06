@@ -209,7 +209,8 @@ impl CuMujocoSimBridge {
     }
 
     fn timeout(&self) -> Duration {
-        Duration::from_secs_f64(self.params.read_timeout.get::<second>())
+        Duration::try_from_secs_f64(self.params.read_timeout.get::<second>())
+            .unwrap_or(Duration::from_millis(250))
     }
 
     fn connect(&self) -> CuResult<TcpStream> {
@@ -305,6 +306,11 @@ pub(crate) fn decode_state_line(
         let rad = v.as_f64().ok_or_else(|| {
             CuError::from("repose-mujoco-sim: state \"q\" holds non-numeric joint")
         })?;
+        if !rad.is_finite() {
+            return Err(CuError::from(
+                "repose-mujoco-sim: state \"q\" must be finite",
+            ));
+        }
         positions[i] = CuJointPosition::Revolute(Angle::new::<radian>(rad));
     }
     let mut velocities = [CuJointVelocity::default(); MUJOCO_DOF];
@@ -312,6 +318,11 @@ pub(crate) fn decode_state_line(
         let rad_per_s = v.as_f64().ok_or_else(|| {
             CuError::from("repose-mujoco-sim: state \"qd\" holds non-numeric joint")
         })?;
+        if !rad_per_s.is_finite() {
+            return Err(CuError::from(
+                "repose-mujoco-sim: state \"qd\" must be finite",
+            ));
+        }
         velocities[i] =
             CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(rad_per_s));
     }
@@ -333,6 +344,11 @@ impl Freezable for CuMujocoSimBridge {
         self.params.port = Decode::decode(decoder)?;
         let read_timeout: f64 = Decode::decode(decoder)?;
         self.params.read_timeout = Time::new::<second>(read_timeout);
+        if self.params.validate().is_err() {
+            return Err(bincode::error::DecodeError::OtherString(
+                "repose-mujoco-sim: thawed params failed validation".into(),
+            ));
+        }
         self.stream = None;
         Ok(())
     }
@@ -407,10 +423,18 @@ impl CuBridge for CuMujocoSimBridge {
         if channel.id != MujocoRxId::JointState {
             return Err(CuError::from("repose-mujoco-sim: unknown Rx channel"));
         }
+        let timeout = self.timeout();
         let stream = self.ensure_connected()?;
+        let deadline = std::time::Instant::now() + timeout;
         let mut buf = [0u8; MAX_LINE_BYTES];
         let mut len = 0usize;
         loop {
+            if std::time::Instant::now() >= deadline {
+                self.drop_stream();
+                return Err(CuError::from(
+                    "repose-mujoco-sim: state line deadline exceeded",
+                ));
+            }
             if len >= buf.len() {
                 self.drop_stream();
                 return Err(CuError::from("repose-mujoco-sim: state line too long"));

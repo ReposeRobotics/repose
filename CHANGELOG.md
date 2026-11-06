@@ -9,6 +9,14 @@ may be breaking.
 
 ### Fixed
 
+- Security audit bundle (Cloudflare `security-audit` skill, findings V4/V6/V7/V8):
+  reject `CuTrajectoryPayload` decodes with `len > MAX_POINTS` and clamp
+  `points()`/`duration()` against hand-built payloads so a crafted payload
+  can no longer panic `CuFollowTrajectoryTask`; enforce an overall read
+  deadline in the MuJoCo sim bridge (per-byte timeouts no longer allow a
+  trickling peer to stall `receive()` indefinitely), reject non-finite joint
+  state from the sidecar, and re-validate bridge params on `Freezable::thaw`
+  so crafted frozen state cannot panic `timeout()`.
 - Set the git identity inside the benchmark publish repo so the first
   `benchmark-data` publication can commit.
 

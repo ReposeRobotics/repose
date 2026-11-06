@@ -143,9 +143,16 @@ impl<C, const N: usize, const MAX_POINTS: usize> Decode<C> for CuTrajectoryPaylo
     fn decode<D: bincode::de::Decoder<Context = C>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
+        let points = Decode::decode(decoder)?;
+        let len: u32 = Decode::decode(decoder)?;
+        if len as usize > MAX_POINTS {
+            return Err(bincode::error::DecodeError::OtherString(
+                "trajectory len exceeds MAX_POINTS".into(),
+            ));
+        }
         Ok(Self {
-            points: Decode::decode(decoder)?,
-            len: Decode::decode(decoder)?,
+            points,
+            len,
             interpolation: Decode::decode(decoder)?,
         })
     }
@@ -191,13 +198,13 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         if self.is_empty() {
             Time::default()
         } else {
-            self.points[self.len as usize - 1].time_from_start
+            self.points[self.len.min(MAX_POINTS as u32) as usize - 1].time_from_start
         }
     }
 
     /// Borrows the valid waypoint prefix.
     pub fn points(&self) -> &[CuTrajectoryPoint<N>] {
-        &self.points[..self.len as usize]
+        &self.points[..(self.len as usize).min(MAX_POINTS)]
     }
 
     /// Appends a waypoint; times must be strictly increasing.
@@ -206,7 +213,8 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
             return Err(CuError::from("Trajectory is full"));
         }
         if !self.is_empty()
-            && point.time_from_start <= self.points[self.len as usize - 1].time_from_start
+            && point.time_from_start
+                <= self.points[self.len.min(MAX_POINTS as u32) as usize - 1].time_from_start
         {
             return Err(CuError::from(
                 "Trajectory times must be strictly increasing",
@@ -651,5 +659,17 @@ mod tests {
         let after = traj.quintic_limit_ratio(&limits).unwrap();
         assert!(after < before);
         assert!(traj.stretch_time(0.0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sec_tests {
+    use super::*;
+    #[test]
+    fn oversized_len_does_not_panic() {
+        let mut p = CuTrajectoryPayload::<1>::new();
+        p.len = 65;
+        assert!(p.points().len() <= 64);
+        let _ = p.duration();
     }
 }

@@ -58,3 +58,17 @@ jobs:
           tool: just
       - name: Run determinism check
         run: just determinism
+
+  # Library crates must build with no operating system (see `just bare-metal`).
+  bare-metal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none, thumbv7em-none-eabihf
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Build for bare-metal targets
+        run: just bare-metal

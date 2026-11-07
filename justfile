@@ -39,6 +39,12 @@ determinism runs="5":
     done
     echo "determinism: {{runs}} runs, $(echo "$reference" | wc -l | tr -d ' ') scenarios, identical"
 
+# Build every library crate except the simulator for bare-metal targets (no OS, `core` + `alloc` only):
+# 64-bit Arm and Cortex-M. Guards the `no_std` surface that a qualified toolchain (Ferrocene) would build.
+bare-metal:
+    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --target aarch64-unknown-none
+    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --target thumbv7em-none-eabihf
+
 # Run the divan benchmarks (kinematics, collision, planning, trajectory); CI runs them under CodSpeed.
 bench:
     cargo bench -p repose

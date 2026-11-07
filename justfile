@@ -22,6 +22,23 @@ test:
     cargo test --workspace --doc --features std
     cargo nextest run --workspace --features std,cu29/reflect
 
+# Run the determinism scenarios (FK/IK, collision, every planner, trajectory timing) in separate
+# processes and fail if any process prints a different hash. Each process also runs every scenario twice.
+determinism runs="5":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p repose --example determinism --features std
+    bin="target/debug/examples/determinism"
+    reference="$("$bin")"
+    echo "$reference"
+    for i in $(seq 2 {{runs}}); do
+        if ! diff <(echo "$reference") <("$bin"); then
+            echo "determinism: run $i differs from run 1"
+            exit 1
+        fi
+    done
+    echo "determinism: {{runs}} runs, $(echo "$reference" | wc -l | tr -d ' ') scenarios, identical"
+
 # Run the divan benchmarks (kinematics, collision, planning, trajectory); CI runs them under CodSpeed.
 bench:
     cargo bench -p repose

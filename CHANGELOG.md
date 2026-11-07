@@ -18,6 +18,9 @@ may be breaking.
   built-in planner with a fixed seed, and trajectory timing and sampling in
   separate processes, and fails if any output hash differs. A `determinism`
   CI job runs it on Linux and macOS.
+- Bare-metal build check: `just bare-metal` builds every library crate except
+  `repose-mujoco-sim` with no operating system for `aarch64-unknown-none` and
+  `thumbv7em-none-eabihf`. A `bare-metal` CI job runs it.
 - Manual `Benchmarks (wall-clock)` GitHub Actions workflow running
   `cargo bench -p repose` on Linux, macOS, and Windows (x64 and ARM64)
   GitHub-hosted runners, uploading per-system results as artifacts.

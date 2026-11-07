@@ -14,6 +14,10 @@ may be breaking.
 
 ### Added
 
+- Determinism check: `just determinism` runs FK, IK, collision checks, every
+  built-in planner with a fixed seed, and trajectory timing and sampling in
+  separate processes, and fails if any output hash differs. A `determinism`
+  CI job runs it on Linux and macOS.
 - Manual `Benchmarks (wall-clock)` GitHub Actions workflow running
   `cargo bench -p repose` on Linux, macOS, and Windows (x64 and ARM64)
   GitHub-hosted runners, uploading per-system results as artifacts.

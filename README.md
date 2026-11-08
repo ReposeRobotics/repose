@@ -78,7 +78,7 @@ Nothing is published to crates.io yet (`publish = false` workspace-wide; the API
 is pre-1.0 and may change). Depend on the git repository instead:
 
 ```toml
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.1" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.3" }
 ```
 
 The workspace is versioned and tagged as a whole (`vX.Y.Z`), never per crate;

@@ -52,7 +52,6 @@ fn monitor_overhead_with_monitor(bencher: Bencher) {
         model
             .check_configuration(&chain, black_box(&q), &env, black_box(&mut report))
             .unwrap();
-        let clear = report.is_collision_free();
-        monitor.update(!clear);
+        black_box(monitor.update(!report.is_collision_free()));
     });
 }

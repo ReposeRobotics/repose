@@ -1,6 +1,7 @@
 //! Execution monitoring policy: edge detection and hold semantics for collision checks.
 //!
-//! The check itself lives in [`CuRobotCollisionModel`] / [`CuPlanningScene`]; this module only
+//! The check itself lives in [`CuRobotCollisionModel`](crate::CuRobotCollisionModel) /
+//! [`CuPlanningScene`](crate::CuPlanningScene); this module only
 //! tracks *state* — whether the watched configuration is currently in violation, and when that
 //! state *changes* — so callers can raise a hold exactly once instead of re-acting every cycle.
 
@@ -18,9 +19,9 @@ pub enum CuMonitorTransition {
 }
 
 /// Stateful wrapper for a collision watch: raises edge events when a configuration
-/// enters or leaves violation, so consumers ([`CuTask`](crate::scene) paths, executors)
-/// get one event per collision episode rather than one per cycle.
-#[derive(Debug, Clone)]
+/// enters or leaves violation, so consumers (tasks, executors) get one event per
+/// collision episode rather than one per cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CuCollisionMonitor {
     in_collision: bool,
 }
@@ -34,11 +35,14 @@ impl CuCollisionMonitor {
     }
 
     /// Feeds one observation. `in_collision` comes from the caller's check
-    /// (e.g. [`CuCollisionReport::is_collision_free`] negated); returns the
+    /// (e.g. [`CuCollisionReport::is_collision_free`](crate::CuCollisionReport::is_collision_free)
+    /// negated); returns the
     /// detected transition.
     ///
     /// This is allocation-free and has no time dependency, so callers can run
     /// it at any control-loop rate.
+    #[inline]
+    #[must_use = "the transition is the monitor's output; ignoring it drops the edge event"]
     pub fn update(&mut self, in_collision: bool) -> CuMonitorTransition {
         let was = self.in_collision;
         self.in_collision = in_collision;
@@ -93,11 +97,25 @@ mod tests {
     #[test]
     fn edge_only_once() {
         let mut m = CuCollisionMonitor::new();
-        for _ in 0..10 {
-            m.update(true);
-        }
-        // Still just one entry event in the sequence above; entry only reported
-        // when the previous state was clear.
+        let entered = (0..10)
+            .filter(|_| m.update(true) == CuMonitorTransition::EnteredCollision)
+            .count();
+        assert_eq!(entered, 1);
         assert!(m.in_collision());
+
+        let cleared = (0..10)
+            .filter(|_| m.update(false) == CuMonitorTransition::ClearedCollision)
+            .count();
+        assert_eq!(cleared, 1);
+        assert!(!m.in_collision());
+    }
+
+    #[test]
+    fn reset_rearms_entry_edge() {
+        let mut m = CuCollisionMonitor::new();
+        assert_eq!(m.update(true), CuMonitorTransition::EnteredCollision);
+        m.reset();
+        assert!(!m.in_collision());
+        assert_eq!(m.update(true), CuMonitorTransition::EnteredCollision);
     }
 }

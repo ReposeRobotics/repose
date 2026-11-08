@@ -88,7 +88,11 @@ Controller-interface completion, building on `v0.2.2`:
    API, packaging, and cancellation semantics against the Validation Plan.
    Collision monitoring and collision-triggered abort during execution are
    deferred to Step 3; they do not block Step 1.
-2. **Planning and simulated robot execution (next).** Build in this order:
+2. **Planning and simulated robot execution (implemented; see v0.2.2, v0.8.0).**
+   The planning scene, scene snapshots and revision semantics, motion planning
+   and planners, simulated execution, the unified robot controller, pose-goal
+   planning, Cartesian planning with TCP zones, and the benchmark harness are
+   all shipped (latest: `v0.8.0`). Historical build order:
    - A versioned, fixed-capacity planning scene shared by collision checking and
      planner tasks: stable object IDs, obstacle add/update/remove, attached
      objects with link-relative transforms, and explicit collision exclusions.
@@ -141,21 +145,28 @@ Controller-interface completion, building on `v0.2.2`:
    attaches an object, and plans joint, pose-goal, and Cartesian requests
    consistently against the selected scene revision, plus the Validation Plan
    checks.
-3. **Real-time servoing.** Harden `CuServoTask<N>` into a production servo
-   loop (controller rate limiting and watchdog land earlier, in 0.3):
-   singularity/limit behaviour under load, latency/allocation budgets
-   enforced by tests. Add execution collision
-   monitoring and collision-triggered abort with defined stop/hold reporting;
-   distinguish geometric validation before execution from monitoring during it.
-4. **Robot bridges.** Extend the joint command/state contract established in
-   Step 2 to hardware through a generic `CuBridge`; prove it with `repose-igus-cri` for the igus
-   ReBeL CRI protocol (`192.168.3.11:3920`); hardware-in-the-loop example plans
-   and executes on the real ReBeL.
-5. **Generality (deliberately last).** Tree/branched kinematic structures,
+3. **Execution collision monitoring (next).** Monitor the follower's setpoints
+   against the live planning scene during execution and abort/hold with defined
+   stop/hold reporting when a violation appears. This serves the existing
+   plan → execute stack and is distinct from geometric validation before
+   execution: plans are still checked upfront; monitoring runs while they
+   execute. It defines the scene-revision-during-execution semantics (the
+   roadmap's highest-risk item).
+4. **Real-time servoing (deferred).** Harden `CuServoTask<N>` into a production
+   servo loop — singularity/limit behaviour under load, latency/allocation
+   budgets enforced by tests — only when a pose-stream consumer exists
+   (vision, teleop, an external servo source). Until then the machinery has no
+   user; revisit together with Step 6's dynamics work.
+5. **Robot bridges (satisfied externally).** The igus ReBeL CRI bridge lives in
+   a separate repository, not in this workspace; it implements the joint
+   command/state and session contract defined here in
+   `repose-robot-interface`. This roadmap tracks no further bridge work in
+   this repo unless that contract changes.
+6. **Generality (deliberately last).** Tree/branched kinematic structures,
    then closed-chain mechanisms, then dynamics and torque-level control. No
    Phase 1–4 API may be designed so these become impossible; none of this
    starts before Step 4 is done.
-6. **1.0 stabilization and publishing.** Rustdoc and doctests on every public
+7. **1.0 stabilization and publishing.** Rustdoc and doctests on every public
    item; semver commitment; a stated compatibility policy for RON
    configuration schemas. Publishing is pre-wired so this step is a flip, not
    a restructure: the workspace already carries one shared version, versioned
@@ -197,7 +208,7 @@ Passing tests alone does not close a phase.
   registries, or stringly-typed hot-path configuration; Copper's compile-time
   graph and RON policies are the model.
 - **No early generality.** Branched/closed chains and dynamics appear only in
-  Step 5, on that step's terms — not as additions to earlier phases.
+  Step 6, on that step's terms — not as additions to earlier phases.
 
 ## Risks / Open Questions
 

@@ -94,6 +94,11 @@ jobs:
         run: |
           export PATH="$HOME/.criticalup/bin:$PATH"
           criticalup auth set "$CRITICALUP_TOKEN"
+      - name: Install Ferrocene toolchain from criticalup.toml
+        if: env.CRITICALUP_TOKEN != ''
+        run: |
+          export PATH="$HOME/.criticalup/bin:$PATH"
+          criticalup install
       - name: Build for bare-metal targets with Ferrocene
         if: env.CRITICALUP_TOKEN != ''
         run: |

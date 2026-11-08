@@ -72,3 +72,32 @@ jobs:
           tool: just
       - name: Build for bare-metal targets
         run: just bare-metal
+
+  # Builds the same surface as `just bare-metal` with the Ferrocene compiler,
+  # qualified for IEC 61508 / ISO 26262 (see docs/regulatory-positioning).
+  # Needs a CriticalUp token from the Ferrocene Customer Portal in the
+  # CRITICALUP_TOKEN repository secret; skips when it is not set.
+  ferrocene:
+    runs-on: ubuntu-latest
+    env:
+      CRITICALUP_TOKEN: ${{ secrets.CRITICALUP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip when no CriticalUp token
+        if: env.CRITICALUP_TOKEN == ''
+        run: echo "::notice::CRITICALUP_TOKEN is not set; skipping the Ferrocene lane"
+      - name: Install CriticalUp
+        if: env.CRITICALUP_TOKEN != ''
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ferrocene/criticalup/releases/latest/download/criticalup-installer.sh | sh
+      - name: Authenticate CriticalUp
+        if: env.CRITICALUP_TOKEN != ''
+        run: |
+          export PATH="$HOME/.criticalup/bin:$PATH"
+          criticalup auth set "$CRITICALUP_TOKEN"
+      - name: Build for bare-metal targets with Ferrocene
+        if: env.CRITICALUP_TOKEN != ''
+        run: |
+          export PATH="$HOME/.criticalup/bin:$PATH"
+          criticalup run cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim \
+            --target aarch64-unknown-none \
+            --target thumbv7em-none-eabihf

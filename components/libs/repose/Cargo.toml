@@ -77,4 +77,8 @@ required-features = ["std"]
 [[bench]]
 name = "trajectory"
 harness = false
+
+[[bench]]
+name = "monitor"
+harness = false
 required-features = ["std"]

@@ -35,6 +35,7 @@ extern crate alloc;
 
 mod env;
 mod model;
+mod monitor;
 mod robots;
 mod scene;
 mod scene_exclusions;
@@ -48,6 +49,8 @@ pub use model::CuCollisionModelParams;
 pub use model::CuCollisionReport;
 pub use model::CuContactKind;
 pub use model::CuRobotCollisionModel;
+pub use monitor::CuCollisionMonitor;
+pub use monitor::CuMonitorTransition;
 pub use robots::CuCollisionModelSpec;
 pub use robots::igus_rebel_collision_model;
 pub use scene::CuAttachedShape;

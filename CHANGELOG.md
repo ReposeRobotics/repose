@@ -14,6 +14,12 @@ may be breaking.
 
 ### Added
 
+- Execution collision monitoring: `CuCollisionMonitor` and
+  `CuMonitorTransition` in `repose-collision` track clear/in-collision
+  transitions over a checked configuration, so executors raise a hold once per
+  collision episode instead of reacting every cycle. Allocation-free policy
+  layer over the existing check; a `monitor` Divan benchmark measures its
+  overhead against the raw check (roughly 20–50 ns on a ~250–300 ns check).
 - Determinism check: `just determinism` runs FK, IK, collision checks, every
   built-in planner with a fixed seed, and trajectory timing and sampling in
   separate processes, and fails if any output hash differs. A `determinism`

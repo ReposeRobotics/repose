@@ -1,279 +1,138 @@
-# Repose
+<p align="center">
+  <a href="https://getrepose.dev">
+    <img src="docs/assets/readme-header.png" alt="Repose: deterministic, real-time manipulation for robot arms" width="100%">
+  </a>
+</p>
 
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/ReposeRobotics/repose?utm_source=badge)
-[![ClusterFuzzLite PR](https://github.com/ReposeRobotics/repose/actions/workflows/cflite_pr.yml/badge.svg)](https://github.com/ReposeRobotics/repose/actions/workflows/cflite_pr.yml)
-[![ClusterFuzzLite batch](https://github.com/ReposeRobotics/repose/actions/workflows/cflite_batch.yml/badge.svg)](https://github.com/ReposeRobotics/repose/actions/workflows/cflite_batch.yml)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](License.md)
+<p align="center">
+  <a href="https://app.codspeed.io/ReposeRobotics/repose?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed"></a>
+  <a href="https://github.com/ReposeRobotics/repose/actions/workflows/cflite_pr.yml"><img src="https://github.com/ReposeRobotics/repose/actions/workflows/cflite_pr.yml/badge.svg" alt="ClusterFuzzLite PR"></a>
+  <a href="https://github.com/ReposeRobotics/repose/actions/workflows/cflite_batch.yml"><img src="https://github.com/ReposeRobotics/repose/actions/workflows/cflite_batch.yml/badge.svg" alt="ClusterFuzzLite batch"></a>
+  <a href="License.md"><img src="https://img.shields.io/badge/License-Apache_2.0-C7FF3D.svg?labelColor=09090A" alt="License: Apache 2.0"></a>
+</p>
 
-**Repose** by [Repose Robotics](https://reposerobotics.org) is a deterministic, real-time manipulation stack for robot arms: kinematics, collision checking, motion planning, trajectory timing, and control as zero-allocation components for [`copper-rs` (`cu29`)](https://github.com/copper-project/copper-rs), designed from the ground up to follow Copper's `std`/`no_std`, compile-time static graph, and replay-deterministic architecture.
+<p align="center">
+  <b>Motion, coming to rest.</b><br>
+  <a href="https://getrepose.dev">Website</a> ·
+  <a href="https://getrepose.dev/get-started">Get started</a> ·
+  <a href="https://getrepose.dev/docs">Docs</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-Studio is available as the private `studio` submodule. Clone with `git clone --recurse-submodules` or run `git submodule update --init` in an existing checkout; access requires permission to the Studio repository. See [Studio’s README](studio/README.md) for setup.
+---
 
-## Crates
+**Repose** by [Repose Robotics](https://reposerobotics.org) is a deterministic,
+real-time manipulation stack for robot arms. Kinematics, collision checking,
+motion planning, trajectory timing, and control ship as zero-allocation
+components for [`copper-rs` (`cu29`)](https://github.com/copper-project/copper-rs).
 
-Add the whole stack with one dependency, the `repose` umbrella crate, or depend on individual components. Product site: [getrepose.dev](https://getrepose.dev).
+- **Deterministic.** Built for Copper's record-and-replay. Sampling planners
+  draw all randomness from a per-job seed.
+- **Real-time.** No heap allocations on the hot path. Joint counts and
+  capacities are compile-time constants.
+- **Embedded-ready.** The runtime crates build for `no_std` and bare-metal
+  targets.
+- **Typed.** Angles, lengths, and velocities use SI units in the type system,
+  not bare floats.
+- **Copper-native.** Every component is a `CuTask` you name directly in RON.
+  Nothing is ported from ROS.
 
-| Crate | Path | Kind | Description |
-|---|---|---|---|
-| `repose` | `components/libs/repose` | umbrella | Re-exports every component below (`kinematics`, `collision`, `motion_planning`, …); MuJoCo bridge behind feature `mujoco-sim` |
-| `repose-kinematics` | `components/libs/repose_kinematics` | `lib` / `task` | Const-generic `CuKinematicChain<N>` forward kinematics, space/body geometric Jacobians, DLS inverse kinematics, differential IK with singularity/limit damping, `CuForwardKinematicsTask<N>`, `CuInverseKinematicsTask<N>`, `CuServoTask<N>`, the bridge-facing `CuJointStatePayload<N>`, and 6-DOF igus ReBeL model |
-| `repose-collision` | `components/libs/repose_collision` | `lib` / `task` | Fixed-capacity sphere/capsule primitives, exact signed-distance queries, `CuRobotCollisionModel<N, M>`, `CuPlanningScene` with a zero-copy `CuCollisionEnv`, `CuCollisionCheckTask<N>`, and igus ReBeL collision geometry |
-| `repose-robot-description` | `components/libs/repose_robot_description` | `startup lib` | URDF serial-chain extraction, primitive collision conversion, and SRDF serial groups, collision exclusions, and named states |
-| `repose-robot-interface` | `components/libs/repose_robot_interface` | `lib` | Vendor-neutral robot bridge contract: standard channel set (`joint_state`, `joint_command`, `session`, `session_state`), `CuSessionCommand` / `CuSessionState`, and the shared `CuSessionTracker` session rules |
-| `repose-trajectory` | `components/libs/repose_trajectory` | `lib` / `task` | Fixed-capacity joint trajectories, interpolation, timing profiles, and sampled Cartesian TCP-zone blending |
-| `repose-motion-planning` | `components/tasks/repose_motion_planning` | `lib` / `task` | Planner-agnostic contract: `CuJointPlanner` trait, `CuJointPlanRequest<N>` / `CuJointPlanPath<N>` with explicit `CuPlanStatus`, shared scene validity checks, the generic anytime `CuJointPlannerTask<P, N>`, `CuJointGoalTask<N>` (state + goal → request) and `CuPlanToTrajectoryTask<N, CAP>` (path → timed trajectory), and built-in planners: RRT-Connect and PRM (sampling), A* lattice (search), gradient path optimizer and STOMP (optimization), direct joint line |
-| `repose-joint-rrt-star` | `components/tasks/repose_joint_rrt_star` | `task` | Sampling-based RRT* implementing `CuJointPlanner`, with deterministic `CuRng` seeding, informed pruning, rewiring, and path shortcutting; `CuJointRrtStarTask` is the generic planner task running it |
-| `repose-controller` | `components/tasks/repose_controller` | `task` | Robot-agnostic joint controller with position/velocity/effort modes, robot status, state watchdog, and command rate limiting |
-| `repose-io` | `components/tasks/repose_io` | `task` | Robot-agnostic digital IO payloads and an IO-driven gripper task |
+## At a glance
 
-See [ROADMAP.md](ROADMAP.md) for where this is going and what is explicitly out
-of scope.
+| Operation (6-DOF igus ReBeL) | Median |
+|---|---|
+| Forward kinematics | **312 ns** |
+| Differential IK (twist → joint velocities) | **682 ns** |
+| Self-collision check, one configuration | **427 ns** |
+| Configuration vs 11-obstacle scene | **1.12 µs** |
+| Full RRT-Connect planning job | **121 µs** |
 
-## Benchmarks
+These are local wall-clock medians on an Apple M4. Regression tracking runs on
+every PR through [CodSpeed](https://app.codspeed.io/ReposeRobotics/repose). The
+full table and method are in [docs/benchmarks.md](docs/benchmarks.md).
 
-Benchmarks run continuously on every pull request and every push to `master`
-with [CodSpeed](https://app.codspeed.io/ReposeRobotics/repose) (Divan through
-`codspeed-divan-compat`, CPU simulation instrument on `ubuntu-latest`).
-Simulation numbers are stable across runners and are used for regression
-detection; they are not wall-clock latencies. Live results, history, and
-per-commit comparisons are on the
-[CodSpeed dashboard](https://app.codspeed.io/ReposeRobotics/repose).
+## Install
 
-All scenarios use the 6-DOF igus ReBeL preset. The collision scene contains
-11 obstacles; planners run one full anytime job around a sphere placed on the
-TCP path of the straight joint line; trajectory parameterization uses a
-5-waypoint path.
-
-The table below is a local wall-clock snapshot (Divan median of 100 samples)
-for orientation. Reproduce it with `just bench` and
-`cargo bench -p repose-kinematics --bench ik`.
-
-| Benchmark | Scenario | Median |
-|---|---|---|
-| `forward_kinematics` | FK, 6-DOF ReBeL | 312 ns |
-| `geometric_jacobian` | Space Jacobian | 325 ns |
-| `body_jacobian` | Body Jacobian | 375 ns |
-| `differential_ik` | 6D twist → joint velocities | 682 ns |
-| `inverse_kinematics_dls` | Seed → reachable pose (DLS) | 10.8 µs |
-| `inverse_kinematics_pseudoinverse` | Seed → reachable pose (undamped) | 4.29 µs |
-| `check_configuration_self` | Self-collision, one configuration | 427 ns |
-| `check_configuration_scene` | Configuration vs 11-obstacle scene | 1.12 µs |
-| `is_segment_collision_free_scene` | Swept segment vs scene | 51.6 µs |
-| `plan` (RRT-Connect) | Full anytime planning job | 121 µs |
-| `plan` (RRT*) | Full anytime planning job | 2.77 ms |
-| `plan` (PRM) | Full anytime planning job | 37.3 ms |
-| `parameterize` (S-curve) | 5-waypoint trajectory timing | 170 µs |
-| `sample_quintic_1khz` | Quintic sampling at 1 kHz | 608 µs |
-
-Snapshot machine: Apple M4 (arm64), rustc 1.99.0, measured 2026-11-04.
-Treat these as indicative only; use the CodSpeed dashboard for
-release-to-release comparisons.
-
-IK is additionally fuzzed continuously with ClusterFuzzLite (OSS-Fuzz);
-see the badges above.
-
-## Consuming (pre-1.0)
-
-Nothing is published to crates.io yet (`publish = false` workspace-wide; the API
-is pre-1.0 and may change). Depend on the git repository instead:
+Nothing is on crates.io yet. The API is pre-1.0 and may still change, so depend
+on a git tag:
 
 ```toml
+[dependencies]
 repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.3" }
 ```
 
-The workspace is versioned and tagged as a whole (`vX.Y.Z`), never per crate;
-`repose` carries the product version. Pre-1.0, a minor bump (0.7 → 0.8) may
-break the Rust API, payload encoding, or RON config; patch releases never do.
-The full policy is in [docs/versioning.md](docs/versioning.md), and every
-release is recorded in [CHANGELOG.md](CHANGELOG.md).
+The `repose` umbrella crate re-exports every component. You can also depend on
+individual crates.
 
 | Repose | Copper (`cu29`) | Rust (MSRV) |
 |---|---|---|
 | 0.7 – 0.8 (as `repose-*`) | 1.3 | 1.95 |
 | 0.1 – 0.6 (as `cu-*`) | 1.3 | 1.95 |
 
-## Quick Start
+The workspace is versioned and tagged as a whole (`vX.Y.Z`). Before 1.0, a
+minor bump can break the Rust API, payload encoding, or RON config; a patch
+release never does. See [docs/versioning.md](docs/versioning.md).
 
-```bash
-just
-```
+## Quick start
 
-Every task is generic over its joint count and capacities and can be named
-directly in RON, e.g. `type: "repose_trajectory::CuFollowTrajectoryTask<6, 1024>"`;
-applications do not wrap library tasks. For a complete goal → plan → time →
-follow → control loop against MuJoCo, configured entirely in RON, see
-[the simulator example](examples/mujoco_rebel/README.md).
-
-## Robot configuration
-
-Only serial kinematic chains are supported. The joint count `N` is part of the task
-and payload types; branched and closed-chain mechanisms are outside the current scope.
-
-Task initialization never picks a robot implicitly. FK, IK, servo, collision,
-and planner tasks require a `chain`, given either as a preset name or inline
-with exactly `N` joint specifications:
+Every task is generic over its joint count and capacities, and you name it
+directly in RON. Applications don't wrap library tasks:
 
 ```ron
-config: {"chain": "igus_rebel", "collision_model": "igus_rebel"}
-config: {"chain": {"joints": [...]}, "collision_model": {"shapes": [...], "safety_margin": 0.005}}
+(
+    id: "planner",
+    type: "repose_joint_rrt_star::CuJointRrtStarTask<6>",
+    background: true,
+    config: {"chain": "igus_rebel", "collision_model": "igus_rebel"},
+),
+(id: "follower", type: "repose_trajectory::CuFollowTrajectoryTask<6, 1024>"),
 ```
 
-An optional `tool_offset` overrides the chain's flange-to-tool transform.
-`CuRobotCollisionModel<N, M>` stores up to `M` shapes attached to `N` movable
-frames or the base. The default `M = N` preserves one-shape-per-joint
-construction; imported robots can have several shapes per link, missing geometry,
-and shapes on fixed links. Contacts identify shape indices.
+The [MuJoCo simulator example](examples/mujoco_rebel/README.md) runs the full
+goal → plan → time → follow → control loop, configured entirely in RON. Run
+`just` in the repository root to list the development tasks.
 
-Use `from_params` to supply imported models directly.
-`CuJointPosition` carries `Revolute(Angle)`, `Prismatic(Length)`, or `Fixed`;
-`CuJointVelocity`, `CuJointAcceleration`, and `CuJointJerk` similarly distinguish
-angular and linear quantities. Incorrect coordinate units return an error.
-Planner distances and costs are dimensionless, scaled by `CuJointMetric`
-(default: one radian and one meter).
+## Crates
 
-## URDF and SRDF
+| Crate | What it does |
+|---|---|
+| [`repose`](components/libs/repose) | Umbrella crate; re-exports everything, plus the MuJoCo bridge behind `mujoco-sim` |
+| [`repose-kinematics`](components/libs/repose_kinematics) | FK, space/body Jacobians, DLS and differential IK, servo task, igus ReBeL model |
+| [`repose-collision`](components/libs/repose_collision) | Sphere/capsule models, exact signed distance, planning scene, collision tasks |
+| [`repose-robot-description`](components/libs/repose_robot_description) | Startup URDF/SRDF import into fixed-size kinematic and collision models |
+| [`repose-robot-interface`](components/libs/repose_robot_interface) | Vendor-neutral robot bridge contract: channels and session rules |
+| [`repose-trajectory`](components/libs/repose_trajectory) | Fixed-capacity trajectories, timing profiles, Cartesian TCP-zone blending |
+| [`repose-motion-planning`](components/tasks/repose_motion_planning) | `CuJointPlanner` contract, anytime planner task, built-in planners |
+| [`repose-joint-rrt-star`](components/tasks/repose_joint_rrt_star) | Informed RRT* with rewiring and shortcutting |
+| [`repose-controller`](components/tasks/repose_controller) | Position/velocity/effort joint controller with watchdog and rate limiting |
+| [`repose-io`](components/tasks/repose_io) | Digital IO payloads and an IO-driven gripper task |
 
-```rust,ignore
-let robot = CuRobotDescription::<6, 24>::from_urdf_srdf(
-    &urdf_xml,
-    &srdf_xml,
-    CuSrdfImport::new("manipulator").with_collision(CuCollisionModelParams {
-        safety_margin: Length::new::<meter>(0.005),
-        skip_adjacent_links: false,
-    }),
-)?;
-let fk = CuForwardKinematicsTask::from_params(robot.chain().clone())?;
-```
+## Documentation
 
-Parsing requires the `repose-robot-description` crate's `std` feature and runs at
-startup. The resulting kinematic and collision models remain fixed-size and
-usable by the `no_std` runtime crates. `N` counts movable joints, not fixed joints;
-`M` is a collision-shape capacity. Import errors report insufficient capacity or
-a joint-count mismatch. No XML parser or dynamic name lookup runs in a task cycle.
+| Guide | Covers |
+|---|---|
+| [Robot configuration](docs/robot-configuration.md) | Chain presets, inline chains, typed joint units, URDF/SRDF import |
+| [Motion planning](docs/motion-planning.md) | The planner contract, choosing a planner, planning-scene snapshots |
+| [Pose planning](docs/pose-planning.md) | Pose goals, straight TCP moves, RON wiring |
+| [Continuous motion and TCP zones](docs/trajectories.md) | Cartesian blending, timing profiles, follower interpolation |
+| [Benchmarks](docs/benchmarks.md) | Method, full results, how to reproduce them |
+| [API conventions](docs/api-conventions.md) | Params structs, constructors, units, visibility |
+| [Versioning](docs/versioning.md) · [Migration 0.8](docs/migration-0.8.md) | Release policy and upgrade notes |
 
-URDF import selects one base-to-tip serial path, folds fixed transforms into
-joint origins and the tool offset, and supports revolute, continuous, and
-prismatic joints. Other source-tree branches are outside the selected model.
-Continuous joints accept unbounded angles and sample a canonical `[-pi, pi]`
-interval; planning uses unwrapped coordinates, without shortest-angle wrapping.
+## Studio
 
-Collision spheres are exact. Cylinders become conservative capsules whose
-endpoints are at the cylinder's end-face centers; the rounded ends extend beyond
-the original cylinder. Meshes and boxes require explicit preprocessing and are
-rejected. All collision elements on the selected links, including base and fixed
-links, are retained. Links without collision elements contribute no shapes.
-Imported models check all distinct rigid-body pairs unless SRDF disables them.
+Studio is the private `studio` submodule. Clone with
+`git clone --recurse-submodules`, or run `git submodule update --init` in an
+existing checkout. You need access to the Studio repository; see
+[Studio's README](studio/README.md) for setup.
 
-The SRDF subset supports a group containing exactly one `<chain>`,
-`<disable_collisions>`, and complete `<group_state>` joint values. State order is
-mapped by joint name. Selected-chain mimic/passive joints and composed groups
-are rejected. End-effectors, virtual-joint world transforms, and other SRDF
-semantics are not imported. Supply expanded URDF XML; Xacro expansion is external.
-The format follows the [MoveIt URDF/SRDF guide](https://moveit.picknik.ai/main/doc/examples/urdf_srdf/urdf_srdf_tutorial.html).
+## Contributing
 
-Run the complete mixed revolute/prismatic example:
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short, work on a branch, run
+`just fmt` and `just pr-check`, and record user-visible changes in
+[CHANGELOG.md](CHANGELOG.md).
 
-```bash
-cargo run -p repose-robot-description --example serial_robot
-```
+## License
 
-It loads URDF/SRDF, resolves two named states, computes FK and IK, checks the IK
-solution for collisions, and runs the anytime planner. It exits successfully when
-all stages pass. Edge checks use discrete angular/linear interpolation; they are
-not swept-volume continuous collision detection.
-
-Existing callers must convert angular coordinates with `angle.into()` and match
-joint-velocity variants. Joint-limit RON values now use `revolute`, `prismatic`,
-`continuous`, or `fixed` variants. Planner `step_size`, `goal_threshold`, and
-`rewire_radius` replace their former `_rad` keys and use the configured metric.
-
-## Continuous motion and TCP zones
-
-`repose_trajectory::cartesian_blend::blend_cartesian_path` takes a serial chain,
-collision model, joint waypoints, and one typed `Length` zone radius per
-waypoint. A zero interior radius is an exact stop; a positive radius replaces
-that TCP corner with a sampled quadratic fly-by path. The first and last radii
-must be zero. Tool orientation follows shortest-arc interpolation, and IK is
-seeded from the previous solution. Input/output capacity is fixed at compile
-time; invalid geometry, IK failure, collision, or capacity exhaustion clears the
-output and returns a status.
-
-Geometry and timing are separate: the zone is a property of each waypoint,
-the profile a property of the motion. `path_timing::parameterize_cartesian_path`
-times the path with any `CuTrajectoryProfile` from `CuPathTimingConfig::profile`.
-Every profile flies through every positive zone and stops exactly at zero
-zones. The knots are joined by a C² natural cubic spline over a speed-weighted
-joint-space arc length; exact stops split the path into rest-to-rest pieces,
-each zone is crossed at a constant corner speed bounded by its curvature, and
-the moves between stops and corners follow the profile from one boundary speed
-to the next. Joint velocity and acceleration stay within the configured limits;
-S-curve joint jerk is checked on the quintic reconstruction, including curvature
-contributions. Every profile is certified on the reconstruction its follower
-executes — quintic Hermite for the S-curve, cubic Hermite for the others — and
-uniform time stretching brings any excess within the limits. The geometric spline is
-rechecked for joint limits, collisions, and zone containment, and a path that
-reverses inside a zone is rejected with `NoContinuousMotion` naming the
-waypoint. Read the result with
-`CuTrajectoryPayload::sample_quintic` for S-curve motion, or configure a
-`CuFollowTrajectoryTask` with `config: {"interpolation": "quintic"}`. Other
-profiles use `sample_cubic` and the `cubic` follower mode. Match the follower's `MAX_POINTS`
-type parameter to the generated payload capacity. The default follower
-interpolation remains linear. Interpolation mode is included in newly frozen follower state;
-earlier frozen snapshots need migration.
-
-Timing is conservative and automatic. Finite joint jerk bounds apply to the
-S-curve profile with quintic execution. Collision and zone checks apply to the geometric spline; the reconstructed
-execution curve still needs a separate collision and zone recheck. Checks are discrete and depend on their configured
-resolution; they are not swept-volume collision guarantees. The zone radius is a
-TCP-position tolerance, not a separate orientation tolerance or an exact
-reproduction of a vendor controller's zone algorithm.
-
-## Motion planners
-
-All planners implement `repose_motion_planning::CuJointPlanner` and run in one
-Copper task, `CuJointPlannerTask<P, N>`: `begin` starts a job from a
-`CuJointPlanRequest<N>`, `step(budget)` does a bounded quantum of work, and
-`write_best` fills a `CuJointPlanPath<N>` in place. The task owns the anytime
-contract (base and refine budgets, monotone publishing, seeding, replay
-state). Failures are published, not dropped: the path then carries no
-waypoints and its `status` names the reason (`invalid_start`,
-`invalid_goal`, `invalid_request`, `exhausted`, `capacity_exceeded`).
-
-The planner list lives in one place, [`repose::planners`](components/libs/repose/src/planners.rs):
-`CuPlannerChoice` names every planner (RON spelling) with its behaviour, and
-`CuAnyPlanner` runs any of them. Applications select planners by name from
-there; adding a planner is one trait impl plus one line in that list.
-
-The optimizers are local: they can stay stuck behind large obstacles where
-sampling or search planners still succeed.
-
-Sampling planners derive all randomness from the job seed; deterministic
-planners ignore it. New planners implement the trait, share
-`CuSceneValidity` for collision and clearance queries, and are registered in
-`repose::planners`.
-
-Pose goals and straight TCP moves are available through `CuPoseGoalTask`,
-`CuPosePlannerTask`, and `CuCartesianPlanTask`. Both planning paths carry scene
-revisions and use attached-object and exclusion checks. See
-[Pose planning](docs/pose-planning.md) for request types, failures, and RON wiring.
-
-## Planning scene snapshots
-
-`CuPlanningScene<O, A>` stores fixed-capacity obstacle and attached-shape
-geometry with stable object IDs and a scene revision. The collision-check task
-accepts joint positions, a scene snapshot, and stable-ID collision exclusions.
-Every planner captures the scene and resolved exclusions once per planning job (`CuSceneValidity`), checks
-obstacles and attached shapes throughout planning, and returns `scene_revision` and the captured exclusion set
-with the path. Consumers must compare both with their current inputs before
-accepting a plan. Refinement uses the captured snapshot until the next
-base call starts a new job.
-
-Attached shapes use link-local geometry and zero-based FK frame indices.
-`CuSceneExclusions` permits explicit attached-object contact with a robot shape,
-another attached object, or an obstacle. Scene objects are referenced by stable
-IDs; robot shapes use their model construction indices. Invalid exclusion
-references reject the query or planning job. Scene and exclusions must be published consistently.
-
-Scene decoding validates identity, counts, and geometry. Mutations fail before
-changing state if the revision cannot advance. Segment collision checks remain
-discrete and depend on the configured joint resolution.
+Apache 2.0. See [License.md](License.md).

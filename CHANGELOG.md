@@ -7,6 +7,13 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Reworked the README into a short branded landing page. The detailed
+  reference sections moved unchanged into `docs/robot-configuration.md`,
+  `docs/motion-planning.md`, `docs/trajectories.md`, and
+  `docs/benchmarks.md`.
+
 ## [0.8.3] - 2026-11-08
 
 ### Fixed

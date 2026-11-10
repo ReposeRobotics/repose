@@ -348,6 +348,11 @@ pub trait CuJointPlanner<const N: usize, const M: usize = N>: Sized + TypePath {
     /// [`InvalidStart`](CuPlanStatus::InvalidStart) or
     /// [`InvalidGoal`](CuPlanStatus::InvalidGoal). The default implementation
     /// reports unsupported planners explicitly instead of ignoring the set.
+    ///
+    /// On success, discards the current job, including cached paths and endpoint
+    /// checks. Until the next `begin`, `step` and `write_best` report
+    /// `InvalidRequest`, `write_best` emits no waypoints, and quality is zero.
+    /// Invalid or unsupported sets leave the current job unchanged.
     fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
         let _ = constraints;
         Err(CuError::from(
@@ -356,6 +361,9 @@ pub trait CuJointPlanner<const N: usize, const M: usize = N>: Sized + TypePath {
     }
 
     /// Clears the path constraints, restoring unconstrained planning.
+    /// Discards the current job even if no constraints were installed.
+    /// Built-in planners return to the same no-job state as after construction;
+    /// call `begin` before planning again.
     fn clear_path_constraints(&mut self) {}
 }
 

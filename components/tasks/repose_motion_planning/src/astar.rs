@@ -365,11 +365,22 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointAStar<N, M>
     }
 
     fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
-        self.validity.set_path_constraints(constraints)
+        self.validity.set_path_constraints(constraints)?;
+        self.status = CuPlanStatus::InvalidRequest;
+        self.expansions = 0;
+        self.len = 0;
+        self.open = 0;
+        self.best = CuJointPlanPath::default();
+        Ok(())
     }
 
     fn clear_path_constraints(&mut self) {
         self.validity.clear_path_constraints();
+        self.status = CuPlanStatus::InvalidRequest;
+        self.expansions = 0;
+        self.len = 0;
+        self.open = 0;
+        self.best = CuJointPlanPath::default();
     }
 }
 

@@ -641,3 +641,86 @@ fn test_pose_planner_honours_constraints() {
     assert!(path.status.has_path(), "pose status: {:?}", path.status);
     assert!(!dense_violation(&path, &orientation_constraints()).0);
 }
+
+fn excluding_start_constraints() -> CuPathConstraintSet {
+    let mut set = CuPathConstraintSet::new();
+    set.push(CuPathConstraint::Orientation(
+        CuOrientationConstraint::new(CuToolAxis::Z, [0.0, 0.0, 1.0], Angle::new::<degree>(1.0))
+            .unwrap(),
+    ))
+    .unwrap();
+    set
+}
+
+#[test]
+fn test_direct_constraint_change_discards_short_pending_move() {
+    let mut request = clear_request();
+    request.goal = request.start;
+    request.goal[0] = CuJointPosition::Revolute(Angle::new::<degree>(START[0] + 0.001));
+    let mut planner = CuJointDirect::new(
+        igus_rebel_chain(),
+        igus_rebel_collision_model(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(planner.begin(&request, 1).unwrap(), CuPlanStatus::Searching);
+    planner
+        .set_path_constraints(&excluding_start_constraints())
+        .unwrap();
+    assert_eq!(planner.step(1).unwrap(), CuPlanStatus::InvalidRequest);
+    let mut path = CuJointPlanPath::default();
+    assert!(!planner.write_best(&mut path).has_path());
+    assert_eq!(path.len, 0);
+}
+
+#[test]
+fn test_task_constraint_change_replaces_published_result() {
+    let planner = CuJointDirect::new(
+        igus_rebel_chain(),
+        igus_rebel_collision_model(),
+        Default::default(),
+    )
+    .unwrap();
+    let mut task = CuJointPlannerTask::from_planner(planner, 1, 1, 1).unwrap();
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    let input = CuMsg::new(Some(clear_request()));
+    let mut output = CuMsg::new(None);
+    task.base(&ctx, &input, &mut output).unwrap();
+    assert!(output.payload().unwrap().status.has_path());
+    task.set_path_constraints(&excluding_start_constraints())
+        .unwrap();
+    task.refine(&ctx, &mut output).unwrap();
+    assert!(!output.payload().is_some_and(|path| path.status.has_path()));
+}
+
+#[test]
+fn test_pose_task_constraint_changes_discard_published_result() {
+    let config: ComponentConfig = ron::from_str(
+        r#"#![enable(unwrap_newtypes)] {"planner": {"chain": "igus_rebel", "collision_model": "igus_rebel", "params": {}}}"#
+    ).unwrap();
+    let mut task =
+        CuPosePlannerTask::<CuJointDirect<6>, 6>::new(Some(&config), task_resources()).unwrap();
+    let joint = clear_request();
+    let request = CuPosePlanRequest {
+        start: joint.start,
+        goal: tcp_pose_from_matrix(tool_pose(&joint.start).to_matrix()),
+        scene: joint.scene,
+        exclusions: joint.exclusions,
+    };
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    let input = CuMsg::new(Some(request));
+    let mut output = CuMsg::new(None);
+    for clear in [false, true] {
+        task.clear_path_constraints();
+        task.base(&ctx, &input, &mut output).unwrap();
+        assert!(output.payload().unwrap().status.has_path());
+        if clear {
+            task.clear_path_constraints();
+        } else {
+            task.set_path_constraints(&excluding_start_constraints())
+                .unwrap();
+        }
+        task.refine(&ctx, &mut output).unwrap();
+        assert!(!output.payload().is_some_and(|path| path.status.has_path()));
+    }
+}

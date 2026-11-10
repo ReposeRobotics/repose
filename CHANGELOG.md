@@ -47,7 +47,10 @@ may be breaking.
   per-planner logic; violating starts and goals fail with the existing
   `InvalidStart` / `InvalidGoal` statuses. Set them programmatically with the
   new `CuJointPlanner::set_path_constraints` / `clear_path_constraints`
-  methods (forwarded by the planner and pose-planner tasks) or with the new
+  methods (forwarded by the planner and pose-planner tasks). Successfully
+  setting or clearing constraints discards the current job and its cached
+  result; a new request is required before planning resumes. Set constraints
+  at construction with the new
   optional `"constraints"` key in the planner task's node config. Pose-goal
   planning applies the same set to IK solution selection. Enforcement is
   rejection of violating samples at the planner's discrete checking

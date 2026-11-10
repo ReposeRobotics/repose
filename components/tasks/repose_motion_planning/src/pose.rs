@@ -210,16 +210,21 @@ impl<P: CuJointPlanner<N, M>, const N: usize, const M: usize> CuPosePlannerTask<
     /// planning: converged IK solutions that violate them are skipped like
     /// colliding ones, and the joint planner rejects violating configurations.
     /// Fails without changing the task when the set is invalid or the planner
-    /// does not support constraints.
+    /// does not support constraints. On success, discards the current job;
+    /// the next refinement replaces the old output with a no-job failure.
     pub fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
         self.inner.set_path_constraints(constraints)?;
-        self.validity.set_path_constraints(constraints)
+        self.validity.set_path_constraints(constraints)?;
+        self.failed = false;
+        Ok(())
     }
 
-    /// Clears the path constraints from IK selection and joint planning.
+    /// Clears constraints and discards the current job. The next refinement
+    /// replaces the old output with a no-job failure.
     pub fn clear_path_constraints(&mut self) {
         self.inner.clear_path_constraints();
         self.validity.clear_path_constraints();
+        self.failed = false;
     }
 }
 impl<P, const N: usize, const M: usize> Freezable for CuPosePlannerTask<P, N, M> {

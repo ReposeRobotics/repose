@@ -48,6 +48,16 @@ references reject the query or planning job. Scene and exclusions must be publis
 
 ## Path constraints
 
+Successfully setting or clearing constraints discards the current planning job,
+including its cached path and endpoint checks, even when the constraint set is
+unchanged. All seven built-in planners and `CuAnyPlanner` return to their
+construction state: `step` and `write_best` report `InvalidRequest`, no
+waypoints are emitted, and quality is zero until the next `begin`.
+An invalid or unsupported set leaves the job unchanged. Joint and pose planner
+tasks also reset their job and publication bookkeeping; their next refinement
+replaces any old output with a no-job failure. Start a new request with `base`
+to resume planning.
+
 Planners optionally enforce tool-frame path constraints along the whole move.
 `CuOrientationConstraint` keeps a chosen tool-frame axis within a cone angle
 of a base-frame reference direction ("keep the tool upright"),

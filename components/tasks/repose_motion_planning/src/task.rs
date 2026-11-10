@@ -280,14 +280,25 @@ impl<P: CuJointPlanner<N, M>, const N: usize, const M: usize> CuJointPlannerTask
     /// Sets the path constraints on the wrapped planner: every accepted
     /// configuration must satisfy them, on top of joint limits and
     /// collisions. Fails without changing the planner when the set is invalid
-    /// or the planner does not support constraints.
+    /// or the planner does not support constraints. On success, discards the
+    /// current job; the next refinement replaces the old output with a no-job failure.
     pub fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
-        self.planner.set_path_constraints(constraints)
+        self.planner.set_path_constraints(constraints)?;
+        self.status = CuPlanStatus::default();
+        self.effort = 0;
+        self.published_cost = f64::INFINITY;
+        self.published_quality = quality_from_f32(0.0);
+        Ok(())
     }
 
-    /// Clears the path constraints on the wrapped planner.
+    /// Clears the path constraints and discards the current job.
+    /// The next refinement replaces the old output with a no-job failure.
     pub fn clear_path_constraints(&mut self) {
         self.planner.clear_path_constraints();
+        self.status = CuPlanStatus::default();
+        self.effort = 0;
+        self.published_cost = f64::INFINITY;
+        self.published_quality = quality_from_f32(0.0);
     }
 
     /// The wrapped planner.

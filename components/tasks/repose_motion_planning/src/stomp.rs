@@ -374,11 +374,20 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointStomp<N, M>
     }
 
     fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
-        self.validity.set_path_constraints(constraints)
+        self.validity.set_path_constraints(constraints)?;
+        self.status = CuPlanStatus::InvalidRequest;
+        self.iterations = 0;
+        self.count = 0;
+        self.best_cost = f64::INFINITY;
+        Ok(())
     }
 
     fn clear_path_constraints(&mut self) {
         self.validity.clear_path_constraints();
+        self.status = CuPlanStatus::InvalidRequest;
+        self.iterations = 0;
+        self.count = 0;
+        self.best_cost = f64::INFINITY;
     }
 }
 

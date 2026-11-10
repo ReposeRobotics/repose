@@ -24,6 +24,7 @@ use repose_motion_planning::CuJointPlanner;
 use repose_motion_planning::CuJointPrm;
 use repose_motion_planning::CuJointRrtConnect;
 use repose_motion_planning::CuJointStomp;
+use repose_motion_planning::CuPathConstraintSet;
 use repose_motion_planning::CuPlanStatus;
 use repose_motion_planning::CuPlannerKind;
 use serde::Deserialize;
@@ -100,6 +101,21 @@ macro_rules! planners {
             fn quality(&self) -> Quality {
                 match self {
                     $(Self::$variant(p) => p.quality(),)+
+                }
+            }
+
+            fn set_path_constraints(
+                &mut self,
+                constraints: &CuPathConstraintSet,
+            ) -> CuResult<()> {
+                match self {
+                    $(Self::$variant(p) => p.set_path_constraints(constraints),)+
+                }
+            }
+
+            fn clear_path_constraints(&mut self) {
+                match self {
+                    $(Self::$variant(p) => p.clear_path_constraints(),)+
                 }
             }
         }

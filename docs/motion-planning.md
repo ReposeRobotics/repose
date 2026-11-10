@@ -46,6 +46,50 @@ another attached object, or an obstacle. Scene objects are referenced by stable
 IDs; robot shapes use their model construction indices. Invalid exclusion
 references reject the query or planning job. Scene and exclusions must be published consistently.
 
+## Path constraints
+
+Planners optionally enforce tool-frame path constraints along the whole move.
+`CuOrientationConstraint` keeps a chosen tool-frame axis within a cone angle
+of a base-frame reference direction ("keep the tool upright"),
+`CuPositionRegionConstraint` keeps the tool centre point inside a base-frame
+axis-aligned box, and `CuPathConstraintSet` combines up to
+`MAX_PATH_CONSTRAINTS` of them, all of which must hold. `CuSceneValidity`
+carries the set and rejects violating configurations, so every planner honours
+constraints through its existing validity checks; a violating start or goal
+fails with the existing `InvalidStart` / `InvalidGoal` statuses. Set them
+programmatically with `CuJointPlanner::set_path_constraints` (or the
+task-level setter, which forwards to the planner) or with the optional
+`"constraints"` key in the planner task's node config:
+
+```ron
+config: {
+    "chain": "igus_rebel",
+    "collision_model": "igus_rebel",
+    "params": {},
+    "constraints": [
+        {"orientation": {"tool_axis": "z", "reference": [0.0, 0.0, 1.0], "tolerance": 0.17}},
+        {"position_region": {"min": [0.1, -0.5, 0.0], "max": [0.6, 0.5, 0.8]}},
+    ],
+}
+```
+
+Enforcement is rejection of violating samples at the planner's discrete
+checking resolution — the same sampling that checks collisions, not a
+continuous guarantee. The optimizers cannot steer toward satisfaction (their
+cost only sees collisions and smoothness); they keep the best satisfying path
+their descent happens through and fail with `Exhausted` when it never does.
+Very tight tolerances shrink the free space the planners sample from, which
+makes planning slow or lets jobs fail: a cone of a few degrees or a box of a
+few millimetres rejects almost every random sample. Prefer the loosest
+tolerance the task allows.
+
+Pose-goal planning applies the same set to IK solution selection: converged IK
+solutions that violate the constraints are skipped like colliding ones (see
+[Pose planning](pose-planning.md)). Trajectory timing does not recheck
+constraints: the timed execution curve is a spline fit through the waypoints,
+not the checked joint-space segments, so blending between waypoints can leave
+the constrained region.
+
 Scene decoding validates identity, counts, and geometry. Mutations fail before
 changing state if the revision cannot advance. Segment collision checks remain
 discrete and depend on the configured joint resolution.

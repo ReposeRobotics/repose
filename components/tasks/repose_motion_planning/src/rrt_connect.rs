@@ -11,6 +11,7 @@ use crate::CuJointPlanPath;
 use crate::CuJointPlanRequest;
 use crate::CuJointPlanner;
 use crate::CuJointPlannerTask;
+use crate::CuPathConstraintSet;
 use crate::CuPlanStatus;
 use crate::CuPlannerKind;
 use crate::common::check_endpoints;
@@ -335,6 +336,14 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointRrtConnect<
                 f64::INFINITY
             },
         )
+    }
+
+    fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        self.validity.set_path_constraints(constraints)
+    }
+
+    fn clear_path_constraints(&mut self) {
+        self.validity.clear_path_constraints();
     }
 }
 

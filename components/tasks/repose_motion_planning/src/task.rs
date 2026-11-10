@@ -3,6 +3,7 @@
 use crate::CuJointPlanPath;
 use crate::CuJointPlanRequest;
 use crate::CuJointPlanner;
+use crate::CuPathConstraintSet;
 use crate::CuPlanStatus;
 use bincode::Decode;
 use bincode::Encode;
@@ -50,6 +51,10 @@ pub struct CuJointPlannerDebugState {
 ///     "params": {"step_size": 0.3, "max_nodes": 200}, // planner params; omit = defaults
 ///     "base_budget": 64,                // optional; default CuJointPlanner::DEFAULT_BUDGETS
 ///     "refine_budget": 32,              // optional
+///     // optional path constraints; omit = unconstrained
+///     "constraints": [
+///         {"orientation": {"tool_axis": "z", "reference": [0.0, 0.0, 1.0], "tolerance": 0.17}},
+///     ],
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +129,58 @@ impl<P, const N: usize, const M: usize> CuJointPlannerParams<P, N, M> {
             })?
             .resolve::<N>()?;
         Ok((chain, model))
+    }
+}
+
+/// Node config accepted by [`CuJointPlannerTask::new`]: [`CuJointPlannerParams`]
+/// plus an optional `constraints` key. Private so the public params struct
+/// keeps its exact shape (a new field would break downstream struct literals);
+/// existing configs parse exactly as before.
+#[derive(Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    bound(deserialize = "P: Deserialize<'de> + Default")
+)]
+pub(crate) struct CuJointPlannerTaskConfig<P, const N: usize, const M: usize = N> {
+    #[serde(default)]
+    chain: Option<CuChainSpec<N>>,
+    #[serde(default)]
+    collision_model: Option<CuCollisionModelSpec<M>>,
+    #[serde(default)]
+    params: P,
+    #[serde(default)]
+    base_budget: Option<u32>,
+    #[serde(default)]
+    refine_budget: Option<u32>,
+    #[serde(default)]
+    constraints: Option<CuPathConstraintSet>,
+}
+
+impl<P: Default, const N: usize, const M: usize> Default for CuJointPlannerTaskConfig<P, N, M> {
+    fn default() -> Self {
+        Self {
+            chain: None,
+            collision_model: None,
+            params: P::default(),
+            base_budget: None,
+            refine_budget: None,
+            constraints: None,
+        }
+    }
+}
+
+impl<P, const N: usize, const M: usize> CuJointPlannerTaskConfig<P, N, M> {
+    pub(crate) fn into_parts(self) -> (CuJointPlannerParams<P, N, M>, Option<CuPathConstraintSet>) {
+        (
+            CuJointPlannerParams {
+                chain: self.chain,
+                collision_model: self.collision_model,
+                params: self.params,
+                base_budget: self.base_budget,
+                refine_budget: self.refine_budget,
+            },
+            self.constraints,
+        )
     }
 }
 
@@ -220,6 +277,19 @@ impl<P: CuJointPlanner<N, M>, const N: usize, const M: usize> CuJointPlannerTask
         Ok(self.publish(output))
     }
 
+    /// Sets the path constraints on the wrapped planner: every accepted
+    /// configuration must satisfy them, on top of joint limits and
+    /// collisions. Fails without changing the planner when the set is invalid
+    /// or the planner does not support constraints.
+    pub fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        self.planner.set_path_constraints(constraints)
+    }
+
+    /// Clears the path constraints on the wrapped planner.
+    pub fn clear_path_constraints(&mut self) {
+        self.planner.clear_path_constraints();
+    }
+
     /// The wrapped planner.
     pub const fn planner(&self) -> &P {
         &self.planner
@@ -313,12 +383,17 @@ where
     }
 
     fn new(config: Option<&ComponentConfig>, resources: Self::Resources<'_>) -> CuResult<Self> {
-        let params = config
-            .map(ComponentConfig::deserialize_into::<CuJointPlannerParams<P::Params, N, M>>)
+        let config = config
+            .map(ComponentConfig::deserialize_into::<CuJointPlannerTaskConfig<P::Params, N, M>>)
             .transpose()?
             .unwrap_or_default();
+        let (params, constraints) = config.into_parts();
         let Owned(mut rng) = resources.rng;
-        Self::from_params(params, rng.random::<u64>())
+        let mut task = Self::from_params(params, rng.random::<u64>())?;
+        if let Some(constraints) = constraints {
+            task.set_path_constraints(&constraints)?;
+        }
+        Ok(task)
     }
 
     fn base<'i, 'o>(

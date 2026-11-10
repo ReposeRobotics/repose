@@ -21,6 +21,7 @@ use crate::CuJointPlanPath;
 use crate::CuJointPlanRequest;
 use crate::CuJointPlanner;
 use crate::CuJointPlannerTask;
+use crate::CuPathConstraintSet;
 use crate::CuPlanStatus;
 use crate::CuPlannerKind;
 use crate::MAX_WAYPOINTS;
@@ -323,6 +324,14 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointPathOptimiz
             return quality_from_f32(1.0);
         }
         quality_from_f32((self.straight_cost / self.best_cost).clamp(0.0, 1.0) as f32)
+    }
+
+    fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        self.validity.set_path_constraints(constraints)
+    }
+
+    fn clear_path_constraints(&mut self) {
+        self.validity.clear_path_constraints();
     }
 }
 

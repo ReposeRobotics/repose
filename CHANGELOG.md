@@ -34,6 +34,22 @@ may be breaking.
 - `docs/library-examples.md`: what the simulator-free examples show, how
   to choose the const generic capacities, and how to read the compile
   errors when they mismatch.
+- Path constraints for motion planning (`repose-motion-planning`):
+  `CuOrientationConstraint` keeps a tool-frame axis within a cone angle of a
+  base-frame reference direction, `CuPositionRegionConstraint` keeps the tool
+  centre point inside a base-frame box, and `CuPathConstraintSet` combines up
+  to `MAX_PATH_CONSTRAINTS` of them (all must hold). `CuSceneValidity`
+  optionally carries a set and rejects violating configurations, so every
+  planner — RRT-Connect, PRM, A*, STOMP, the gradient optimizer, direct, and
+  RRT* — honours constraints through its existing validity checks with no
+  per-planner logic; violating starts and goals fail with the existing
+  `InvalidStart` / `InvalidGoal` statuses. Set them programmatically with the
+  new `CuJointPlanner::set_path_constraints` / `clear_path_constraints`
+  methods (forwarded by the planner and pose-planner tasks) or with the new
+  optional `"constraints"` key in the planner task's node config. Pose-goal
+  planning applies the same set to IK solution selection. Enforcement is
+  rejection of violating samples at the planner's discrete checking
+  resolution; very tight tolerances slow planning down or fail jobs.
 
 ### Changed
 

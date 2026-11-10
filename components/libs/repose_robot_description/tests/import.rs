@@ -6,8 +6,12 @@ use cu29::units::si::angular_velocity::radian_per_second;
 use cu29::units::si::f64::Angle;
 use cu29::units::si::f64::AngularVelocity;
 use cu29::units::si::f64::Length;
+use cu29::units::si::f64::Mass;
+use cu29::units::si::f64::MomentOfInertia;
 use cu29::units::si::f64::Velocity;
 use cu29::units::si::length::meter;
+use cu29::units::si::mass::kilogram;
+use cu29::units::si::moment_of_inertia::kilogram_square_meter;
 use cu29::units::si::velocity::meter_per_second;
 use repose_collision::CuCollisionEnv;
 use repose_collision::CuCollisionModelParams;
@@ -315,4 +319,94 @@ fn topology_semantics_and_zero_capacity_reports_fail_safely() {
     assert!(!report.is_collision_free());
     assert_eq!(report.as_slice().len(), 0);
     assert!(report.total_contacts() > 0);
+}
+
+const INERTIAL_URDF: &str = r#"<?xml version="1.0"?>
+<robot name="inertial_demo">
+  <link name="base">
+    <inertial>
+      <origin xyz="0 0 0.1"/>
+      <mass value="10.0"/>
+      <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+    </inertial>
+  </link>
+  <link name="l1">
+    <inertial>
+      <origin xyz="0.1 0 0"/>
+      <mass value="2.0"/>
+      <inertia ixx="0.02" ixy="0.0" ixz="0.0" iyy="0.03" iyz="0.0" izz="0.04"/>
+    </inertial>
+  </link>
+  <link name="l1b">
+    <inertial>
+      <origin xyz="0 0.2 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.015" iyz="0.0" izz="0.005"/>
+    </inertial>
+  </link>
+  <link name="l2">
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.002" ixy="0.0" ixz="0.0" iyy="0.002" iyz="0.0" izz="0.002"/>
+    </inertial>
+  </link>
+  <joint name="j1" type="revolute">
+    <parent link="base"/><child link="l1"/><origin xyz="0 0 0.5"/>
+    <axis xyz="0 0 1"/><limit lower="-1" upper="1" velocity="1" effort="10"/>
+  </joint>
+  <joint name="f1" type="fixed">
+    <parent link="l1"/><child link="l1b"/><origin xyz="0.1 0 0"/>
+  </joint>
+  <joint name="j2" type="prismatic">
+    <parent link="l1b"/><child link="l2"/><origin xyz="0 0.3 0"/>
+    <axis xyz="0 1 0"/><limit lower="0" upper="0.4" velocity="0.2" effort="10"/>
+  </joint>
+</robot>
+"#;
+
+#[test]
+fn inertial_import_combines_fixed_links_into_moving_bodies() {
+    let robot =
+        CuRobotDescription::<2, 1>::from_urdf(INERTIAL_URDF, urdf_import("base", "l2")).unwrap();
+    let links = robot.chain_inertia().links();
+    let mass = |i: usize| links[i].mass.get::<kilogram>();
+    let com = |i: usize| links[i].center_of_mass.map(|c| c.get::<meter>());
+    let tensor = |i: usize| links[i].inertia.map(|v| v.get::<kilogram_square_meter>());
+    // Body 0 folds l1 (2 kg at x = 0.1) and l1b (1 kg at (0.1, 0.2) in the
+    // joint frame): mass-weighted centre plus parallel-axis-shifted tensors,
+    // recombined about the shared centre of mass. The base link's 10 kg never
+    // moves, so it contributes nothing.
+    assert!((mass(0) - 3.0).abs() < 1e-12);
+    let c0 = com(0);
+    assert!((c0[0] - 0.1).abs() < 1e-9);
+    assert!((c0[1] - 0.2 / 3.0).abs() < 1e-9);
+    assert!(c0[2].abs() < 1e-12);
+    let expected = [0.17 / 3.0, 0.045, 43.0 / 600.0, 0.0, 0.0, 0.0];
+    for (k, want) in expected.iter().enumerate() {
+        assert!(
+            (tensor(0)[k] - want).abs() < 1e-9,
+            "component {k}: got {}, want {want}",
+            tensor(0)[k]
+        );
+    }
+    // Body 1 is l2 alone, with an identity centre-of-mass origin.
+    assert!((mass(1) - 0.5).abs() < 1e-12);
+    assert!(com(1).iter().all(|v| v.abs() < 1e-12));
+    for (k, got) in tensor(1).iter().enumerate() {
+        let want = if k < 3 { 0.002 } else { 0.0 };
+        assert!((got - want).abs() < 1e-12);
+    }
+    // A massless body stays valid: the fixture without `<inertial>` imports as zeros.
+    let plain = CuRobotDescription::<2, 6>::from_urdf(URDF, urdf_import("base", "tool")).unwrap();
+    for link in plain.chain_inertia().links() {
+        assert_eq!(link.mass, Mass::new::<kilogram>(0.0));
+        assert!(
+            link.inertia
+                .iter()
+                .all(|v| *v == MomentOfInertia::new::<kilogram_square_meter>(0.0))
+        );
+    }
+    // Negative mass is rejected rather than imported.
+    let bad_mass = INERTIAL_URDF.replacen("<mass value=\"2.0\"/>", "<mass value=\"-2.0\"/>", 1);
+    assert!(CuRobotDescription::<2, 1>::from_urdf(&bad_mass, urdf_import("base", "l2")).is_err());
 }

@@ -7,6 +7,18 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- Rigid-body dynamics in `repose-kinematics`: `CuLinkInertia` and
+  `CuChainInertia<N>` hold validated per-link mass, centre of mass, and
+  rotational inertia; `CuKinematicChain::inverse_dynamics` computes joint
+  torques/forces by recursive Newton-Euler into a caller-provided
+  `[CuJointEffort; N]`; `CuKinematicChain::gravity_compensation` returns the
+  holding torques via the same recursion. `CuJointEffort` (torque/force/fixed)
+  joins the joint-typed units family. URDF `<inertial>` elements import into
+  `CuRobotDescription::chain_inertia`, folding fixed-joint links into their
+  owner's rigid body.
+
 ### Changed
 
 - Reworked the README into a short branded landing page. The detailed

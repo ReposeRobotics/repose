@@ -669,8 +669,31 @@ fn import_inertia<const N: usize>(
     links: &BTreeMap<&str, Node<'_, '_>>,
     link_frames: &[(&str, Option<usize>, Transform3D<f64>)],
 ) -> CuResult<CuChainInertia<N>> {
+    // First pass: mass and centre of mass of each body.
     let mut total = [0.0; N];
     let mut first = [[0.0; 3]; N];
+    for (name, owner, offset) in link_frames {
+        let Some(owner) = *owner else { continue };
+        let Some(raw) = link_inertial(links[name])? else {
+            continue;
+        };
+        let t = offset.compose(raw.origin).to_matrix();
+        total[owner] += raw.mass;
+        for k in 0..3 {
+            first[owner][k] += raw.mass * t[k][3];
+        }
+    }
+    let mut center = [[0.0; 3]; N];
+    for i in 0..N {
+        if total[i] != 0.0 {
+            center[i] = first[i].map(|v| v / total[i]);
+        }
+    }
+
+    // Second pass: each link's tensor rotated into the owner frame and
+    // shifted straight to the body's centre of mass. Shifting to the owner
+    // origin and back would subtract two large parallel-axis terms and leave
+    // rounding noise that can make an exact tensor (a point mass) invalid.
     let mut second = [[[0.0; 3]; 3]; N];
     for (name, owner, offset) in link_frames {
         let Some(owner) = *owner else { continue };
@@ -686,22 +709,27 @@ fn import_inertia<const N: usize>(
             [t[1][0], t[1][1], t[1][2]],
             [t[2][0], t[2][1], t[2][2]],
         ];
-        let d = [t[0][3], t[1][3], t[2][3]];
-        total[owner] += raw.mass;
-        for k in 0..3 {
-            first[owner][k] += raw.mass * d[k];
-        }
-        // Link inertia rotated into the owner frame, shifted to the owner origin.
+        let e = [
+            t[0][3] - center[owner][0],
+            t[1][3] - center[owner][1],
+            t[2][3] - center[owner][2],
+        ];
         let local = [
             [raw.inertia[0], raw.inertia[3], raw.inertia[4]],
             [raw.inertia[3], raw.inertia[1], raw.inertia[5]],
             [raw.inertia[4], raw.inertia[5], raw.inertia[2]],
         ];
         let rotated = mat_mul_3(&mat_mul_3(&rotation, &local), &transpose_3(&rotation));
-        let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
         for r in 0..3 {
             for c in 0..3 {
-                let parallel = raw.mass * ((if r == c { dd } else { 0.0 }) - d[r] * d[c]);
+                // Parallel-axis term; the diagonal is a sum of squares, so it
+                // is never negative.
+                let parallel = if r == c {
+                    let (a, b) = ((r + 1) % 3, (r + 2) % 3);
+                    raw.mass * (e[a] * e[a] + e[b] * e[b])
+                } else {
+                    -raw.mass * e[r] * e[c]
+                };
                 second[owner][r][c] += rotated[r][c] + parallel;
             }
         }
@@ -711,13 +739,7 @@ fn import_inertia<const N: usize>(
         let (com, tensor) = if total[i] == 0.0 {
             ([0.0; 3], [0.0; 6])
         } else {
-            let center = first[i].map(|v| v / total[i]);
-            let cc = center[0] * center[0] + center[1] * center[1] + center[2] * center[2];
-            // Shift the owner-origin tensor to the centre of mass.
-            let at = |r: usize, k: usize| {
-                second[i][r][k]
-                    - total[i] * ((if r == k { cc } else { 0.0 }) - center[r] * center[k])
-            };
+            let at = |r: usize, k: usize| second[i][r][k];
             // Symmetrize: the sum is symmetric up to float rounding.
             let tensor = [
                 at(0, 0),
@@ -727,7 +749,7 @@ fn import_inertia<const N: usize>(
                 (at(0, 2) + at(2, 0)) / 2.0,
                 (at(1, 2) + at(2, 1)) / 2.0,
             ];
-            (center, tensor)
+            (center[i], tensor)
         };
         out[i] = CuLinkInertia::new(
             Mass::new::<kilogram>(total[i]),

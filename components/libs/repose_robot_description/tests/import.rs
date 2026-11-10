@@ -457,3 +457,48 @@ fn inertial_import_validates_each_link_before_folding() {
     let massless = INERTIAL_URDF.replacen("<mass value=\"1.0\"/>", "<mass value=\"0.0\"/>", 1);
     assert!(import(&massless).is_err());
 }
+
+/// A link with mass but no rotational inertia, placed off the joint frame,
+/// is an exact point mass. Folding must not turn rounding noise into a
+/// slightly negative tensor and reject it.
+#[test]
+fn inertial_import_accepts_offset_point_masses() {
+    let l2 =
+        "<inertia ixx=\"0.002\" ixy=\"0.0\" ixz=\"0.0\" iyy=\"0.002\" iyz=\"0.0\" izz=\"0.002\"/>";
+    let point = "<inertia ixx=\"0\" ixy=\"0\" ixz=\"0\" iyy=\"0\" iyz=\"0\" izz=\"0\"/>";
+    let mut checked = 0;
+    for ix in 0..13 {
+        for iy in 0..13 {
+            for iz in 0..9 {
+                let (x, y, z) = (
+                    0.037 * ix as f64 - 0.21,
+                    0.053 * iy as f64 - 0.33,
+                    0.071 * iz as f64 - 0.29,
+                );
+                // 0.7 kg: a mass that does not divide out exactly in binary.
+                let urdf = INERTIAL_URDF
+                    .replacen("<mass value=\"0.5\"/>", "<mass value=\"0.7\"/>", 1)
+                    .replacen(l2, point, 1)
+                    .replacen(
+                    "<link name=\"l2\">\n    <inertial>",
+                    &format!(
+                        "<link name=\"l2\">\n    <inertial>\n      <origin xyz=\"{x} {y} {z}\" rpy=\"0.3 -0.7 1.1\"/>"
+                    ),
+                    1,
+                );
+                assert!(urdf.contains("rpy=\"0.3 -0.7 1.1\""));
+                let robot = CuRobotDescription::<2, 1>::from_urdf(&urdf, urdf_import("base", "l2"))
+                    .unwrap_or_else(|e| panic!("offset ({x}, {y}, {z}) rejected: {e}"));
+                let body = robot.chain_inertia().links()[1];
+                let com = body.center_of_mass.map(|c| c.get::<meter>());
+                assert!((com[0] - x).abs() < 1e-12 && (com[1] - y).abs() < 1e-12);
+                assert!((com[2] - z).abs() < 1e-12);
+                for v in body.inertia {
+                    assert!(v.get::<kilogram_square_meter>().abs() < 1e-15);
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 1521);
+}

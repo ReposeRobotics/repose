@@ -959,6 +959,121 @@ mod tests {
         }
     }
 
+    /// Joint-space mass matrix of the ReBeL at `q`: column `j` is the effort
+    /// for a unit acceleration of joint `j` with no velocity and no gravity.
+    fn rebel_mass_matrix(q: [f64; 6]) -> [[f64; 6]; 6] {
+        let chain = igus_rebel_chain();
+        let inertia = rebel_inertia();
+        let positions = q.map(rev_pos);
+        let velocities = [0.0; 6].map(rev_vel);
+        let zero_g = [0.0; 3].map(Acceleration::new::<meter_per_second_squared>);
+        let mut matrix = [[0.0; 6]; 6];
+        for j in 0..6 {
+            let mut qdd = [0.0; 6];
+            qdd[j] = 1.0;
+            let accelerations = qdd.map(rev_acc);
+            let input =
+                CuInverseDynamicsInput::new(&positions, &velocities, &accelerations, zero_g);
+            let mut efforts = [CuJointEffort::default(); 6];
+            chain
+                .inverse_dynamics(&inertia, &input, &mut efforts)
+                .unwrap();
+            for (row, effort) in matrix.iter_mut().zip(efforts) {
+                row[j] = effort.si_value();
+            }
+        }
+        matrix
+    }
+
+    #[test]
+    fn rebel_mass_matrix_is_symmetric_positive_definite() {
+        let m = rebel_mass_matrix([0.25, -0.4, 0.55, -0.3, 0.45, 0.15]);
+        for (i, row) in m.iter().enumerate() {
+            for (j, value) in row.iter().enumerate() {
+                assert!(
+                    (value - m[j][i]).abs() < 1e-12,
+                    "M[{i}][{j}] = {value}, M[{j}][{i}] = {}",
+                    m[j][i]
+                );
+            }
+        }
+        // Kinetic energy is positive for every nonzero joint velocity tried.
+        for v in [
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.3, -0.7, 0.2, 1.1, -0.4, 0.9],
+            [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ] {
+            let mut energy = 0.0;
+            for i in 0..6 {
+                for j in 0..6 {
+                    energy += 0.5 * v[i] * m[i][j] * v[j];
+                }
+            }
+            assert!(energy > 0.0, "kinetic energy {energy} for velocity {v:?}");
+        }
+    }
+
+    /// Power balance in 3D: with no gravity and no acceleration, the power
+    /// `q̇·τ` of the velocity-dependent efforts equals the rate of change of
+    /// kinetic energy, `½ q̇ᵀ Ṁ q̇`. This checks the Coriolis, centrifugal and
+    /// gyroscopic terms on a spatial arm with full inertia tensors.
+    #[test]
+    fn rebel_velocity_terms_conserve_energy() {
+        let chain = igus_rebel_chain();
+        let inertia = rebel_inertia();
+        let zero_g = [0.0; 3].map(Acceleration::new::<meter_per_second_squared>);
+        for (q, qd) in [
+            (
+                [0.25, -0.4, 0.55, -0.3, 0.45, 0.15],
+                [0.6, -0.9, 0.4, 1.2, -0.7, 0.5],
+            ),
+            (
+                [-0.5, 0.9, -1.1, 0.7, -0.8, 1.2],
+                [-1.1, 0.3, 0.8, -0.6, 1.0, -0.4],
+            ),
+        ] {
+            let positions = q.map(rev_pos);
+            let velocities = qd.map(rev_vel);
+            let accelerations = [0.0; 6].map(rev_acc);
+            let input =
+                CuInverseDynamicsInput::new(&positions, &velocities, &accelerations, zero_g);
+            let mut efforts = [CuJointEffort::default(); 6];
+            chain
+                .inverse_dynamics(&inertia, &input, &mut efforts)
+                .unwrap();
+            let mut power = 0.0;
+            for i in 0..6 {
+                power += qd[i] * efforts[i].si_value();
+            }
+
+            let h = 1e-5;
+            let mut ahead = q;
+            let mut behind = q;
+            for i in 0..6 {
+                ahead[i] += h * qd[i];
+                behind[i] -= h * qd[i];
+            }
+            let m_ahead = rebel_mass_matrix(ahead);
+            let m_behind = rebel_mass_matrix(behind);
+            let mut energy_rate = 0.0;
+            for i in 0..6 {
+                for j in 0..6 {
+                    energy_rate +=
+                        0.5 * qd[i] * (m_ahead[i][j] - m_behind[i][j]) / (2.0 * h) * qd[j];
+                }
+            }
+            assert!(
+                power.abs() > 1e-4,
+                "test state has no velocity-dependent power to compare"
+            );
+            assert!(
+                (power - energy_rate).abs() < 1e-6,
+                "power {power}, kinetic energy rate {energy_rate}"
+            );
+        }
+    }
+
     #[test]
     fn zero_motion_zero_gravity_gives_zero_torque() {
         let chain = igus_rebel_chain();

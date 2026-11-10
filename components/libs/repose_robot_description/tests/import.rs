@@ -368,7 +368,7 @@ const INERTIAL_URDF: &str = r#"<?xml version="1.0"?>
 fn inertial_import_combines_fixed_links_into_moving_bodies() {
     let robot =
         CuRobotDescription::<2, 1>::from_urdf(INERTIAL_URDF, urdf_import("base", "l2")).unwrap();
-    let links = robot.chain_inertia().links();
+    let links = robot.chain_inertia().unwrap().links();
     let mass = |i: usize| links[i].mass.get::<kilogram>();
     let com = |i: usize| links[i].center_of_mass.map(|c| c.get::<meter>());
     let tensor = |i: usize| links[i].inertia.map(|v| v.get::<kilogram_square_meter>());
@@ -398,7 +398,7 @@ fn inertial_import_combines_fixed_links_into_moving_bodies() {
     }
     // A massless body stays valid: the fixture without `<inertial>` imports as zeros.
     let plain = CuRobotDescription::<2, 6>::from_urdf(URDF, urdf_import("base", "tool")).unwrap();
-    for link in plain.chain_inertia().links() {
+    for link in plain.chain_inertia().unwrap().links() {
         assert_eq!(link.mass, Mass::new::<kilogram>(0.0));
         assert!(
             link.inertia
@@ -406,9 +406,14 @@ fn inertial_import_combines_fixed_links_into_moving_bodies() {
                 .all(|v| *v == MomentOfInertia::new::<kilogram_square_meter>(0.0))
         );
     }
-    // Negative mass is rejected rather than imported.
+    // Negative mass is reported only when inertia is requested.
     let bad_mass = INERTIAL_URDF.replacen("<mass value=\"2.0\"/>", "<mass value=\"-2.0\"/>", 1);
-    assert!(CuRobotDescription::<2, 1>::from_urdf(&bad_mass, urdf_import("base", "l2")).is_err());
+    assert!(
+        CuRobotDescription::<2, 1>::from_urdf(&bad_mass, urdf_import("base", "l2"))
+            .unwrap()
+            .chain_inertia()
+            .is_err()
+    );
 }
 
 #[test]
@@ -434,7 +439,7 @@ fn inertial_import_validates_each_link_before_folding() {
             1,
         );
     assert_ne!(masked, INERTIAL_URDF);
-    assert!(import(&masked).is_err());
+    assert!(import(&masked).unwrap().chain_inertia().is_err());
     // The valid half of that pair alone still imports.
     let heavy = INERTIAL_URDF.replacen(
         l1b,
@@ -448,14 +453,14 @@ fn inertial_import_validates_each_link_before_folding() {
         "<inertia ixx=\"1\" ixy=\"0.9\" ixz=\"0.9\" iyy=\"1\" iyz=\"0.9\" izz=\"1\"/>",
         1,
     );
-    assert!(import(&impossible).is_err());
+    assert!(import(&impossible).unwrap().chain_inertia().is_err());
     // A negative mass on l1b cannot hide behind l1's larger positive mass.
     let masked_mass = INERTIAL_URDF.replacen("<mass value=\"1.0\"/>", "<mass value=\"-1.0\"/>", 1);
     assert_ne!(masked_mass, INERTIAL_URDF);
-    assert!(import(&masked_mass).is_err());
+    assert!(import(&masked_mass).unwrap().chain_inertia().is_err());
     // Nor can a massless link carry a tensor into the fold.
     let massless = INERTIAL_URDF.replacen("<mass value=\"1.0\"/>", "<mass value=\"0.0\"/>", 1);
-    assert!(import(&massless).is_err());
+    assert!(import(&massless).unwrap().chain_inertia().is_err());
 }
 
 /// A link with mass but no rotational inertia, placed off the joint frame,
@@ -489,7 +494,7 @@ fn inertial_import_accepts_offset_point_masses() {
                 assert!(urdf.contains("rpy=\"0.3 -0.7 1.1\""));
                 let robot = CuRobotDescription::<2, 1>::from_urdf(&urdf, urdf_import("base", "l2"))
                     .unwrap_or_else(|e| panic!("offset ({x}, {y}, {z}) rejected: {e}"));
-                let body = robot.chain_inertia().links()[1];
+                let body = robot.chain_inertia().unwrap().links()[1];
                 let com = body.center_of_mass.map(|c| c.get::<meter>());
                 assert!((com[0] - x).abs() < 1e-12 && (com[1] - y).abs() < 1e-12);
                 assert!((com[2] - z).abs() < 1e-12);
@@ -501,4 +506,37 @@ fn inertial_import_accepts_offset_point_masses() {
         }
     }
     assert_eq!(checked, 1521);
+}
+
+#[test]
+fn invalid_inertial_data_preserves_kinematics_and_collision_import() {
+    let plain = CuRobotDescription::<2, 6>::from_urdf(URDF, urdf_import("base", "tool")).unwrap();
+    for inertial in [
+        r#"<inertial><mass value="1"/><inertia ixx="0.001" iyy="0.001" izz="1" ixy="0" ixz="0" iyz="0"/></inertial>"#,
+        r#"<inertial><mass/></inertial>"#,
+        r#"<inertial><mass value="oops"/></inertial>"#,
+    ] {
+        let xml = URDF.replacen(
+            r#"<link name="arm">"#,
+            &format!(r#"<link name="arm">{inertial}"#),
+            1,
+        );
+        assert_ne!(xml, URDF);
+        let imported =
+            CuRobotDescription::<2, 6>::from_urdf(&xml, urdf_import("base", "tool")).unwrap();
+        assert!(imported.chain_inertia().is_err());
+        let semantic = CuRobotDescription::<2, 6>::from_urdf_srdf(
+            &xml,
+            SRDF,
+            CuSrdfImport::new("manipulator").with_collision(collision()),
+        )
+        .unwrap();
+        assert_eq!(semantic.chain(), plain.chain());
+        assert!(semantic.chain_inertia().is_err());
+        assert_eq!(imported.chain(), plain.chain());
+        assert_eq!(
+            format!("{:?}", imported.collision_model()),
+            format!("{:?}", plain.collision_model())
+        );
+    }
 }

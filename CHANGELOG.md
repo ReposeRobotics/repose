@@ -22,7 +22,9 @@ may be breaking.
   again on every call. `CuJointEffort` (torque/force/fixed)
   joins the joint-typed units family. URDF `<inertial>` elements import into
   `CuRobotDescription::chain_inertia`, validating each link and then folding
-  fixed-joint links into their owner's rigid body.
+  fixed-joint links into their owner's rigid body. Invalid or malformed inertial
+  data is reported by `chain_inertia()`; kinematics and collision import
+  continue to accept these descriptions.
 - Simulator-free library examples in the `repose` umbrella crate, each
   runnable with `cargo run -p repose --example <name>` on the built-in
   6-DOF igus ReBeL arm: `kinematics` (FK, then IK back to the same pose),

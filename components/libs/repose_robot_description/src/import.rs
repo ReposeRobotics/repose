@@ -111,7 +111,7 @@ impl<'a> CuSrdfImport<'a> {
 pub struct CuRobotDescription<const N: usize, const M: usize> {
     chain: CuKinematicChain<N>,
     collision_model: CuRobotCollisionModel<N, M>,
-    inertia: CuChainInertia<N>,
+    inertia: Result<CuChainInertia<N>, String>,
     joint_names: [String; N],
     shape_links: [String; M],
     links: BTreeSet<String>,
@@ -343,7 +343,7 @@ impl<const N: usize, const M: usize> CuRobotDescription<N, M> {
             }
         }
         let collision_model = CuRobotCollisionModel::new(&shapes[..len], collision)?;
-        let inertia = import_inertia(&links, &link_frames)?;
+        let inertia = import_inertia(&links, &link_frames).map_err(|error| error.to_string());
         Ok(Self {
             chain,
             collision_model,
@@ -373,8 +373,12 @@ impl<const N: usize, const M: usize> CuRobotDescription<N, M> {
     /// Chain inertial parameters combined from the URDF `<inertial>` elements.
     /// Each movable joint owns its child link plus the links folded into it
     /// across fixed joints; links without `<inertial>` contribute no mass.
-    pub const fn chain_inertia(&self) -> &CuChainInertia<N> {
-        &self.inertia
+    /// Invalid or malformed inertial data is reported here; kinematics and
+    /// collision import remain available regardless of inertial data.
+    pub fn chain_inertia(&self) -> CuResult<&CuChainInertia<N>> {
+        self.inertia
+            .as_ref()
+            .map_err(|error| CuError::from(error.as_str()))
     }
     /// Consumes the description and returns the runtime chain and collision model.
     pub fn into_parts(self) -> (CuKinematicChain<N>, CuRobotCollisionModel<N, M>) {

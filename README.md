@@ -59,7 +59,7 @@ on a git tag:
 
 ```toml
 [dependencies]
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.3" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
 ```
 
 The `repose` umbrella crate re-exports every component. You can also depend on
@@ -82,7 +82,7 @@ Depend on the umbrella crate (git tag; nothing is on crates.io yet):
 
 ```toml
 [dependencies]
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.3" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
 cu29 = { version = "1.3.1", features = ["units"] }
 cu-spatial-payloads = "1.3.0"
 ```

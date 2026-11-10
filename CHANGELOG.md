@@ -7,6 +7,8 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-10
+
 ### Added
 
 - Rigid-body dynamics in `repose-kinematics`: `CuLinkInertia` and
@@ -217,7 +219,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/ReposeRobotics/repose/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/ReposeRobotics/repose/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/ReposeRobotics/repose/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/ReposeRobotics/repose/compare/v0.8.0...v0.8.1

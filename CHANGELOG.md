@@ -21,6 +21,17 @@ may be breaking.
   joins the joint-typed units family. URDF `<inertial>` elements import into
   `CuRobotDescription::chain_inertia`, validating each link and then folding
   fixed-joint links into their owner's rigid body.
+- Simulator-free library examples in the `repose` umbrella crate, each
+  runnable with `cargo run -p repose --example <name>` on the built-in
+  6-DOF igus ReBeL arm: `kinematics` (FK, then IK back to the same pose),
+  `collision` (one free and one colliding configuration with clearance),
+  and `planning` (a seeded RRT-Connect plan around a blocking obstacle,
+  timed into a trajectory). Each example checks its own result and prints
+  deterministic output; `just examples` runs all three and a CI job runs
+  it.
+- `docs/library-examples.md`: what the simulator-free examples show, how
+  to choose the const generic capacities, and how to read the compile
+  errors when they mismatch.
 
 ### Changed
 
@@ -28,6 +39,11 @@ may be breaking.
   reference sections moved unchanged into `docs/robot-configuration.md`,
   `docs/motion-planning.md`, `docs/trajectories.md`, and
   `docs/benchmarks.md`.
+- Reworked the README's "Quick start" so the easiest paths come first:
+  try Repose as a library (dependency lines, the three simulator-free
+  example commands, and the kinematics core inline), generate a robot app
+  from the template, and finally the full Copper RON and MuJoCo
+  simulator pipeline.
 
 ## [0.8.3] - 2026-11-08
 

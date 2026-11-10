@@ -59,6 +59,18 @@ ron = "0.12"
 name = "determinism"
 required-features = ["std"]
 
+[[example]]
+name = "kinematics"
+required-features = ["std"]
+
+[[example]]
+name = "collision"
+required-features = ["std"]
+
+[[example]]
+name = "planning"
+required-features = ["std"]
+
 [[bench]]
 name = "kinematics"
 harness = false

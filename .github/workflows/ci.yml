@@ -59,6 +59,18 @@ jobs:
       - name: Run determinism check
         run: just determinism
 
+  # The simulator-free library examples must run (see `just examples`).
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Run library examples
+        run: just examples
+
   # Library crates must build with no operating system (see `just bare-metal`).
   bare-metal:
     runs-on: ubuntu-latest

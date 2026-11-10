@@ -112,3 +112,9 @@ impl_const_array_serde!(
     "CuJointAcceleration"
 );
 impl_const_array_serde!(jerk_array, crate::joint::CuJointJerk, "CuJointJerk");
+impl_const_array_serde!(effort_array, crate::joint::CuJointEffort, "CuJointEffort");
+impl_const_array_serde!(
+    link_inertia_array,
+    crate::dynamics::CuLinkInertia,
+    "CuLinkInertia"
+);

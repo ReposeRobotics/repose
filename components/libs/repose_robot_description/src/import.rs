@@ -5,8 +5,12 @@ use cu29::units::si::angular_velocity::radian_per_second;
 use cu29::units::si::f64::Angle;
 use cu29::units::si::f64::AngularVelocity;
 use cu29::units::si::f64::Length;
+use cu29::units::si::f64::Mass;
+use cu29::units::si::f64::MomentOfInertia;
 use cu29::units::si::f64::Velocity;
 use cu29::units::si::length::meter;
+use cu29::units::si::mass::kilogram;
+use cu29::units::si::moment_of_inertia::kilogram_square_meter;
 use cu29::units::si::velocity::meter_per_second;
 use repose_collision::CuCapsule;
 use repose_collision::CuCollisionModelParams;
@@ -14,11 +18,13 @@ use repose_collision::CuCollisionShape;
 use repose_collision::CuLinkShape;
 use repose_collision::CuRobotCollisionModel;
 use repose_collision::CuSphere;
+use repose_kinematics::CuChainInertia;
 use repose_kinematics::CuJointAxis;
 use repose_kinematics::CuJointLimits;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointSpec;
 use repose_kinematics::CuKinematicChain;
+use repose_kinematics::CuLinkInertia;
 use roxmltree::Document;
 use roxmltree::Node;
 use std::collections::BTreeMap;
@@ -105,6 +111,7 @@ impl<'a> CuSrdfImport<'a> {
 pub struct CuRobotDescription<const N: usize, const M: usize> {
     chain: CuKinematicChain<N>,
     collision_model: CuRobotCollisionModel<N, M>,
+    inertia: Result<CuChainInertia<N>, String>,
     joint_names: [String; N],
     shape_links: [String; M],
     links: BTreeSet<String>,
@@ -336,9 +343,11 @@ impl<const N: usize, const M: usize> CuRobotDescription<N, M> {
             }
         }
         let collision_model = CuRobotCollisionModel::new(&shapes[..len], collision)?;
+        let inertia = import_inertia(&links, &link_frames).map_err(|error| error.to_string());
         Ok(Self {
             chain,
             collision_model,
+            inertia,
             joint_names,
             shape_links,
             links: link_frames
@@ -360,6 +369,16 @@ impl<const N: usize, const M: usize> CuRobotDescription<N, M> {
     /// Collision model (including SRDF-disabled pairs once applied).
     pub const fn collision_model(&self) -> &CuRobotCollisionModel<N, M> {
         &self.collision_model
+    }
+    /// Chain inertial parameters combined from the URDF `<inertial>` elements.
+    /// Each movable joint owns its child link plus the links folded into it
+    /// across fixed joints; links without `<inertial>` contribute no mass.
+    /// Invalid or malformed inertial data is reported here; kinematics and
+    /// collision import remain available regardless of inertial data.
+    pub fn chain_inertia(&self) -> CuResult<&CuChainInertia<N>> {
+        self.inertia
+            .as_ref()
+            .map_err(|error| CuError::from(error.as_str()))
     }
     /// Consumes the description and returns the runtime chain and collision model.
     pub fn into_parts(self) -> (CuKinematicChain<N>, CuRobotCollisionModel<N, M>) {
@@ -596,4 +615,165 @@ fn decompose(transform: Transform3D<f64>) -> ([f64; 3], [f64; 3]) {
         (0.0, (-m[0][1]).atan2(m[1][1]))
     };
     ([m[0][3], m[1][3], m[2][3]], [roll, pitch, yaw])
+}
+
+/// One link's parsed `<inertial>` element in SI units.
+struct RawInertial {
+    mass: f64,
+    origin: Transform3D<f64>,
+    inertia: [f64; 6],
+}
+
+/// Parses and validates one link's `<inertial>` element. Links without
+/// `<inertial>` are massless; a present mass without an inertia tensor is a
+/// point mass.
+fn link_inertial(node: Node<'_, '_>) -> CuResult<Option<RawInertial>> {
+    let Some(inertial) = optional_child(node, "inertial")? else {
+        return Ok(None);
+    };
+    let mass = number(attr(child(inertial, "mass")?, "value")?)?;
+    if mass < 0.0 {
+        return Err(CuError::from("URDF link mass must be non-negative"));
+    }
+    let origin = origin(inertial)?;
+    let inertia = if let Some(tensor) = optional_child(inertial, "inertia")? {
+        [
+            number(attr(tensor, "ixx")?)?,
+            number(attr(tensor, "iyy")?)?,
+            number(attr(tensor, "izz")?)?,
+            number(attr(tensor, "ixy")?)?,
+            number(attr(tensor, "ixz")?)?,
+            number(attr(tensor, "iyz")?)?,
+        ]
+    } else {
+        [0.0; 6]
+    };
+    if mass == 0.0 && inertia.iter().any(|v| *v != 0.0) {
+        return Err(CuError::from("URDF massless link must have zero inertia"));
+    }
+    // Validate this link alone: once folded across fixed joints, another
+    // link's tensor could mask an impossible one. The checks are invariant
+    // under the rotation and parallel-axis shift applied while folding.
+    CuLinkInertia::new(
+        Mass::new::<kilogram>(mass),
+        [Length::new::<meter>(0.0); 3],
+        inertia.map(MomentOfInertia::new::<kilogram_square_meter>),
+    )?;
+    Ok(Some(RawInertial {
+        mass,
+        origin,
+        inertia,
+    }))
+}
+
+/// Combines the `<inertial>` elements on the imported path into one rigid body
+/// per movable joint. Links across fixed joints fold into their owner's body;
+/// base-side links do not move and are skipped.
+fn import_inertia<const N: usize>(
+    links: &BTreeMap<&str, Node<'_, '_>>,
+    link_frames: &[(&str, Option<usize>, Transform3D<f64>)],
+) -> CuResult<CuChainInertia<N>> {
+    // First pass: mass and centre of mass of each body.
+    let mut total = [0.0; N];
+    let mut first = [[0.0; 3]; N];
+    for (name, owner, offset) in link_frames {
+        let Some(owner) = *owner else { continue };
+        let Some(raw) = link_inertial(links[name])? else {
+            continue;
+        };
+        let t = offset.compose(raw.origin).to_matrix();
+        total[owner] += raw.mass;
+        for k in 0..3 {
+            first[owner][k] += raw.mass * t[k][3];
+        }
+    }
+    let mut center = [[0.0; 3]; N];
+    for i in 0..N {
+        if total[i] != 0.0 {
+            center[i] = first[i].map(|v| v / total[i]);
+        }
+    }
+
+    // Second pass: each link's tensor rotated into the owner frame and
+    // shifted straight to the body's centre of mass. Shifting to the owner
+    // origin and back would subtract two large parallel-axis terms and leave
+    // rounding noise that can make an exact tensor (a point mass) invalid.
+    let mut second = [[[0.0; 3]; 3]; N];
+    for (name, owner, offset) in link_frames {
+        let Some(owner) = *owner else { continue };
+        let Some(raw) = link_inertial(links[name])? else {
+            continue;
+        };
+        if raw.mass == 0.0 {
+            continue;
+        }
+        let t = offset.compose(raw.origin).to_matrix();
+        let rotation = [
+            [t[0][0], t[0][1], t[0][2]],
+            [t[1][0], t[1][1], t[1][2]],
+            [t[2][0], t[2][1], t[2][2]],
+        ];
+        let e = [
+            t[0][3] - center[owner][0],
+            t[1][3] - center[owner][1],
+            t[2][3] - center[owner][2],
+        ];
+        let local = [
+            [raw.inertia[0], raw.inertia[3], raw.inertia[4]],
+            [raw.inertia[3], raw.inertia[1], raw.inertia[5]],
+            [raw.inertia[4], raw.inertia[5], raw.inertia[2]],
+        ];
+        let rotated = mat_mul_3(&mat_mul_3(&rotation, &local), &transpose_3(&rotation));
+        for r in 0..3 {
+            for c in 0..3 {
+                // Parallel-axis term; the diagonal is a sum of squares, so it
+                // is never negative.
+                let parallel = if r == c {
+                    let (a, b) = ((r + 1) % 3, (r + 2) % 3);
+                    raw.mass * (e[a] * e[a] + e[b] * e[b])
+                } else {
+                    -raw.mass * e[r] * e[c]
+                };
+                second[owner][r][c] += rotated[r][c] + parallel;
+            }
+        }
+    }
+    let mut out = [CuLinkInertia::default(); N];
+    for i in 0..N {
+        let (com, tensor) = if total[i] == 0.0 {
+            ([0.0; 3], [0.0; 6])
+        } else {
+            let at = |r: usize, k: usize| second[i][r][k];
+            // Symmetrize: the sum is symmetric up to float rounding.
+            let tensor = [
+                at(0, 0),
+                at(1, 1),
+                at(2, 2),
+                (at(0, 1) + at(1, 0)) / 2.0,
+                (at(0, 2) + at(2, 0)) / 2.0,
+                (at(1, 2) + at(2, 1)) / 2.0,
+            ];
+            (center[i], tensor)
+        };
+        out[i] = CuLinkInertia::new(
+            Mass::new::<kilogram>(total[i]),
+            com.map(Length::new::<meter>),
+            tensor.map(MomentOfInertia::new::<kilogram_square_meter>),
+        )?;
+    }
+    CuChainInertia::new(out)
+}
+
+fn mat_mul_3(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c];
+        }
+    }
+    out
+}
+
+fn transpose_3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    [0, 1, 2].map(|r| [0, 1, 2].map(|c| m[c][r]))
 }

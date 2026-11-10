@@ -66,6 +66,13 @@ config: {
 }
 ```
 
+Path constraints (see [Motion planning](motion-planning.md)) go in the nested
+`planner` block next to `params`, where they apply both to IK solution
+selection and to the joint planner: converged IK solutions that violate the
+constraints are skipped like colliding ones, and the planned path must satisfy
+them throughout. When every converged IK solution violates them, the result is
+`InvalidGoal`, exactly as when they all collide.
+
 Use a task type such as
 `repose_motion_planning::CuPosePlannerTask<repose_motion_planning::CuJointDirect<6>, 6>`.
 Connect `CuPosePlanRequest<6>` into it and `CuJointPlanPath<6>` into the existing

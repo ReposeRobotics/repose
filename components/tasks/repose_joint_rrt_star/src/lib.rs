@@ -50,6 +50,7 @@ use repose_motion_planning::CuJointPlanPath;
 use repose_motion_planning::CuJointPlanRequest;
 use repose_motion_planning::CuJointPlanner;
 use repose_motion_planning::CuJointPlannerTask;
+use repose_motion_planning::CuPathConstraintSet;
 use repose_motion_planning::CuPlanStatus;
 use repose_motion_planning::CuPlannerKind;
 use repose_motion_planning::CuSceneValidity;
@@ -667,6 +668,25 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointRrtStar<N, 
     fn quality(&self) -> Quality {
         CuJointRrtStar::quality(self)
     }
+
+    fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        self.validity.set_path_constraints(constraints)?;
+        self.status = CuPlanStatus::InvalidRequest;
+        self.node_count = 0;
+        self.goal_node_idx = None;
+        self.best_cost = f64::INFINITY;
+        self.iterations = 0;
+        Ok(())
+    }
+
+    fn clear_path_constraints(&mut self) {
+        self.validity.clear_path_constraints();
+        self.status = CuPlanStatus::InvalidRequest;
+        self.node_count = 0;
+        self.goal_node_idx = None;
+        self.best_cost = f64::INFINITY;
+        self.iterations = 0;
+    }
 }
 
 #[cfg(test)]
@@ -675,6 +695,7 @@ mod tests {
     use cu_spatial_payloads::Transform3D;
     use cu29::cutask_anytime::AnytimeStatus;
     use cu29::cutask_anytime::CuAnytimeTask;
+    use cu29::units::si::angle::degree;
     use cu29::units::si::angle::radian;
     use cu29::units::si::f64::Angle as Angle64;
     use cu29::units::si::f64::Length;
@@ -910,6 +931,255 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    const DETOUR_START: [f64; 6] = [-0.6, 0.7, -0.2, 0.0, 0.0, 0.0];
+    const DETOUR_GOAL: [f64; 6] = [0.6, 0.7, -0.2, 0.0, 0.0, 0.0];
+    const DETOUR_SEED: u64 = 7;
+
+    fn detour_rad(values: [f64; 6]) -> [CuJointPosition; 6] {
+        values.map(|d| CuJointPosition::Revolute(Angle64::new::<radian>(d)))
+    }
+
+    fn detour_tool_pose(q: &[CuJointPosition; 6]) -> Transform3D<f64> {
+        let mut tcp = Transform3D::<f64>::identity();
+        igus_rebel_chain().forward_kinematics(q, &mut tcp).unwrap();
+        tcp
+    }
+
+    /// Base-yaw move with a sphere on the straight-line tool path.
+    fn detour_request() -> CuJointPlanRequest<6> {
+        let mut request = CuJointPlanRequest {
+            start: detour_rad(DETOUR_START),
+            goal: detour_rad(DETOUR_GOAL),
+            ..Default::default()
+        };
+        let mid = detour_rad(core::array::from_fn(|j| {
+            0.5 * (DETOUR_START[j] + DETOUR_GOAL[j])
+        }));
+        let tcp = detour_tool_pose(&mid);
+        request
+            .scene
+            .add_obstacle(
+                CuCollisionShape::Sphere(
+                    CuSphere::new(tcp.translation(), Length::new::<meter>(0.08)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap();
+        request
+    }
+
+    /// Tool Z within 18 degrees of the straight-line midpoint's tool Z.
+    /// Start and goal (16.1 degrees off) satisfy it; the unconstrained
+    /// detour around the sphere swings 20.2 degrees out.
+    fn upright_constraints() -> repose_motion_planning::CuPathConstraintSet {
+        use repose_motion_planning::CuOrientationConstraint;
+        use repose_motion_planning::CuPathConstraint;
+        use repose_motion_planning::CuPathConstraintSet;
+        use repose_motion_planning::CuToolAxis;
+        let mid = detour_rad(core::array::from_fn(|j| {
+            0.5 * (DETOUR_START[j] + DETOUR_GOAL[j])
+        }));
+        let rotation = detour_tool_pose(&mid).rotation();
+        let mut set = CuPathConstraintSet::new();
+        set.push(CuPathConstraint::Orientation(
+            CuOrientationConstraint::new(
+                CuToolAxis::Z,
+                [rotation[0][2], rotation[1][2], rotation[2][2]],
+                Angle64::new::<degree>(18.0),
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        set
+    }
+
+    /// Box around the straight-line tool path. Start and goal are inside;
+    /// the unconstrained detour swings out in x and z.
+    fn region_constraints() -> repose_motion_planning::CuPathConstraintSet {
+        use repose_motion_planning::CuPathConstraint;
+        use repose_motion_planning::CuPathConstraintSet;
+        use repose_motion_planning::CuPositionRegionConstraint;
+        let mut set = CuPathConstraintSet::new();
+        set.push(CuPathConstraint::PositionRegion(
+            CuPositionRegionConstraint::new(
+                [0.2, -0.25, 0.7].map(Length::new::<meter>),
+                [0.4, 0.25, 0.8].map(Length::new::<meter>),
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        set
+    }
+
+    fn drive(
+        planner: &mut CuJointRrtStar<6>,
+        request: &CuJointPlanRequest<6>,
+        seed: u64,
+    ) -> (CuPlanStatus, CuJointPlanPath<6>) {
+        let mut status = planner.begin(request, seed).unwrap();
+        let mut steps = 0;
+        while !status.is_final() && steps < 200 {
+            status = planner.step(64).unwrap();
+            steps += 1;
+        }
+        let mut path = CuJointPlanPath::<6>::default();
+        planner.write_best(&mut path);
+        (status, path)
+    }
+
+    /// Checks every path segment at eight times the planner's sampling density.
+    fn dense_violation(
+        path: &CuJointPlanPath<6>,
+        set: &repose_motion_planning::CuPathConstraintSet,
+    ) -> (bool, usize, usize) {
+        use repose_kinematics::CuJointResolution;
+        let metric = CuJointResolution::default().metric();
+        let mut bad = 0usize;
+        let mut total = 0usize;
+        for window in path.waypoints().windows(2) {
+            let (a, b) = (window[0].positions, window[1].positions);
+            let mut max_delta = 0.0_f64;
+            for j in 0..6 {
+                max_delta = max_delta.max(libm::fabs(
+                    metric.normalized(b[j]) - metric.normalized(a[j]),
+                ));
+            }
+            let steps = (libm::ceil(max_delta) as usize).max(1) * 8;
+            for s in 0..=steps {
+                let q: [CuJointPosition; 6] = core::array::from_fn(|j| {
+                    a[j].interpolate(b[j], s as f64 / steps as f64).unwrap()
+                });
+                total += 1;
+                if !set.is_satisfied_by_pose(&detour_tool_pose(&q)) {
+                    bad += 1;
+                }
+            }
+        }
+        (bad > 0, bad, total)
+    }
+
+    #[test]
+    fn test_orientation_rrt_star_stays_in_cone() {
+        let chain = igus_rebel_chain();
+        let model = igus_rebel_collision_model();
+        let request = detour_request();
+        let set = upright_constraints();
+        let mut unconstrained =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        let (status, path) = drive(&mut unconstrained, &request, DETOUR_SEED);
+        assert!(status.has_path(), "unconstrained status: {status:?}");
+        let (violated, bad, total) = dense_violation(&path, &set);
+        assert!(
+            violated,
+            "unconstrained path stays in the cone ({bad}/{total}): the test proves nothing"
+        );
+        let mut constrained =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        constrained.set_path_constraints(&set).unwrap();
+        let (status, path) = drive(&mut constrained, &request, DETOUR_SEED);
+        assert!(status.has_path(), "constrained status: {status:?}");
+        let (violated, bad, total) = dense_violation(&path, &set);
+        assert!(
+            !violated,
+            "constrained path leaves the cone ({bad}/{total})"
+        );
+    }
+
+    #[test]
+    fn test_region_rrt_star_stays_in_box() {
+        let chain = igus_rebel_chain();
+        let model = igus_rebel_collision_model();
+        let request = detour_request();
+        let set = region_constraints();
+        let mut unconstrained =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        let (status, path) = drive(&mut unconstrained, &request, DETOUR_SEED);
+        assert!(status.has_path(), "unconstrained status: {status:?}");
+        let (violated, bad, total) = dense_violation(&path, &set);
+        assert!(
+            violated,
+            "unconstrained path stays in the box ({bad}/{total}): the test proves nothing"
+        );
+        let mut constrained =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        constrained.set_path_constraints(&set).unwrap();
+        let (status, path) = drive(&mut constrained, &request, DETOUR_SEED);
+        assert!(status.has_path(), "constrained status: {status:?}");
+        let (violated, bad, total) = dense_violation(&path, &set);
+        assert!(!violated, "constrained path leaves the box ({bad}/{total})");
+    }
+
+    #[test]
+    fn test_rrt_star_violating_endpoints_fail_with_invalid_start_or_goal() {
+        use repose_motion_planning::CuOrientationConstraint;
+        use repose_motion_planning::CuPathConstraint;
+        use repose_motion_planning::CuPathConstraintSet;
+        use repose_motion_planning::CuToolAxis;
+        let chain = igus_rebel_chain();
+        let model = igus_rebel_collision_model();
+        let request = CuJointPlanRequest {
+            start: detour_rad(DETOUR_START),
+            goal: detour_rad(DETOUR_GOAL),
+            ..Default::default()
+        };
+        // 10-degree cone around world up: the start (28.6 degrees) is out.
+        let mut tight = CuPathConstraintSet::new();
+        tight
+            .push(CuPathConstraint::Orientation(
+                CuOrientationConstraint::new(
+                    CuToolAxis::Z,
+                    [0.0, 0.0, 1.0],
+                    Angle64::new::<degree>(10.0),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let mut planner =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        planner.set_path_constraints(&tight).unwrap();
+        assert_eq!(
+            planner.begin(&request, DETOUR_SEED).unwrap(),
+            CuPlanStatus::InvalidStart
+        );
+        // 10-degree cone around the start tool Z: the goal (31.3 degrees off) is out.
+        let rotation = detour_tool_pose(&detour_rad(DETOUR_START)).rotation();
+        let mut goal_out = CuPathConstraintSet::new();
+        goal_out
+            .push(CuPathConstraint::Orientation(
+                CuOrientationConstraint::new(
+                    CuToolAxis::Z,
+                    [rotation[0][2], rotation[1][2], rotation[2][2]],
+                    Angle64::new::<degree>(10.0),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let mut planner =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        planner.set_path_constraints(&goal_out).unwrap();
+        assert_eq!(
+            planner.begin(&request, DETOUR_SEED).unwrap(),
+            CuPlanStatus::InvalidGoal
+        );
+        // Clearing restores the unconstrained plan bit-identically.
+        let mut planner =
+            CuJointRrtStar::new(chain, model, CuJointRrtStarParams::default()).unwrap();
+        let (before, path_before) = drive(&mut planner, &detour_request(), DETOUR_SEED);
+        assert!(before.has_path());
+        planner
+            .set_path_constraints(&upright_constraints())
+            .unwrap();
+        let (status, path) = drive(&mut planner, &detour_request(), DETOUR_SEED);
+        assert!(status.has_path());
+        assert!(!dense_violation(&path, &upright_constraints()).0);
+        planner.clear_path_constraints();
+        let (after, path_after) = drive(&mut planner, &detour_request(), DETOUR_SEED);
+        assert_eq!(after, before);
+        assert_eq!(path_after.waypoints, path_before.waypoints);
+        assert_eq!(path_after.len, path_before.len);
+        assert_eq!(path_after.cost, path_before.cost);
     }
 }
 

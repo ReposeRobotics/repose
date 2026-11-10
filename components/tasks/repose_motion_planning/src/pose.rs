@@ -5,12 +5,14 @@ use crate::CuJointPlanRequest;
 use crate::CuJointPlanner;
 use crate::CuJointPlannerParams;
 use crate::CuJointPlannerTask;
+use crate::CuPathConstraintSet;
 use crate::CuPlanStatus;
 use crate::CuSceneValidity;
 use crate::MAX_ATTACHED_SHAPES;
 use crate::MAX_EXCLUSIONS;
 use crate::MAX_OBSTACLES;
 use crate::planner_resources;
+use crate::task::CuJointPlannerTaskConfig;
 use bincode::Decode;
 use bincode::Encode;
 use cu_rng::prelude::*;
@@ -176,6 +178,21 @@ pub struct CuPosePlannerTask<P, const N: usize, const M: usize = N> {
     params: CuPoseIkParams,
     failed: bool,
 }
+/// Node config accepted by [`CuPosePlannerTask::new`]: [`CuPosePlannerParams`]
+/// whose `planner` block additionally accepts an optional `constraints` key.
+/// Private so the public params struct keeps its exact shape; existing
+/// configs parse exactly as before.
+#[derive(Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    bound(deserialize = "P: Deserialize<'de> + Default")
+)]
+struct CuPosePlannerTaskConfig<P, const N: usize, const M: usize = N> {
+    planner: CuJointPlannerTaskConfig<P, N, M>,
+    #[serde(default)]
+    goal: CuPoseIkParams,
+}
+
 impl<P: CuJointPlanner<N, M>, const N: usize, const M: usize> CuPosePlannerTask<P, N, M> {
     /// Builds the planner and IK resolver from the same robot models.
     pub fn from_params(params: CuPosePlannerParams<P::Params, N, M>, seed: u64) -> CuResult<Self> {
@@ -187,6 +204,27 @@ impl<P: CuJointPlanner<N, M>, const N: usize, const M: usize> CuPosePlannerTask<
             params: params.goal,
             failed: false,
         })
+    }
+
+    /// Sets the path constraints for IK solution selection and joint
+    /// planning: converged IK solutions that violate them are skipped like
+    /// colliding ones, and the joint planner rejects violating configurations.
+    /// Fails without changing the task when the set is invalid or the planner
+    /// does not support constraints. On success, discards the current job;
+    /// the next refinement replaces the old output with a no-job failure.
+    pub fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        self.inner.set_path_constraints(constraints)?;
+        self.validity.set_path_constraints(constraints)?;
+        self.failed = false;
+        Ok(())
+    }
+
+    /// Clears constraints and discards the current job. The next refinement
+    /// replaces the old output with a no-job failure.
+    pub fn clear_path_constraints(&mut self) {
+        self.inner.clear_path_constraints();
+        self.validity.clear_path_constraints();
+        self.failed = false;
     }
 }
 impl<P, const N: usize, const M: usize> Freezable for CuPosePlannerTask<P, N, M> {
@@ -215,9 +253,20 @@ impl<P: CuJointPlanner<N, M> + Send + Sync + 'static, const N: usize, const M: u
     type Quality = Quality;
     fn new(cfg: Option<&ComponentConfig>, resources: Self::Resources<'_>) -> CuResult<Self> {
         let cfg = cfg.ok_or_else(|| CuError::from("pose planner: missing config"))?;
-        let params = cfg.deserialize_into::<CuPosePlannerParams<P::Params, N, M>>()?;
+        let config = cfg.deserialize_into::<CuPosePlannerTaskConfig<P::Params, N, M>>()?;
+        let (planner, constraints) = config.planner.into_parts();
         let Owned(mut rng) = resources.rng;
-        Self::from_params(params, rng.random())
+        let mut task = Self::from_params(
+            CuPosePlannerParams {
+                planner,
+                goal: config.goal,
+            },
+            rng.random(),
+        )?;
+        if let Some(constraints) = constraints {
+            task.set_path_constraints(&constraints)?;
+        }
+        Ok(task)
     }
     fn base<'i, 'o>(
         &mut self,

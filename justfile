@@ -39,6 +39,12 @@ determinism runs="5":
     done
     echo "determinism: {{runs}} runs, $(echo "$reference" | wc -l | tr -d ' ') scenarios, identical"
 
+# Run the simulator-free library examples; each fails if its checks do not hold.
+examples:
+    cargo run -q -p repose --example kinematics --features std
+    cargo run -q -p repose --example collision --features std
+    cargo run -q -p repose --example planning --features std
+
 # Build every library crate except the simulator for bare-metal targets (no OS, `core` + `alloc` only):
 # 64-bit Arm and Cortex-M. Guards the `no_std` surface that a qualified toolchain (Ferrocene) would build.
 bare-metal:

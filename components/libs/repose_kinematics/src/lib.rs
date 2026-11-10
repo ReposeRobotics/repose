@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod chain;
+mod dynamics;
 mod ik;
 mod joint;
 mod robots;
@@ -15,6 +16,10 @@ pub use chain::CuJointAxis;
 pub use chain::CuJointSpec;
 pub use chain::CuJointType;
 pub use chain::CuKinematicChain;
+pub use dynamics::CuChainInertia;
+pub use dynamics::CuInverseDynamicsInput;
+pub use dynamics::CuLinkInertia;
+pub use dynamics::standard_gravity;
 pub use ik::CuDiffIkParams;
 pub use ik::CuDiffIkStatus;
 pub use ik::CuIkParams;
@@ -23,6 +28,7 @@ pub use ik::CuIkStatus;
 pub use ik::CuTwist6D;
 pub use ik::CuTwistFrame;
 pub use joint::CuJointAcceleration;
+pub use joint::CuJointEffort;
 pub use joint::CuJointJerk;
 pub use joint::CuJointLimits;
 pub use joint::CuJointMetric;

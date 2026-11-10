@@ -7,12 +7,66 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-10
+
+### Added
+
+- Rigid-body dynamics in `repose-kinematics`: `CuLinkInertia` and
+  `CuChainInertia<N>` hold validated per-link mass, centre of mass, and
+  rotational inertia; `CuKinematicChain::inverse_dynamics` computes joint
+  torques/forces by recursive Newton-Euler into a caller-provided
+  `[CuJointEffort; N]`; `CuKinematicChain::gravity_compensation` returns the
+  holding torques via the same recursion. Inertia tensors must satisfy the
+  triangle inequality on their principal moments; `CuChainInertia` validates
+  on construction and on deserialization, and `inverse_dynamics` validates it
+  again on every call. `CuJointEffort` (torque/force/fixed)
+  joins the joint-typed units family. URDF `<inertial>` elements import into
+  `CuRobotDescription::chain_inertia`, validating each link and then folding
+  fixed-joint links into their owner's rigid body. Invalid or malformed inertial
+  data is reported by `chain_inertia()`; kinematics and collision import
+  continue to accept these descriptions.
+- Simulator-free library examples in the `repose` umbrella crate, each
+  runnable with `cargo run -p repose --example <name>` on the built-in
+  6-DOF igus ReBeL arm: `kinematics` (FK, then IK back to the same pose),
+  `collision` (one free and one colliding configuration with clearance),
+  and `planning` (a seeded RRT-Connect plan around a blocking obstacle,
+  timed into a trajectory). Each example checks its own result and prints
+  deterministic output; `just examples` runs all three and a CI job runs
+  it.
+- `docs/library-examples.md`: what the simulator-free examples show, how
+  to choose the const generic capacities, and how to read the compile
+  errors when they mismatch.
+- Path constraints for motion planning (`repose-motion-planning`):
+  `CuOrientationConstraint` keeps a tool-frame axis within a cone angle of a
+  base-frame reference direction, `CuPositionRegionConstraint` keeps the tool
+  centre point inside a base-frame box, and `CuPathConstraintSet` combines up
+  to `MAX_PATH_CONSTRAINTS` of them (all must hold). `CuSceneValidity`
+  optionally carries a set and rejects violating configurations, so every
+  planner — RRT-Connect, PRM, A*, STOMP, the gradient optimizer, direct, and
+  RRT* — honours constraints through its existing validity checks with no
+  per-planner logic; violating starts and goals fail with the existing
+  `InvalidStart` / `InvalidGoal` statuses. Set them programmatically with the
+  new `CuJointPlanner::set_path_constraints` / `clear_path_constraints`
+  methods (forwarded by the planner and pose-planner tasks). Successfully
+  setting or clearing constraints discards the current job and its cached
+  result; a new request is required before planning resumes. Set constraints
+  at construction with the new
+  optional `"constraints"` key in the planner task's node config. Pose-goal
+  planning applies the same set to IK solution selection. Enforcement is
+  rejection of violating samples at the planner's discrete checking
+  resolution; very tight tolerances slow planning down or fail jobs.
+
 ### Changed
 
 - Reworked the README into a short branded landing page. The detailed
   reference sections moved unchanged into `docs/robot-configuration.md`,
   `docs/motion-planning.md`, `docs/trajectories.md`, and
   `docs/benchmarks.md`.
+- Reworked the README's "Quick start" so the easiest paths come first:
+  try Repose as a library (dependency lines, the three simulator-free
+  example commands, and the kinematics core inline), generate a robot app
+  from the template, and finally the full Copper RON and MuJoCo
+  simulator pipeline.
 
 ## [0.8.3] - 2026-11-08
 
@@ -186,7 +240,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/ReposeRobotics/repose/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/ReposeRobotics/repose/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/ReposeRobotics/repose/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/ReposeRobotics/repose/compare/v0.8.0...v0.8.1

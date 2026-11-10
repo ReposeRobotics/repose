@@ -59,7 +59,7 @@ on a git tag:
 
 ```toml
 [dependencies]
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.3" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
 ```
 
 The `repose` umbrella crate re-exports every component. You can also depend on
@@ -76,6 +76,101 @@ release never does. See [docs/versioning.md](docs/versioning.md).
 
 ## Quick start
 
+### Try it as a library
+
+Depend on the umbrella crate (git tag; nothing is on crates.io yet):
+
+```toml
+[dependencies]
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
+cu29 = { version = "1.3.1", features = ["units"] }
+cu-spatial-payloads = "1.3.0"
+```
+
+Or clone this repository and run the simulator-free examples, which use the
+built-in 6-DOF igus ReBeL arm with no task graph, network, or extra files:
+
+```sh
+cargo run -p repose --example kinematics
+cargo run -p repose --example collision
+cargo run -p repose --example planning
+```
+
+The kinematics example is plain library calls: forward kinematics, then
+inverse kinematics from another seed back to the same pose.
+
+```rust
+use cu_spatial_payloads::Transform3D;
+use cu29::prelude::CuResult;
+use cu29::units::si::angle::degree;
+use cu29::units::si::f64::Angle;
+use repose::kinematics::CuIkParams;
+use repose::kinematics::CuJointPosition;
+use repose::kinematics::igus_rebel_chain;
+
+/// Joint angles in degrees, as typed revolute positions.
+fn deg(values: [f64; 6]) -> [CuJointPosition; 6] {
+    values.map(|d| CuJointPosition::Revolute(Angle::new::<degree>(d)))
+}
+
+fn main() -> CuResult<()> {
+    let chain = igus_rebel_chain();
+    let home = deg([0.0, 30.0, 60.0, 0.0, 60.0, 0.0]);
+    let seed = deg([-1.1, 45.5, 60.0, -3.3, -80.9, 28.7]);
+    let mut tcp = Transform3D::<f64>::identity();
+    chain.forward_kinematics(&home, &mut tcp)?;
+    let mut solution = seed;
+    let status =
+        chain.inverse_kinematics_dls(&tcp, &seed, &CuIkParams::default(), &mut solution)?;
+    // ...check `status` and print the result; see examples/kinematics.rs.
+    Ok(())
+}
+```
+
+The full example checks that IK converged and prints:
+
+```text
+tcp: x=0.4586 m y=0.0000 m z=0.3962 m
+ik: converged in 17 iterations, position error 0.0213 mm, orientation error 0.0001°
+solution: [0.00 29.99 60.01 -0.00 60.00 0.00]°
+```
+
+The collision example checks one free and one colliding configuration:
+
+```text
+free: collision-free, clearance 36.6 mm
+blocked: in collision, 3 contact(s), min distance -112.0 mm
+```
+
+The planning example plans around a blocking sphere and times the path:
+
+```text
+straight line: blocked
+plan: 4 waypoints, cost 3.580, status Converged
+trajectory: 423 points, duration 4.216 s
+```
+
+[Library examples](docs/library-examples.md) explains the const generic
+capacities in these calls. Run `just` in the repository root to list the
+development tasks.
+
+### Generate a robot app
+
+```sh
+cargo install cargo-generate
+cargo generate gh:ReposeRobotics/repose-bridges templates/robot-app --name my_robot
+cd my_robot
+cargo run
+```
+
+The template supports the igus ReBeL and a Universal Robots UR5e, selected in
+`robot.ron`, and can run against the URSim simulator without hardware. See
+[installation](https://getrepose.dev/get-started/installation) and
+[URSim](https://getrepose.dev/get-started/ursim) for details. Note that
+`cargo run` moves the selected robot.
+
+### Full pipeline: Copper RON and simulation
+
 Every task is generic over its joint count and capacities, and you name it
 directly in RON. Applications don't wrap library tasks:
 
@@ -90,8 +185,7 @@ directly in RON. Applications don't wrap library tasks:
 ```
 
 The [MuJoCo simulator example](examples/mujoco_rebel/README.md) runs the full
-goal → plan → time → follow → control loop, configured entirely in RON. Run
-`just` in the repository root to list the development tasks.
+goal → plan → time → follow → control loop, configured entirely in RON.
 
 ## Crates
 
@@ -112,6 +206,7 @@ goal → plan → time → follow → control loop, configured entirely in RON. 
 
 | Guide | Covers |
 |---|---|
+| [Library examples](docs/library-examples.md) | Simulator-free examples, const generic capacities, planner seeds |
 | [Robot configuration](docs/robot-configuration.md) | Chain presets, inline chains, typed joint units, URDF/SRDF import |
 | [Motion planning](docs/motion-planning.md) | The planner contract, choosing a planner, planning-scene snapshots |
 | [Pose planning](docs/pose-planning.md) | Pose goals, straight TCP moves, RON wiring |

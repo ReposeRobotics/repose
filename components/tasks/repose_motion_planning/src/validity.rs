@@ -5,9 +5,13 @@
 //! not: is a configuration free, is a joint-space segment free, and how much
 //! clearance does a configuration have.
 
+use crate::CuPathConstraintSet;
 use crate::MAX_ATTACHED_SHAPES;
 use crate::MAX_EXCLUSIONS;
 use crate::MAX_OBSTACLES;
+use cu_spatial_payloads::Transform3D;
+use cu29::prelude::CuError;
+use cu29::prelude::CuResult;
 use cu29::units::si::length::meter;
 use repose_collision::CuCollisionEnv;
 use repose_collision::CuCollisionReport;
@@ -24,7 +28,8 @@ use repose_kinematics::CuKinematicChain;
 ///
 /// Every query checks the robot against itself, the scene obstacles, and the
 /// scene's attached shapes in one pass, honouring the captured stable-ID
-/// exclusions.
+/// exclusions. An optional [`CuPathConstraintSet`] further rejects
+/// configurations whose tool pose violates a constraint.
 #[derive(Clone)]
 pub struct CuSceneValidity<const N: usize, const M: usize = N> {
     chain: CuKinematicChain<N>,
@@ -32,6 +37,7 @@ pub struct CuSceneValidity<const N: usize, const M: usize = N> {
     resolution: CuJointResolution,
     scene: CuPlanningScene<MAX_OBSTACLES, MAX_ATTACHED_SHAPES>,
     exclusions: CuSceneExclusions<MAX_EXCLUSIONS>,
+    constraints: Option<CuPathConstraintSet>,
     /// `false` until a valid scene has been captured.
     captured: bool,
 }
@@ -50,6 +56,7 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
             resolution,
             scene: CuPlanningScene::new(),
             exclusions: CuSceneExclusions::new(),
+            constraints: None,
             captured: true,
         }
     }
@@ -72,6 +79,30 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
     /// Exclusions captured with the scene.
     pub const fn exclusions(&self) -> &CuSceneExclusions<MAX_EXCLUSIONS> {
         &self.exclusions
+    }
+
+    /// The path constraints configurations must satisfy, if any.
+    pub const fn path_constraints(&self) -> Option<&CuPathConstraintSet> {
+        self.constraints.as_ref()
+    }
+
+    /// Sets the path constraints every accepted configuration must satisfy,
+    /// on top of joint limits and collisions. Fails without changing the
+    /// checker when `constraints` is invalid.
+    pub fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        constraints.validate()?;
+        if constraints.is_empty() {
+            return Err(CuError::from(
+                "repose-motion-planning: path constraint set must not be empty",
+            ));
+        }
+        self.constraints = Some(*constraints);
+        Ok(())
+    }
+
+    /// Clears the path constraints, restoring unconstrained checking.
+    pub fn clear_path_constraints(&mut self) {
+        self.constraints = None;
     }
 
     /// Captures a scene snapshot for the next job. Returns `false` (and
@@ -103,13 +134,28 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
     }
 
     /// `true` when `q` is within joint limits and free of self, environment,
-    /// and attached-object collisions.
+    /// and attached-object collisions. When path constraints are set, `q`
+    /// must additionally satisfy every one of them.
     pub fn is_configuration_free(&self, q: &[CuJointPosition; N]) -> bool {
         self.captured
             && self
                 .model
                 .is_configuration_collision_free(&self.chain, q, &self.env())
                 .unwrap_or(false)
+            && self.path_constraints_satisfied(q)
+    }
+
+    /// `true` when the tool pose of `q` satisfies every path constraint, or
+    /// when no constraints are set. Unevaluable configurations fail.
+    fn path_constraints_satisfied(&self, q: &[CuJointPosition; N]) -> bool {
+        let Some(constraints) = &self.constraints else {
+            return true;
+        };
+        let mut tcp = Transform3D::<f64>::identity();
+        if self.chain.forward_kinematics(q, &mut tcp).is_err() {
+            return false;
+        }
+        constraints.is_satisfied_by_pose(&tcp)
     }
 
     /// `true` when the joint-space line from `a` to `b` is free at the

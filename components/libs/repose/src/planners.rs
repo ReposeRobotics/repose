@@ -24,6 +24,7 @@ use repose_motion_planning::CuJointPlanner;
 use repose_motion_planning::CuJointPrm;
 use repose_motion_planning::CuJointRrtConnect;
 use repose_motion_planning::CuJointStomp;
+use repose_motion_planning::CuPathConstraintSet;
 use repose_motion_planning::CuPlanStatus;
 use repose_motion_planning::CuPlannerKind;
 use serde::Deserialize;
@@ -100,6 +101,21 @@ macro_rules! planners {
             fn quality(&self) -> Quality {
                 match self {
                     $(Self::$variant(p) => p.quality(),)+
+                }
+            }
+
+            fn set_path_constraints(
+                &mut self,
+                constraints: &CuPathConstraintSet,
+            ) -> CuResult<()> {
+                match self {
+                    $(Self::$variant(p) => p.set_path_constraints(constraints),)+
+                }
+            }
+
+            fn clear_path_constraints(&mut self) {
+                match self {
+                    $(Self::$variant(p) => p.clear_path_constraints(),)+
                 }
             }
         }
@@ -187,4 +203,145 @@ mod tests {
         assert_eq!(params.params, CuPlannerChoice::RrtStar);
         assert!(CuJointPlannerTask::<CuAnyPlanner<6>, 6>::from_params(params, 7).is_ok());
     }
+}
+
+#[cfg(test)]
+mod constraint_job_tests {
+    use super::*;
+    use cu29::cutask_anytime::AnytimeStatus;
+    use cu29::cutask_anytime::CuAnytimeTask;
+    use cu29::prelude::CuContext;
+    use cu29::prelude::CuMsg;
+    use cu29::units::si::angle::degree;
+    use cu29::units::si::f64::Angle;
+    use repose_collision::igus_rebel_collision_model;
+    use repose_kinematics::CuJointPosition;
+    use repose_kinematics::igus_rebel_chain;
+    use repose_motion_planning::{
+        CuJointPlannerTask, CuOrientationConstraint, CuPathConstraint, CuPathConstraintSet,
+        CuToolAxis,
+    };
+
+    fn check_constraint_changes(kind: CuPlannerChoice) {
+        let start = [-1.1, 45.5, 60.0, -3.3, -80.9, 28.7]
+            .map(|d| CuJointPosition::Revolute(Angle::new::<degree>(d)));
+        let mut goal = start;
+        goal[0] = CuJointPosition::Revolute(Angle::new::<degree>(-1.0));
+        let request = CuJointPlanRequest {
+            start,
+            goal,
+            ..Default::default()
+        };
+        let mut constraints = CuPathConstraintSet::new();
+        constraints
+            .push(CuPathConstraint::Orientation(
+                CuOrientationConstraint::new(
+                    CuToolAxis::Z,
+                    [0.0, 0.0, 1.0],
+                    Angle::new::<degree>(1.0),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let mut permissive = CuPathConstraintSet::new();
+        permissive
+            .push(CuPathConstraint::Orientation(
+                CuOrientationConstraint::new(
+                    CuToolAxis::Z,
+                    [0.0, 0.0, 1.0],
+                    Angle::new::<degree>(180.0),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        {
+            let mut planner =
+                CuAnyPlanner::<6>::new(igus_rebel_chain(), igus_rebel_collision_model(), kind)
+                    .unwrap();
+            let mut path = CuJointPlanPath::default();
+            for clear in [false, true] {
+                planner.set_path_constraints(&permissive).unwrap();
+                let mut status = planner.begin(&request, 1).unwrap();
+                for _ in 0..400 {
+                    if status.is_final() {
+                        break;
+                    }
+                    status = planner.step(64).unwrap();
+                }
+                assert!(planner.write_best(&mut path).has_path(), "{kind:?}");
+                assert!(
+                    planner
+                        .set_path_constraints(&CuPathConstraintSet::new())
+                        .is_err()
+                );
+                assert!(planner.write_best(&mut path).has_path());
+                if clear {
+                    planner.clear_path_constraints();
+                } else {
+                    planner.set_path_constraints(&constraints).unwrap();
+                }
+                assert_eq!(
+                    planner.write_best(&mut path),
+                    CuPlanStatus::InvalidRequest,
+                    "{kind:?}"
+                );
+                assert_eq!(path.len, 0);
+                assert_eq!(planner.step(1).unwrap(), CuPlanStatus::InvalidRequest);
+                assert_eq!(planner.quality().value, 0.0);
+            }
+            // Changing constraints between begin and step also discards endpoint assumptions.
+            planner.begin(&request, 1).unwrap();
+            planner.set_path_constraints(&constraints).unwrap();
+            assert_eq!(planner.step(1).unwrap(), CuPlanStatus::InvalidRequest);
+            assert_eq!(
+                planner.begin(&request, 1).unwrap(),
+                CuPlanStatus::InvalidStart
+            );
+            planner.clear_path_constraints();
+            let mut task = CuJointPlannerTask::from_planner(planner, 256, 256, 1).unwrap();
+            let (ctx, _clock) = CuContext::new_mock_clock();
+            let input = CuMsg::new(Some(request.clone()));
+            let mut output = CuMsg::new(None);
+            for clear in [false, true] {
+                task.set_path_constraints(&permissive).unwrap();
+                task.base(&ctx, &input, &mut output).unwrap();
+                for _ in 0..400 {
+                    if task.status().is_final() {
+                        break;
+                    }
+                    task.refine(&ctx, &mut output).unwrap();
+                }
+                assert!(output.payload().unwrap().status.has_path(), "{kind:?}");
+                if clear {
+                    task.clear_path_constraints();
+                } else {
+                    task.set_path_constraints(&constraints).unwrap();
+                }
+                assert_eq!(task.status(), CuPlanStatus::default());
+                assert_eq!(task.debug_state().effort, 0);
+                assert_eq!(task.debug_state().published_cost, f64::INFINITY);
+                assert_eq!(task.debug_state().published_quality.value, 0.0);
+                assert!(matches!(
+                    task.refine(&ctx, &mut output).unwrap(),
+                    AnytimeStatus::Aborted
+                ));
+                assert!(!output.payload().is_some_and(|p| p.status.has_path()));
+            }
+        }
+    }
+    macro_rules! constraint_job_test {
+        ($name:ident, $kind:ident) => {
+            #[test]
+            fn $name() {
+                check_constraint_changes(CuPlannerChoice::$kind);
+            }
+        };
+    }
+    constraint_job_test!(test_discard_rrt_connect_job, RrtConnect);
+    constraint_job_test!(test_discard_rrt_star_job, RrtStar);
+    constraint_job_test!(test_discard_prm_job, Prm);
+    constraint_job_test!(test_discard_astar_job, AStar);
+    constraint_job_test!(test_discard_stomp_job, Stomp);
+    constraint_job_test!(test_discard_optimizer_job, PathOptimizer);
+    constraint_job_test!(test_discard_direct_job, Direct);
 }

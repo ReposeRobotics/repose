@@ -90,6 +90,7 @@ macro_rules! impl_planner_type_path {
 mod astar;
 mod cartesian_task;
 mod common;
+mod constraints;
 mod direct;
 mod goal_task;
 mod optimizer;
@@ -109,6 +110,12 @@ pub use cartesian_task::CuCartesianPlanParams;
 pub use cartesian_task::CuCartesianPlanResult;
 pub use cartesian_task::CuCartesianPlanTask;
 pub use cartesian_task::CuCartesianTrajectoryTask;
+pub use constraints::CuOrientationConstraint;
+pub use constraints::CuPathConstraint;
+pub use constraints::CuPathConstraintSet;
+pub use constraints::CuPositionRegionConstraint;
+pub use constraints::CuToolAxis;
+pub use constraints::MAX_PATH_CONSTRAINTS;
 pub use direct::CuJointDirect;
 pub use direct::CuJointDirectParams;
 pub use direct::CuJointDirectTask;
@@ -333,7 +340,34 @@ pub trait CuJointPlanner<const N: usize, const M: usize = N>: Sized + TypePath {
 
     /// Quality of the best path in `0.0..=1.0` (`0.0` without a path).
     fn quality(&self) -> Quality;
+
+    /// Sets the path constraints every accepted configuration must satisfy,
+    /// on top of joint limits and collisions. All built-in planners store the
+    /// set in their [`CuSceneValidity`] and reject violating configurations
+    /// and segments, so a violating start or goal fails with
+    /// [`InvalidStart`](CuPlanStatus::InvalidStart) or
+    /// [`InvalidGoal`](CuPlanStatus::InvalidGoal). The default implementation
+    /// reports unsupported planners explicitly instead of ignoring the set.
+    ///
+    /// On success, discards the current job, including cached paths and endpoint
+    /// checks. Until the next `begin`, `step` and `write_best` report
+    /// `InvalidRequest`, `write_best` emits no waypoints, and quality is zero.
+    /// Invalid or unsupported sets leave the current job unchanged.
+    fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        let _ = constraints;
+        Err(CuError::from(
+            "repose-motion-planning: planner does not support path constraints",
+        ))
+    }
+
+    /// Clears the path constraints, restoring unconstrained planning.
+    /// Discards the current job even if no constraints were installed.
+    /// Built-in planners return to the same no-job state as after construction;
+    /// call `begin` before planning again.
+    fn clear_path_constraints(&mut self) {}
 }
 
+#[cfg(test)]
+mod constraint_tests;
 #[cfg(test)]
 mod pose_tests;

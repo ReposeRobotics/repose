@@ -14,6 +14,7 @@ use crate::CuJointPlanPath;
 use crate::CuJointPlanRequest;
 use crate::CuJointPlanner;
 use crate::CuJointPlannerTask;
+use crate::CuPathConstraintSet;
 use crate::CuPlanStatus;
 use crate::CuPlannerKind;
 use crate::MAX_WAYPOINTS;
@@ -370,6 +371,23 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointStomp<N, M>
 
     fn quality(&self) -> Quality {
         length_quality(self.straight_cost, self.best_cost)
+    }
+
+    fn set_path_constraints(&mut self, constraints: &CuPathConstraintSet) -> CuResult<()> {
+        self.validity.set_path_constraints(constraints)?;
+        self.status = CuPlanStatus::InvalidRequest;
+        self.iterations = 0;
+        self.count = 0;
+        self.best_cost = f64::INFINITY;
+        Ok(())
+    }
+
+    fn clear_path_constraints(&mut self) {
+        self.validity.clear_path_constraints();
+        self.status = CuPlanStatus::InvalidRequest;
+        self.iterations = 0;
+        self.count = 0;
+        self.best_cost = f64::INFINITY;
     }
 }
 

@@ -13,11 +13,15 @@ use cu29::units::si::f64::Angle;
 use cu29::units::si::f64::AngularAcceleration;
 use cu29::units::si::f64::AngularJerk;
 use cu29::units::si::f64::AngularVelocity;
+use cu29::units::si::f64::Force;
 use cu29::units::si::f64::Jerk;
 use cu29::units::si::f64::Length;
+use cu29::units::si::f64::Torque;
 use cu29::units::si::f64::Velocity;
+use cu29::units::si::force::newton;
 use cu29::units::si::jerk::meter_per_second_cubed;
 use cu29::units::si::length::meter;
+use cu29::units::si::torque::newton_meter;
 use cu29::units::si::velocity::meter_per_second;
 use serde::Deserialize;
 use serde::Serialize;
@@ -331,6 +335,48 @@ impl CuJointJerk {
         match self {
             Self::Revolute(v) => v.get::<radian_per_second_cubed>(),
             Self::Prismatic(v) => v.get::<meter_per_second_cubed>(),
+            Self::Fixed => 0.0,
+        }
+    }
+}
+
+/// A joint effort carries the physical unit of its joint (torque or force).
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Serialize, Deserialize, Reflect)]
+#[serde(rename_all = "snake_case")]
+pub enum CuJointEffort {
+    Revolute(Torque),
+    Prismatic(Force),
+    Fixed,
+}
+impl Default for CuJointEffort {
+    fn default() -> Self {
+        Self::Revolute(Torque::default())
+    }
+}
+impl From<Torque> for CuJointEffort {
+    fn from(value: Torque) -> Self {
+        Self::Revolute(value)
+    }
+}
+impl From<Force> for CuJointEffort {
+    fn from(value: Force) -> Self {
+        Self::Prismatic(value)
+    }
+}
+impl CuJointEffort {
+    /// Builds an effort matching the kind of the given joint coordinate.
+    pub fn from_position(position: CuJointPosition, value: f64) -> Self {
+        match position {
+            CuJointPosition::Revolute(_) => Self::Revolute(Torque::new::<newton_meter>(value)),
+            CuJointPosition::Prismatic(_) => Self::Prismatic(Force::new::<newton>(value)),
+            CuJointPosition::Fixed => Self::Fixed,
+        }
+    }
+    /// Returns the effort in its joint's SI unit (N m or N; `0.0` for fixed).
+    pub fn si_value(self) -> f64 {
+        match self {
+            Self::Revolute(v) => v.get::<newton_meter>(),
+            Self::Prismatic(v) => v.get::<newton>(),
             Self::Fixed => 0.0,
         }
     }

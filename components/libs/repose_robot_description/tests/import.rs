@@ -410,3 +410,50 @@ fn inertial_import_combines_fixed_links_into_moving_bodies() {
     let bad_mass = INERTIAL_URDF.replacen("<mass value=\"2.0\"/>", "<mass value=\"-2.0\"/>", 1);
     assert!(CuRobotDescription::<2, 1>::from_urdf(&bad_mass, urdf_import("base", "l2")).is_err());
 }
+
+#[test]
+fn inertial_import_validates_each_link_before_folding() {
+    let import =
+        |urdf: &str| CuRobotDescription::<2, 1>::from_urdf(urdf, urdf_import("base", "l2"));
+    assert!(import(INERTIAL_URDF).is_ok());
+    let l1 =
+        "<inertia ixx=\"0.02\" ixy=\"0.0\" ixz=\"0.0\" iyy=\"0.03\" iyz=\"0.0\" izz=\"0.04\"/>";
+    let l1b =
+        "<inertia ixx=\"0.01\" ixy=\"0.0\" ixz=\"0.0\" iyy=\"0.015\" iyz=\"0.0\" izz=\"0.005\"/>";
+    // A negative diagonal on l1 folded with a large valid tensor on l1b sums
+    // to a plausible combined body; the import must still reject l1.
+    let masked = INERTIAL_URDF
+        .replacen(
+            l1,
+            "<inertia ixx=\"-1\" ixy=\"0\" ixz=\"0\" iyy=\"-1\" iyz=\"0\" izz=\"-1\"/>",
+            1,
+        )
+        .replacen(
+            l1b,
+            "<inertia ixx=\"2\" ixy=\"0\" ixz=\"0\" iyy=\"2\" iyz=\"0\" izz=\"2\"/>",
+            1,
+        );
+    assert_ne!(masked, INERTIAL_URDF);
+    assert!(import(&masked).is_err());
+    // The valid half of that pair alone still imports.
+    let heavy = INERTIAL_URDF.replacen(
+        l1b,
+        "<inertia ixx=\"2\" ixy=\"0\" ixz=\"0\" iyy=\"2\" iyz=\"0\" izz=\"2\"/>",
+        1,
+    );
+    assert!(import(&heavy).is_ok());
+    // Principal moments 2.8, 0.1, 0.1 on one link, hidden by its neighbour.
+    let impossible = heavy.replacen(
+        l1,
+        "<inertia ixx=\"1\" ixy=\"0.9\" ixz=\"0.9\" iyy=\"1\" iyz=\"0.9\" izz=\"1\"/>",
+        1,
+    );
+    assert!(import(&impossible).is_err());
+    // A negative mass on l1b cannot hide behind l1's larger positive mass.
+    let masked_mass = INERTIAL_URDF.replacen("<mass value=\"1.0\"/>", "<mass value=\"-1.0\"/>", 1);
+    assert_ne!(masked_mass, INERTIAL_URDF);
+    assert!(import(&masked_mass).is_err());
+    // Nor can a massless link carry a tensor into the fold.
+    let massless = INERTIAL_URDF.replacen("<mass value=\"1.0\"/>", "<mass value=\"0.0\"/>", 1);
+    assert!(import(&massless).is_err());
+}

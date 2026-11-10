@@ -620,8 +620,9 @@ struct RawInertial {
     inertia: [f64; 6],
 }
 
-/// Parses one link's `<inertial>` element. Links without `<inertial>` are
-/// massless; a present mass without an inertia tensor is a point mass.
+/// Parses and validates one link's `<inertial>` element. Links without
+/// `<inertial>` are massless; a present mass without an inertia tensor is a
+/// point mass.
 fn link_inertial(node: Node<'_, '_>) -> CuResult<Option<RawInertial>> {
     let Some(inertial) = optional_child(node, "inertial")? else {
         return Ok(None);
@@ -646,6 +647,14 @@ fn link_inertial(node: Node<'_, '_>) -> CuResult<Option<RawInertial>> {
     if mass == 0.0 && inertia.iter().any(|v| *v != 0.0) {
         return Err(CuError::from("URDF massless link must have zero inertia"));
     }
+    // Validate this link alone: once folded across fixed joints, another
+    // link's tensor could mask an impossible one. The checks are invariant
+    // under the rotation and parallel-axis shift applied while folding.
+    CuLinkInertia::new(
+        Mass::new::<kilogram>(mass),
+        [Length::new::<meter>(0.0); 3],
+        inertia.map(MomentOfInertia::new::<kilogram_square_meter>),
+    )?;
     Ok(Some(RawInertial {
         mass,
         origin,

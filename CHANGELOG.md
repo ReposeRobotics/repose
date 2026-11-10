@@ -14,10 +14,13 @@ may be breaking.
   rotational inertia; `CuKinematicChain::inverse_dynamics` computes joint
   torques/forces by recursive Newton-Euler into a caller-provided
   `[CuJointEffort; N]`; `CuKinematicChain::gravity_compensation` returns the
-  holding torques via the same recursion. `CuJointEffort` (torque/force/fixed)
+  holding torques via the same recursion. Inertia tensors must satisfy the
+  triangle inequality on their principal moments; `CuChainInertia` validates
+  on construction and on deserialization, and `inverse_dynamics` validates it
+  again on every call. `CuJointEffort` (torque/force/fixed)
   joins the joint-typed units family. URDF `<inertial>` elements import into
-  `CuRobotDescription::chain_inertia`, folding fixed-joint links into their
-  owner's rigid body.
+  `CuRobotDescription::chain_inertia`, validating each link and then folding
+  fixed-joint links into their owner's rigid body.
 
 ### Changed
 

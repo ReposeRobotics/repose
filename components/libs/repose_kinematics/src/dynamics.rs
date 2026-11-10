@@ -46,6 +46,9 @@ const INERTIA_TOL: f64 = 1e-9;
 /// independent components of the symmetric tensor about the centre of mass in
 /// kilogram square meters, ordered `[xx, yy, zz, xy, xz, yz]`. A point mass is
 /// a positive `mass` with zero `inertia`; a massless link must be all zero.
+///
+/// The fields are public, so a value built or edited directly has not been
+/// checked; [`Self::new`] and [`Self::validate`] do the checking.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, Reflect)]
 #[serde(deny_unknown_fields)]
 pub struct CuLinkInertia {
@@ -75,8 +78,14 @@ impl CuLinkInertia {
     }
 
     /// Checks finiteness, a non-negative mass, and physical plausibility of the
-    /// inertia tensor: non-negative diagonal, triangle inequalities, and
-    /// positive semi-definiteness. A massless link must have zero inertia.
+    /// inertia tensor. A massless link must have zero inertia.
+    ///
+    /// A rigid body's principal moments are non-negative and each is at most
+    /// the sum of the other two. Both hold exactly when `(trace(I) / 2)·1 − I`
+    /// is positive semi-definite, which is tested through its principal minors
+    /// without an eigen-decomposition. A relative tolerance absorbs the
+    /// rounding of tabulated values, so tensors on the boundary (point masses,
+    /// thin rods, flat plates) pass.
     pub fn validate(&self) -> CuResult<()> {
         let mass = self.mass.get::<kilogram>();
         if !mass.is_finite() || mass < 0.0 {
@@ -103,24 +112,29 @@ impl CuLinkInertia {
         if xx < 0.0 || yy < 0.0 || zz < 0.0 {
             return Err(CuError::from("Link inertia diagonal must be non-negative"));
         }
+        // B = (trace / 2)·1 − I has the eigenvalues (λj + λk − λi) / 2 of the
+        // principal moments λ, so B ⪰ 0 is the triangle inequality on the
+        // principal moments, and it implies I ⪰ 0. B is positive semi-definite
+        // when all seven of its principal minors are non-negative.
         let trace = xx + yy + zz;
-        let tri_tol = INERTIA_TOL * trace;
-        if xx + yy < zz - tri_tol || xx + zz < yy - tri_tol || yy + zz < xx - tri_tol {
+        let half = trace / 2.0;
+        let (bx, by, bz) = (half - xx, half - yy, half - zz);
+        if bx < -INERTIA_TOL * trace || by < -INERTIA_TOL * trace || bz < -INERTIA_TOL * trace {
             return Err(CuError::from(
                 "Link inertia violates the triangle inequalities",
             ));
         }
         let scale = trace / 3.0;
         let minor_tol = INERTIA_TOL * scale * scale;
-        if xx * yy - xy * xy < -minor_tol
-            || xx * zz - xz * xz < -minor_tol
-            || yy * zz - yz * yz < -minor_tol
+        let det = bx * (by * bz - yz * yz) - xy * (xy * bz + yz * xz) - xz * (xy * yz + by * xz);
+        if bx * by - xy * xy < -minor_tol
+            || bx * bz - xz * xz < -minor_tol
+            || by * bz - yz * yz < -minor_tol
+            || det < -minor_tol * scale
         {
-            return Err(CuError::from("Link inertia is not positive semi-definite"));
-        }
-        let det = xx * (yy * zz - yz * yz) - xy * (xy * zz - yz * xz) + xz * (xy * yz - yy * xz);
-        if det < -INERTIA_TOL * scale * scale * scale {
-            return Err(CuError::from("Link inertia is not positive semi-definite"));
+            return Err(CuError::from(
+                "Link inertia principal moments violate the triangle inequalities",
+            ));
         }
         Ok(())
     }
@@ -133,12 +147,33 @@ impl CuLinkInertia {
 /// frame `i`. Pairs with [`CuKinematicChain`] in
 /// [`CuKinematicChain::inverse_dynamics`] and
 /// [`CuKinematicChain::gravity_compensation`].
+///
+/// [`Self::new`] and deserialization both validate every link, so bad
+/// parameters fail where they are loaded. Reflection can still write the links
+/// in place, which is why [`CuKinematicChain::inverse_dynamics`] validates
+/// again on every call instead of relying on this type.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "CuChainInertiaUnchecked<N>")]
 pub struct CuChainInertia<const N: usize> {
     #[serde(with = "crate::serde_arrays::link_inertia_array")]
     links: [CuLinkInertia; N],
+}
+
+/// Wire form of [`CuChainInertia`], validated on its way in.
+#[derive(Deserialize)]
+#[serde(rename = "CuChainInertia", deny_unknown_fields)]
+struct CuChainInertiaUnchecked<const N: usize> {
+    #[serde(with = "crate::serde_arrays::link_inertia_array")]
+    links: [CuLinkInertia; N],
+}
+
+impl<const N: usize> TryFrom<CuChainInertiaUnchecked<N>> for CuChainInertia<N> {
+    type Error = CuError;
+
+    fn try_from(unchecked: CuChainInertiaUnchecked<N>) -> CuResult<Self> {
+        Self::new(unchecked.links)
+    }
 }
 
 impl<const N: usize> CuChainInertia<N> {
@@ -210,15 +245,20 @@ impl<const N: usize> CuKinematicChain<N> {
     /// Given positions, velocities, accelerations, and gravity, writes the
     /// torque (revolute joints) or force (prismatic joints) each joint must
     /// exert into `out_efforts`. Fixed joints yield [`CuJointEffort::Fixed`].
-    /// No tip load is modeled. `inertia` is trusted after its own validating
-    /// constructor; the joint state is checked here for finiteness and unit-kind
-    /// agreement with the chain.
+    /// No tip load is modeled.
+    ///
+    /// Every input is checked on each call: `inertia` through
+    /// [`CuChainInertia::validate`], because reflection can alter one after
+    /// its validating constructor ran, and the joint state for finiteness and
+    /// unit-kind agreement with the chain. Invalid input returns an error
+    /// before `out_efforts` is written.
     pub fn inverse_dynamics(
         &self,
         inertia: &CuChainInertia<N>,
         input: &CuInverseDynamicsInput<N>,
         out_efforts: &mut [CuJointEffort; N],
     ) -> CuResult<()> {
+        inertia.validate()?;
         let mut gravity = [0.0; 3];
         let mut k = 0;
         while k < 3 {
@@ -1118,5 +1158,108 @@ mod tests {
         assert!(CuLinkInertia::new(kg(1.0), com, i6([0.0; 6])).is_ok());
         assert!(CuLinkInertia::new(kg(0.0), m3([0.0; 3]), i6([0.0; 6])).is_ok());
         assert!(CuChainInertia::new([CuLinkInertia::new(kg(1.0), com, good).unwrap()]).is_ok());
+    }
+
+    #[test]
+    fn principal_moment_triangle_violation_rejected() {
+        let com = m3([0.0; 3]);
+        // Diagonal triangle checks and positive semi-definiteness both hold,
+        // but the principal moments are 2.8, 0.1, 0.1 and 2.8 > 0.1 + 0.1.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([1.0, 1.0, 1.0, 0.9, 0.9, 0.9])).is_err());
+        // Principal moments 1.5, 0.5, 0.5 with an unremarkable diagonal.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([1.0, 1.0, 0.5, 0.5, 0.0, 0.0])).is_err());
+        // A point mass has no room for products of inertia.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([0.0, 0.0, 0.0, 1e-3, 0.0, 0.0])).is_err());
+    }
+
+    #[test]
+    fn valid_inertia_edge_cases_accepted() {
+        let com = m3([0.0, 0.01, -0.02]);
+        // Point mass.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([0.0; 6])).is_ok());
+        // Thin rod along x: one zero principal moment, the other two equal.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([0.0, 0.1, 0.1, 0.0, 0.0, 0.0])).is_ok());
+        // Flat plate in the xy plane: exactly on the boundary, zz = xx + yy.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([0.1, 0.2, 0.3, 0.0, 0.0, 0.0])).is_ok());
+        // The same plate turned 45° about z: principal moments 0.1, 0.2, 0.3
+        // still sit on the boundary, now with a product of inertia.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([0.15, 0.15, 0.3, 0.05, 0.0, 0.0])).is_ok());
+        // Thin rod along the (1, 1, 1) diagonal: principal moments 0, 0.3, 0.3
+        // with every product of inertia nonzero.
+        assert!(CuLinkInertia::new(kg(1.0), com, i6([0.2, 0.2, 0.2, -0.1, -0.1, -0.1])).is_ok());
+        // Boundary tensor carrying the rounding of a tabulated value.
+        assert!(
+            CuLinkInertia::new(kg(1.0), com, i6([0.1, 0.2, 0.3 + 1e-12, 0.0, 0.0, 0.0])).is_ok()
+        );
+        // Realistic slender arm link with all three products of inertia.
+        assert!(
+            CuLinkInertia::new(
+                kg(4.97),
+                com,
+                i6([0.7034, 0.7066, 0.0091, -1.39e-4, 6.772e-3, 1.9169e-2])
+            )
+            .is_ok()
+        );
+    }
+
+    fn pendulum_chain() -> CuKinematicChain<1> {
+        CuKinematicChain::new([CuJointSpec::revolute(
+            m3([0.0; 3]),
+            [Angle::new::<radian>(0.0); 3],
+            CuJointAxis::PosY,
+            rev_limits(),
+        )])
+    }
+
+    #[test]
+    fn deserialized_chain_inertia_is_validated() {
+        let good =
+            "(links:((mass:2.0,center_of_mass:(0.25,0.0,0.0),inertia:(0.0,0.0,0.0,0.0,0.0,0.0))))";
+        let inertia: CuChainInertia<1> = ron::from_str(good).unwrap();
+        assert_eq!(
+            inertia,
+            CuChainInertia::new([link(2.0, [0.25, 0.0, 0.0], [0.0; 6])]).unwrap()
+        );
+        assert_eq!(ron::to_string(&inertia).unwrap(), good);
+
+        // Negative mass must not come back as a usable chain inertia: it would
+        // flip the sign of every gravity compensation effort.
+        let negative_mass =
+            "(links:((mass:-2.0,center_of_mass:(0.25,0.0,0.0),inertia:(0.0,0.0,0.0,0.0,0.0,0.0))))";
+        assert!(ron::from_str::<CuChainInertia<1>>(negative_mass).is_err());
+        let bad_tensor =
+            "(links:((mass:2.0,center_of_mass:(0.25,0.0,0.0),inertia:(1.0,1.0,1.0,0.9,0.9,0.9))))";
+        assert!(ron::from_str::<CuChainInertia<1>>(bad_tensor).is_err());
+    }
+
+    #[test]
+    fn inverse_dynamics_rejects_unvalidated_inertia() {
+        // `CuLinkInertia` has public fields, so a struct literal skips its
+        // constructor. Building the chain inertia in-module stands in for any
+        // path that bypasses `CuChainInertia::new`, such as reflection.
+        let inertia = CuChainInertia {
+            links: [CuLinkInertia {
+                mass: kg(-2.0),
+                center_of_mass: m3([0.25, 0.0, 0.0]),
+                inertia: i6([0.0; 6]),
+            }],
+        };
+        let chain = pendulum_chain();
+        let positions = [rev_pos(0.0)];
+        let mut efforts = [CuJointEffort::default(); 1];
+        assert!(
+            chain
+                .gravity_compensation(&inertia, &positions, gravity_down(), &mut efforts)
+                .is_err()
+        );
+        let velocities = [rev_vel(0.0)];
+        let accelerations = [rev_acc(0.0)];
+        let input =
+            CuInverseDynamicsInput::new(&positions, &velocities, &accelerations, gravity_down());
+        assert!(
+            chain
+                .inverse_dynamics(&inertia, &input, &mut efforts)
+                .is_err()
+        );
     }
 }

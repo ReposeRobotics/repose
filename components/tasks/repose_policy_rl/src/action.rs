@@ -272,19 +272,21 @@ impl<const N: usize> CuJointActionParams<N> {
 /// `Held` absolute action is re-applied, so a `max_step`-limited target
 /// keeps approaching it.
 ///
-/// Hold cases emit the previous target (the measured position when there is
-/// no target, zeros before the first state) with zero velocity:
+/// Hold cases drop the target and emit the measured position with zero
+/// velocity:
 ///
 /// | Situation | Status emitted |
 /// |---|---|
-/// | No action yet, action status `Idle`, or no joint state | `Idle` |
-/// | Robot not `Ready` | `Idle`, and the target is dropped |
-/// | Action status `Fault`, a non-finite action value, or a joint state whose units do not match the chain | `ErrorEmptyTrajectory` |
+/// | No action yet, action status `Idle`, or robot not `Ready` | `Idle` |
+/// | Action status `Fault`, a non-finite action value or setpoint velocity, or a joint state that is not finite or whose units do not match the chain | `ErrorEmptyTrajectory` |
 ///
-/// A robot that is not `Ready` (fault, emergency stop) may be moved while
-/// it is down, so the target is dropped: the hold emits the measured
-/// position and the first delta after recovery starts from where the arm
-/// is, not from where it was.
+/// The controller holds the measured position during a hold, and a robot
+/// that is not `Ready` (fault, emergency stop) may be moved while it is
+/// down. Dropping the target makes the first active cycle afterwards start
+/// from where the arm is: `max_step` and the setpoint velocity are then
+/// measured from the measured position, not from a target the arm never
+/// reached. With no joint state at all the previous target is kept and
+/// emitted (zeros before the first state) with `Idle`.
 ///
 /// `ErrorEmptyTrajectory` is the plan's naming compromise so the unchanged
 /// controller maps it to its `Fault` status.
@@ -396,20 +398,33 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
             output.set_payload(hold(self, CuFollowStatus::Idle));
             return Ok(());
         };
-        // Robot not ready: drop the target (the arm may be moved while it is
-        // down) and hold the measured position.
+        // Every hold below drops the target: the controller holds the
+        // measured position during a hold, so the next active cycle has to
+        // start from where the arm is, not from a target it never reached.
+        //
+        // Robot not ready (the arm may be moved while it is down).
         if state.status != CuRobotStatus::Ready {
             self.has_target = false;
             output.set_payload(hold(self, CuFollowStatus::Idle));
             return Ok(());
         }
-        // No action yet, or an idle action: hold.
+        // A joint state whose units do not match the chain, or that is not
+        // finite, is a fault of the cycle, not of the task.
+        let mut measured = state.positions;
+        if self.chain.clamp_to_limits(&mut measured).is_err() {
+            self.has_target = false;
+            output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
+            return Ok(());
+        }
+        // No action yet, or an idle action.
         let Some(action) = action.filter(|a| a.status != CuPolicyStatus::Idle) else {
+            self.has_target = false;
             output.set_payload(hold(self, CuFollowStatus::Idle));
             return Ok(());
         };
-        // A faulted action, or any non-finite value: hold and fault.
+        // A faulted action, or any non-finite value.
         if action.status == CuPolicyStatus::Fault || !action.values.iter().all(|v| v.is_finite()) {
+            self.has_target = false;
             output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
             return Ok(());
         }
@@ -442,6 +457,7 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
         for j in 0..N {
             let raw = base[j].si_value() + self.params.scale[j] * f64::from(action.values[j]);
             if !raw.is_finite() {
+                self.has_target = false;
                 output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
                 return Ok(());
             }
@@ -454,9 +470,8 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
             };
             target[j] = base[j].with_si_value(stepped);
         }
-        // A joint state whose units do not match the chain is a fault of
-        // the cycle, not of the task: hold and report it.
         if self.chain.clamp_to_limits(&mut target).is_err() {
+            self.has_target = false;
             output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
             return Ok(());
         }
@@ -464,9 +479,13 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
         if let Some(period) = self.params.period {
             let period = period.get::<second>();
             for j in 0..N {
-                let change = target[j].si_value() - reference[j].si_value();
-                setpoint.velocities[j] =
-                    CuJointVelocity::from_coordinate(target[j], change / period);
+                let velocity = (target[j].si_value() - reference[j].si_value()) / period;
+                if !velocity.is_finite() {
+                    self.has_target = false;
+                    output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
+                    return Ok(());
+                }
+                setpoint.velocities[j] = CuJointVelocity::from_coordinate(target[j], velocity);
             }
         }
         self.previous_target = target;
@@ -714,10 +733,15 @@ mod tests {
         );
         assert_si(&out, 0.15);
 
-        // No action yet.
-        let out = run(&mut task, None, Some(state(0.10)));
+        // No joint state at all: the previous target is kept and emitted.
+        let out = run(&mut task, Some(action(1.0, CuPolicyStatus::Fresh)), None);
         assert_eq!(out.status, CuFollowStatus::Idle);
         assert_si(&out, 0.15);
+
+        // No action yet: the target is dropped, the measured position held.
+        let out = run(&mut task, None, Some(state(0.10)));
+        assert_eq!(out.status, CuFollowStatus::Idle);
+        assert_si(&out, 0.10);
         assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
         assert!(out.accelerations.iter().all(|v| v.si_value() == 0.0));
 
@@ -728,7 +752,7 @@ mod tests {
             Some(state(0.10)),
         );
         assert_eq!(out.status, CuFollowStatus::Idle);
-        assert_si(&out, 0.15);
+        assert_si(&out, 0.10);
 
         // Action status Fault.
         let out = run(
@@ -737,13 +761,8 @@ mod tests {
             Some(state(0.10)),
         );
         assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory);
-        assert_si(&out, 0.15);
+        assert_si(&out, 0.10);
         assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
-
-        // No joint state at all.
-        let out = run(&mut task, Some(action(1.0, CuPolicyStatus::Fresh)), None);
-        assert_eq!(out.status, CuFollowStatus::Idle);
-        assert_si(&out, 0.15);
 
         // Robot not Ready (every non-Ready status): the target is dropped
         // and the measured position is held.
@@ -824,10 +843,9 @@ mod tests {
             act.values[1] = bad;
             let out = run(&mut task, Some(act), Some(state(0.10)));
             assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory, "{bad}");
-            assert_si(&out, 0.15);
+            assert_si(&out, 0.10);
         }
-        // The fault did not move the target, and a valid action resumes
-        // from the measured position.
+        // A valid action resumes from the measured position.
         let out = run(
             &mut task,
             Some(action(2.0, CuPolicyStatus::Fresh)),
@@ -1012,8 +1030,9 @@ mod tests {
         // A hold case has zero velocity too.
         let out = run(&mut task, None, Some(state(0.10)));
         assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
-        // Integrating the velocity over the cycles reproduces the target.
-        let mut integrated = 0.15;
+        // After the hold the reference is the measured position; integrating
+        // the velocity over the cycles then reproduces the target.
+        let mut integrated = 0.10;
         for _ in 0..5 {
             let out = run(
                 &mut task,
@@ -1022,6 +1041,68 @@ mod tests {
             );
             integrated += out.velocities[0].si_value() * 0.02;
             assert!((integrated - out.positions[0].si_value()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn absolute_action_after_a_hold_moves_from_the_measured_position() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
+        p.default_positions = [rev(0.5); 2];
+        p.period = Some(Time::new::<second>(0.02));
+        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let out = run(
+            &mut task,
+            Some(action(0.0, CuPolicyStatus::Fresh)),
+            Some(state(0.0)),
+        );
+        assert_si(&out, 0.5);
+        // A hold: the controller holds the measured position, still 0.0.
+        run(&mut task, None, Some(state(0.0)));
+        // The same absolute action again must command motion, not zero
+        // velocity toward a target the arm never reached.
+        let out = run(
+            &mut task,
+            Some(action(0.0, CuPolicyStatus::Fresh)),
+            Some(state(0.0)),
+        );
+        assert_si(&out, 0.5);
+        assert!(
+            out.velocities
+                .iter()
+                .all(|v| (v.si_value() - 25.0).abs() < 1e-9)
+        );
+    }
+
+    #[test]
+    fn overflowing_setpoint_velocity_faults() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+        // The smallest positive (subnormal) period: any target change overflows.
+        p.period = Some(Time::new::<second>(f64::from_bits(1)));
+        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(state(0.0)),
+        );
+        assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory);
+        assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
+    }
+
+    #[test]
+    fn mismatched_measured_units_fault_every_action_kind() {
+        for kind in [
+            CuJointActionKind::PositionDelta,
+            CuJointActionKind::PositionAbsolute,
+        ] {
+            let mut task = CuJointActionTask::from_params(params(chain2(-2.0, 2.0), kind)).unwrap();
+            let mut st = state::<2>(0.0);
+            st.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.0));
+            let out = run(
+                &mut task,
+                Some(action(0.1, CuPolicyStatus::Fresh)),
+                Some(st),
+            );
+            assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory, "{kind:?}");
         }
     }
 

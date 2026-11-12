@@ -79,10 +79,10 @@ may be breaking.
   the measured position) or `position_absolute` (from typed default positions)
   actions with a dimensionless scalar or per-joint `scale`, an optional
   per-cycle `max_step`, and clamping to the configured chain's joint limits.
-  Idle, faulted, and non-finite inputs hold the previous target with `Idle`
-  or `ErrorEmptyTrajectory` status. A robot that is not `Ready` drops the
-  target and holds the measured position, so motion after a fault or an
-  emergency stop restarts from where the arm is. The previous target
+  Idle, faulted, and non-finite inputs, a robot that is not `Ready`, and a
+  joint state whose units do not match the chain drop the target and hold
+  the measured position with `Idle` or `ErrorEmptyTrajectory` status, so
+  motion after any hold restarts from where the arm is. The previous target
   round-trips through `Freezable`. With the optional `period` (the control
   cycle period) the setpoint velocity is the target change per cycle, which
   a controller in `velocity` mode executes; without it the setpoint velocity

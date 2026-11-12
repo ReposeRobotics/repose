@@ -1,0 +1,43 @@
+# Migrating to Repose 0.9
+
+Update all Repose crate dependencies together.
+
+## repose-controller: per-joint effort gains
+
+Effort-mode gains are now set per joint, and the params struct carries the
+joint count. RON configs need no change: a single number for `kp` or `kv`
+still applies to every joint.
+
+| Before | After |
+|---|---|
+| `CuEffortGains { kp: 20.0, kv: 0.8 }` | `CuEffortGains::uniform(20.0, 0.8)`, or `CuEffortGains { kp: [..; N], kv: [..; N] }` for per-joint values |
+| `CuEffortGains` | `CuEffortGains<N>` |
+| `CuControllerParams` | `CuControllerParams<N>` (inferred when passed to `CuControllerTask::<N>::from_params`) |
+| `CuControllerParams { .. }` written out in full | add `effort_model: None`, or end with `..CuControllerParams::default()` |
+| `"effort_gains": {"kp": 20.0, "kv": 0.8}` | unchanged; `"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0]` sets each joint |
+
+Keyframes of `CuControllerTask` recorded by 0.8 do not thaw in 0.9, because
+the frozen state now holds one `kp` and one `kv` per joint. Message payloads
+are unchanged, so logs still decode; replay from the start of a log instead
+of from a keyframe.
+
+## repose-controller: model-based effort mode (optional)
+
+Effort mode stays pure PD unless you add a model:
+
+```ron
+config: {
+    "mode": "effort",
+    "effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": [3.0, 3.0, 2.0, 0.3, 0.3, 0.05]},
+    "effort_model": {
+        "chain": "igus_rebel",
+        "inertia": {"links": [ /* one CuLinkInertia per joint */ ]},
+    },
+}
+```
+
+With a model the commanded effort is the PD feedback plus the inverse
+dynamics at the measured positions, the desired velocities, and zero
+acceleration, and the hold and fault paths add gravity compensation. If your
+bridge or drive already compensates gravity, set `"gravity": [0.0, 0.0, 0.0]`
+in the model so it is not applied twice.

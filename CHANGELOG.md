@@ -7,6 +7,34 @@ may be breaking.
 
 ## [Unreleased]
 
+### Breaking
+
+- `repose-controller`: effort-mode gains are per joint. `CuEffortGains` is now
+  `CuEffortGains<N>` with `kp: [f64; N]` and `kv: [f64; N]`, and
+  `CuControllerParams` is now `CuControllerParams<N>` (it also gains the
+  `effort_model` field). Build uniform gains with
+  `CuEffortGains::uniform(kp, kv)`; the defaults are unchanged (`kp = 20.0`,
+  `kv = 0.8` on every joint). RON configs keep working: a single number for
+  `kp` or `kv` still means that gain on every joint. The controller's frozen
+  state now stores `2 * N` gain values instead of two, so keyframes of
+  `CuControllerTask` written by earlier versions do not thaw. See
+  [docs/migration-0.9.md](docs/migration-0.9.md).
+
+### Added
+
+- `repose-controller`: model-based effort mode. With the optional
+  `effort_model` parameter (`CuEffortModel<N>`: a chain preset or inline
+  chain, its `CuChainInertia<N>`, and a gravity vector), effort mode adds
+  inverse-dynamics feedforward to the PD feedback: the model is evaluated at
+  the measured positions, the desired velocities, and zero acceleration
+  (gravity plus Coriolis/centrifugal load; the follower setpoint carries no
+  acceleration). Hold and fault paths add gravity compensation at the measured
+  positions to the damping brake, so the arm no longer sags. A model that
+  cannot be evaluated faults the controller and falls back to the damping
+  brake. Without a model, effort mode is the same PD law as before.
+- `repose-controller`: per-joint effort gains in RON, as an array of `N`
+  numbers per gain (`"effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": 0.8}`).
+
 ## [0.8.4] - 2026-11-10
 
 ### Added

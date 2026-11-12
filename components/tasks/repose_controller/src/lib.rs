@@ -18,6 +18,30 @@
 //!   holds the measured state instead of chasing the setpoint.
 //! - Setpoint without any measured state: `Fault`, holding the last command.
 //!
+//! # Effort mode
+//!
+//! In [`CuControllerMode::Effort`] the controller computes the joint efforts
+//! itself, with per-joint PD gains ([`CuEffortGains`]):
+//!
+//! ```text
+//! tau[j] = kp[j] * (q_des[j] - q[j]) + kv[j] * (qd_des[j] - qd[j]) + ff[j]
+//! ```
+//!
+//! Without a robot model `ff` is zero (pure PD). With an optional
+//! [`CuEffortModel`] (`"effort_model"` in RON), `ff` is the inverse dynamics
+//! of the chain evaluated at the **measured** positions, the **desired**
+//! velocities, and **zero** acceleration: the gravity load plus the
+//! Coriolis/centrifugal load of the planned motion. The follower setpoint
+//! carries no acceleration, so the inertial term `M(q) * qdd_des` is not fed
+//! forward and is left to the PD feedback.
+//!
+//! Hold and fault paths command a damping brake (`-kv[j] * qd[j]`), plus the
+//! gravity load at the measured positions when a model is configured, so the
+//! arm neither goes limp nor sags. If the model cannot be evaluated (for
+//! example a non-finite or wrongly typed joint value) the controller reports
+//! `Fault` and falls back to the damping brake alone. With no usable measured
+//! state (none yet, stale, or the robot not `Ready`) the effort is zero.
+//!
 //! State that affects later cycles (last command, last status) round-trips
 //! through `Freezable`, so deterministic replay resumes correctly.
 
@@ -30,14 +54,21 @@ use bincode::enc::Encoder;
 use bincode::error::DecodeError;
 use bincode::error::EncodeError;
 use cu29::prelude::*;
-use cu29::units::si::f64::{Force, Time, Torque};
+use cu29::units::si::acceleration::meter_per_second_squared;
+use cu29::units::si::f64::{Acceleration, Force, Time, Torque};
 use cu29::units::si::force::newton;
 use cu29::units::si::time::second;
 use cu29::units::si::torque::newton_meter;
+use repose_kinematics::CuChainInertia;
+use repose_kinematics::CuChainSpec;
+use repose_kinematics::CuInverseDynamicsInput;
+use repose_kinematics::CuJointAcceleration;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointStatePayload;
 use repose_kinematics::CuJointVelocity;
+use repose_kinematics::CuKinematicChain;
 use repose_kinematics::CuRobotStatus;
+use repose_kinematics::standard_gravity;
 use repose_trajectory::CuFollowStatus;
 use repose_trajectory::CuTrajectoryFollowOutput;
 use serde::Deserialize;
@@ -58,8 +89,10 @@ pub enum CuControllerMode {
     /// Velocity setpoints; the bridge servo drives the commanded joint
     /// velocities (positions ride along as a drift reference).
     Velocity,
-    /// Effort setpoints computed by the controller's own PD law; the bridge
-    /// applies them as raw torque/force (plus its own gravity compensation).
+    /// Effort setpoints computed by the controller: per-joint PD feedback
+    /// plus, with a [`CuEffortModel`], inverse-dynamics feedforward. The
+    /// bridge applies them as raw torque/force (plus its own gravity
+    /// compensation, if it has one; see [`CuEffortModel`]).
     Effort,
 }
 
@@ -146,33 +179,142 @@ impl<const N: usize> Default for CuJointCommandPayload<N> {
     }
 }
 
-/// Effort-mode PD gains.
+/// Per-joint effort-mode PD gains.
 ///
-/// Both gains are dimensionless SI multipliers applied per joint kind:
-/// `kp` is N m/rad (revolute) or N/m (prismatic), `kv` is N m s/rad
-/// (revolute) or N s/m (prismatic). Both must be finite and `>= 0`.
+/// Entry `j` applies to joint `j`. The gains are dimensionless SI multipliers
+/// applied per joint kind: `kp` is N m/rad (revolute) or N/m (prismatic), `kv`
+/// is N m s/rad (revolute) or N s/m (prismatic). Every entry must be finite
+/// and `>= 0`.
+///
+/// In RON each gain is an array of `N` numbers, or one number applied to
+/// every joint:
+///
+/// ```ron
+/// "effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": 0.8}
+/// ```
+///
+/// ```rust
+/// use repose_controller::CuEffortGains;
+///
+/// let gains = CuEffortGains::<3>::uniform(20.0, 0.8);
+/// assert_eq!(gains, CuEffortGains::default());
+/// assert_eq!(gains.kp, [20.0; 3]);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
-#[serde(default, deny_unknown_fields)]
-pub struct CuEffortGains {
-    /// Proportional gain (dimensionless SI, see type docs).
-    pub kp: f64,
-    /// Derivative gain (dimensionless SI, see type docs).
-    pub kv: f64,
+#[reflect(no_field_bounds, from_reflect = false)]
+// Field-level defaults: serde does not support container `default` on const-generic structs.
+#[serde(deny_unknown_fields)]
+pub struct CuEffortGains<const N: usize> {
+    /// Proportional gain per joint (dimensionless SI, see type docs).
+    #[serde(default = "default_kp", with = "crate::serde_arrays::gain_array")]
+    pub kp: [f64; N],
+    /// Derivative gain per joint (dimensionless SI, see type docs).
+    #[serde(default = "default_kv", with = "crate::serde_arrays::gain_array")]
+    pub kv: [f64; N],
 }
 
-impl Default for CuEffortGains {
-    /// `kp = 20.0`, `kv = 0.8`.
+const DEFAULT_KP: f64 = 20.0;
+const DEFAULT_KV: f64 = 0.8;
+
+fn default_kp<const N: usize>() -> [f64; N] {
+    [DEFAULT_KP; N]
+}
+
+fn default_kv<const N: usize>() -> [f64; N] {
+    [DEFAULT_KV; N]
+}
+
+impl<const N: usize> Default for CuEffortGains<N> {
+    /// `kp = 20.0`, `kv = 0.8` on every joint.
     fn default() -> Self {
-        Self { kp: 20.0, kv: 0.8 }
+        Self::uniform(DEFAULT_KP, DEFAULT_KV)
     }
 }
 
-impl CuEffortGains {
-    /// Checks that both gains are finite and non-negative.
+impl<const N: usize> CuEffortGains<N> {
+    /// The same `kp` and `kv` on every joint (dimensionless SI, see type
+    /// docs). Not validated here; [`Self::validate`] does the checking.
+    pub const fn uniform(kp: f64, kv: f64) -> Self {
+        Self {
+            kp: [kp; N],
+            kv: [kv; N],
+        }
+    }
+
+    /// Checks that every gain is finite and non-negative.
     pub fn validate(&self) -> CuResult<()> {
-        if !self.kp.is_finite() || self.kp < 0.0 || !self.kv.is_finite() || self.kv < 0.0 {
+        let ok = |v: &f64| v.is_finite() && *v >= 0.0;
+        if !self.kp.iter().all(ok) || !self.kv.iter().all(ok) {
             return Err(CuError::from(
-                "repose-controller: effort gains 'kp'/'kv' must be finite and >= 0",
+                "repose-controller: effort gains 'kp'/'kv' must be finite and >= 0 on every joint",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Rigid-body model for effort-mode feedforward and gravity compensation.
+///
+/// With a model, effort mode adds the chain's inverse dynamics to the PD
+/// feedback. The model is evaluated at the **measured** joint positions, so
+/// the gravity term cancels the load the arm actually carries, at the
+/// **desired** joint velocities, which are smooth where measured ones are
+/// noisy, and at **zero** acceleration, because the follower setpoint carries
+/// none. Hold and fault paths use the gravity load at the measured positions.
+///
+/// Set `gravity` to zero when the bridge or drive already compensates
+/// gravity, so it is not applied twice; the velocity terms remain.
+///
+/// ```ron
+/// "effort_model": {
+///     "chain": "igus_rebel",           // preset name or inline chain
+///     "inertia": {"links": [ /* N CuLinkInertia */ ]},
+///     "gravity": [0.0, 0.0, -9.80665], // m/s², base frame; optional
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
+#[reflect(no_field_bounds, from_reflect = false)]
+#[serde(deny_unknown_fields)]
+pub struct CuEffortModel<const N: usize> {
+    /// Robot chain: a preset name (`"igus_rebel"`) or an inline chain.
+    #[reflect(ignore)]
+    pub chain: CuChainSpec<N>,
+    /// Per-link mass, centre of mass, and rotational inertia of that chain.
+    pub inertia: CuChainInertia<N>,
+    /// Gravity acceleration in the chain's base frame. Defaults to standard
+    /// Earth gravity along `-z`.
+    #[serde(default = "standard_gravity")]
+    pub gravity: [Acceleration; 3],
+}
+
+impl<const N: usize> CuEffortModel<N> {
+    /// A model under standard Earth gravity along the base frame's `-z`.
+    /// Not validated here; [`Self::validate`] does the checking.
+    pub fn new(chain: impl Into<CuChainSpec<N>>, inertia: CuChainInertia<N>) -> Self {
+        Self {
+            chain: chain.into(),
+            inertia,
+            gravity: standard_gravity(),
+        }
+    }
+
+    /// Replaces the gravity acceleration (base frame).
+    pub fn with_gravity(mut self, gravity: [Acceleration; 3]) -> Self {
+        self.gravity = gravity;
+        self
+    }
+
+    /// Checks the chain, every link's inertia, and that gravity is finite.
+    pub fn validate(&self) -> CuResult<()> {
+        self.chain.resolve()?;
+        self.inertia.validate()?;
+        if self
+            .gravity
+            .iter()
+            .any(|g| !g.get::<meter_per_second_squared>().is_finite())
+        {
+            return Err(CuError::from(
+                "repose-controller: effort model 'gravity' must be finite",
             ));
         }
         Ok(())
@@ -215,14 +357,18 @@ impl CuRateLimit {
 ///     "tracking_error_limit": 0.5,   // SI per joint kind (rad / m)
 ///     "state_timeout": 0.2,          // s; omit to disable the watchdog
 ///     "rate_limit": {"max_speed": 1.5, "max_acceleration": 6.0},
-///     "effort_gains": {"kp": 20.0, "kv": 0.8},
+///     "effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": 0.8},
+///     "effort_model": {"chain": "igus_rebel", "inertia": {"links": [ /* 6 links */ ]}},
 /// }
 /// ```
+///
+/// `N` is the joint count of the task; `CuControllerParams::default()`
+/// infers it from the task it is passed to.
 ///
 /// ```rust
 /// use repose_controller::{CuControllerParams, CuControllerTask, CuRateLimit};
 ///
-/// let params = CuControllerParams {
+/// let params = CuControllerParams::<6> {
 ///     rate_limit: Some(CuRateLimit { max_speed: 1.5, max_acceleration: 6.0 }),
 ///     ..CuControllerParams::default()
 /// };
@@ -230,44 +376,65 @@ impl CuRateLimit {
 /// assert_eq!(task.params().tracking_error_limit, 0.5);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
-#[serde(default, deny_unknown_fields)]
-pub struct CuControllerParams {
+#[reflect(no_field_bounds, from_reflect = false)]
+// Field-level defaults: serde does not support container `default` on const-generic structs.
+#[serde(deny_unknown_fields)]
+pub struct CuControllerParams<const N: usize> {
     /// Command level: `position`, `velocity`, or `effort`.
+    #[serde(default)]
     pub mode: CuControllerMode,
     /// Max allowed absolute joint error (setpoint − measured) before the
     /// controller faults and holds the measured state. Dimensionless SI
     /// magnitude compared per joint in that joint's unit: radians for
     /// revolute, meters for prismatic joints. Positive and finite.
+    #[serde(default = "default_tracking_error_limit")]
     pub tracking_error_limit: f64,
     /// State watchdog: a joint state whose `Tov` is older than this (or in
     /// the future, or missing a time) faults the controller. `None`
     /// disables the watchdog.
+    #[serde(default)]
     pub state_timeout: Option<Time>,
     /// Command rate limit; requires `mode: position`. `None` disables it.
+    #[serde(default)]
     pub rate_limit: Option<CuRateLimit>,
-    /// Effort-mode PD gains. In effort mode, hold/fault paths apply a
-    /// damping brake (`-kv * measured velocity`); with no measured state
-    /// the effort is zero and the bridge's gravity compensation is all that
-    /// holds the arm.
-    pub effort_gains: CuEffortGains,
+    /// Per-joint effort-mode PD gains. In effort mode, hold/fault paths
+    /// apply a damping brake (`-kv[j] * measured velocity`); with no usable
+    /// measured state the effort is zero and the bridge's gravity
+    /// compensation is all that holds the arm.
+    #[serde(default)]
+    pub effort_gains: CuEffortGains<N>,
+    /// Optional rigid-body model. With it, effort mode adds inverse-dynamics
+    /// feedforward to the PD feedback and gravity compensation to the
+    /// hold/fault brake. `None` keeps effort mode pure PD.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub effort_model: Option<CuEffortModel<N>>,
 }
 
-impl Default for CuControllerParams {
+const DEFAULT_TRACKING_ERROR_LIMIT: f64 = 0.5;
+
+fn default_tracking_error_limit() -> f64 {
+    DEFAULT_TRACKING_ERROR_LIMIT
+}
+
+impl<const N: usize> Default for CuControllerParams<N> {
     /// Position mode, 0.5 tracking-error limit, no watchdog, no rate limit,
-    /// effort gains `kp = 20.0`, `kv = 0.8`.
+    /// effort gains `kp = 20.0`, `kv = 0.8` on every joint, no effort model.
     fn default() -> Self {
         Self {
             mode: CuControllerMode::Position,
-            tracking_error_limit: 0.5,
+            tracking_error_limit: DEFAULT_TRACKING_ERROR_LIMIT,
             state_timeout: None,
             rate_limit: None,
             effort_gains: CuEffortGains::default(),
+            effort_model: None,
         }
     }
 }
 
-impl CuControllerParams {
-    /// Checks the limit, watchdog, rate limit (position mode only) and gains.
+impl<const N: usize> CuControllerParams<N> {
+    /// Checks the limit, watchdog, rate limit (position mode only), gains,
+    /// and effort model.
     pub fn validate(&self) -> CuResult<()> {
         if !self.tracking_error_limit.is_finite() || self.tracking_error_limit <= 0.0 {
             return Err(CuError::from(
@@ -290,7 +457,11 @@ impl CuControllerParams {
                 ));
             }
         }
-        self.effort_gains.validate()
+        self.effort_gains.validate()?;
+        if let Some(model) = &self.effort_model {
+            model.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -311,7 +482,10 @@ fn to_nanos(t: Time) -> u64 {
 #[reflect(no_field_bounds, from_reflect = false)]
 pub struct CuControllerTask<const N: usize> {
     #[reflect(ignore)]
-    params: CuControllerParams,
+    params: CuControllerParams<N>,
+    /// Resolved chain of `params.effort_model`.
+    #[reflect(ignore)]
+    model_chain: Option<CuKinematicChain<N>>,
     #[reflect(ignore)]
     state_timeout_ns: Option<u64>,
     #[reflect(ignore)]
@@ -326,15 +500,23 @@ pub struct CuControllerTask<const N: usize> {
 
 impl<const N: usize> CuControllerTask<N> {
     /// Creates a controller from validated params.
-    pub fn from_params(params: CuControllerParams) -> CuResult<Self> {
+    pub fn from_params(params: CuControllerParams<N>) -> CuResult<Self> {
         params.validate()?;
-        Ok(Self::with_valid_params(params))
+        let model_chain = match &params.effort_model {
+            Some(model) => Some(model.chain.resolve()?),
+            None => None,
+        };
+        Ok(Self::with_valid_params(params, model_chain))
     }
 
-    fn with_valid_params(params: CuControllerParams) -> Self {
+    fn with_valid_params(
+        params: CuControllerParams<N>,
+        model_chain: Option<CuKinematicChain<N>>,
+    ) -> Self {
         Self {
             state_timeout_ns: params.state_timeout.map(to_nanos),
             params,
+            model_chain,
             last_command: [CuJointPosition::default(); N],
             last_status: CuControllerStatus::Idle,
             has_command: false,
@@ -345,7 +527,7 @@ impl<const N: usize> CuControllerTask<N> {
 
     /// Params this task runs with (including `set_mode`/`set_effort_gains`
     /// changes).
-    pub fn params(&self) -> &CuControllerParams {
+    pub fn params(&self) -> &CuControllerParams<N> {
         &self.params
     }
 
@@ -359,18 +541,85 @@ impl<const N: usize> CuControllerTask<N> {
         self.params.mode
     }
 
-    /// Sets the effort-mode PD gains. Invalid gains (non-finite or negative)
-    /// are rejected and leave the current gains unchanged.
-    pub fn set_effort_gains(&mut self, gains: CuEffortGains) -> CuResult<()> {
+    /// Sets the per-joint effort-mode PD gains. Invalid gains (any entry
+    /// non-finite or negative) are rejected and leave the current gains
+    /// unchanged.
+    pub fn set_effort_gains(&mut self, gains: CuEffortGains<N>) -> CuResult<()> {
         gains.validate()?;
         self.params.effort_gains = gains;
         Ok(())
+    }
+
+    /// Writes the model efforts (SI per joint kind) at `positions` into
+    /// `out`: the gravity load, plus the Coriolis/centrifugal load of
+    /// `velocities` when given. Acceleration is zero. Without a model `out`
+    /// is all zero. On error `out` is left untouched.
+    fn model_efforts(
+        &self,
+        positions: &[CuJointPosition; N],
+        velocities: Option<&[CuJointVelocity; N]>,
+        out: &mut [f64; N],
+    ) -> CuResult<()> {
+        let (Some(chain), Some(model)) = (&self.model_chain, &self.params.effort_model) else {
+            *out = [0.0; N];
+            return Ok(());
+        };
+        let mut efforts = [repose_kinematics::CuJointEffort::default(); N];
+        match velocities {
+            Some(velocities) => {
+                let mut accelerations = [CuJointAcceleration::default(); N];
+                for j in 0..N {
+                    accelerations[j] = CuJointAcceleration::from_coordinate(positions[j], 0.0);
+                }
+                let input = CuInverseDynamicsInput::new(
+                    positions,
+                    velocities,
+                    &accelerations,
+                    model.gravity,
+                );
+                chain.inverse_dynamics(&model.inertia, &input, &mut efforts)?;
+            }
+            None => {
+                chain.gravity_compensation(
+                    &model.inertia,
+                    positions,
+                    model.gravity,
+                    &mut efforts,
+                )?;
+            }
+        }
+        for j in 0..N {
+            out[j] = efforts[j].si_value();
+        }
+        Ok(())
+    }
+
+    /// Effort-mode hold: a damping brake on the measured velocity plus, with
+    /// a model, the gravity load at the measured positions. No stiffness
+    /// towards any setpoint. If the model cannot be evaluated the command
+    /// faults and brakes with damping alone.
+    fn brake(&self, state: &CuJointStatePayload<N>, command: &mut CuJointCommandPayload<N>) {
+        let mut gravity = [0.0; N];
+        if self
+            .model_efforts(&state.positions, None, &mut gravity)
+            .is_err()
+        {
+            gravity = [0.0; N];
+            command.status = CuControllerStatus::Fault;
+        }
+        let kv = &self.params.effort_gains.kv;
+        for j in 0..N {
+            command.efforts[j] = CuJointEffort::from_position(
+                state.positions[j],
+                gravity[j] - kv[j] * state.velocities[j].si_value(),
+            );
+        }
     }
 }
 
 impl<const N: usize> Default for CuControllerTask<N> {
     fn default() -> Self {
-        Self::with_valid_params(CuControllerParams::default())
+        Self::with_valid_params(CuControllerParams::default(), None)
     }
 }
 
@@ -427,7 +676,7 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
         Self: Sized,
     {
         let params = cfg
-            .map(ComponentConfig::deserialize_into::<CuControllerParams>)
+            .map(ComponentConfig::deserialize_into::<CuControllerParams<N>>)
             .transpose()?
             .unwrap_or_default();
         Self::from_params(params)
@@ -444,7 +693,7 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
         let setpoint = input.0.payload();
 
         let mode = self.params.mode;
-        let CuEffortGains { kp, kv } = self.params.effort_gains;
+        let effort = mode == CuControllerMode::Effort;
         let mut command = CuJointCommandPayload::<N> {
             mode,
             ..Default::default()
@@ -478,13 +727,8 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
             (None, Some(state)) => {
                 command.positions = state.positions;
                 command.status = CuControllerStatus::Idle;
-                if mode == CuControllerMode::Effort {
-                    for j in 0..N {
-                        command.efforts[j] = CuJointEffort::from_position(
-                            state.positions[j],
-                            -kv * state.velocities[j].si_value(),
-                        );
-                    }
+                if effort {
+                    self.brake(state, &mut command);
                 }
             }
             (Some(_), None) => {
@@ -503,33 +747,44 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                     }
                 }
                 command.max_tracking_error = max_kind.with_si_value(max_err);
+                // Feedforward: model efforts at the measured positions and the
+                // desired velocities (zero without a model). A model that
+                // cannot be evaluated is a fault, not a silent pure-PD cycle.
+                let mut feedforward = [0.0; N];
+                let model_failed = effort
+                    && self
+                        .model_efforts(
+                            &state.positions,
+                            Some(&setpoint.velocities),
+                            &mut feedforward,
+                        )
+                        .is_err();
                 if setpoint.status == CuFollowStatus::ErrorEmptyTrajectory
                     || max_err > self.params.tracking_error_limit
+                    || model_failed
                 {
                     command.positions = state.positions;
                     command.status = CuControllerStatus::Fault;
-                    if mode == CuControllerMode::Effort {
-                        // Damping brake: no stiffness towards the setpoint,
-                        // but resist motion instead of going limp.
-                        for j in 0..N {
-                            command.efforts[j] = CuJointEffort::from_position(
-                                state.positions[j],
-                                -kv * state.velocities[j].si_value(),
-                            );
-                        }
+                    if effort {
+                        // No stiffness towards the setpoint, but resist
+                        // motion (and gravity, with a model) instead of
+                        // going limp.
+                        self.brake(state, &mut command);
                     }
                 } else {
                     command.positions = setpoint.positions;
                     command.velocities = setpoint.velocities;
-                    if mode == CuControllerMode::Effort {
+                    if effort {
+                        let CuEffortGains { kp, kv } = &self.params.effort_gains;
                         for j in 0..N {
                             let pos_err =
                                 setpoint.positions[j].si_value() - state.positions[j].si_value();
                             let vel_err =
                                 setpoint.velocities[j].si_value() - state.velocities[j].si_value();
-                            let effort = kp * pos_err + kv * vel_err;
-                            command.efforts[j] =
-                                CuJointEffort::from_position(setpoint.positions[j], effort);
+                            command.efforts[j] = CuJointEffort::from_position(
+                                setpoint.positions[j],
+                                kp[j] * pos_err + kv[j] * vel_err + feedforward[j],
+                            );
                         }
                     }
                     command.status = match setpoint.status {
@@ -710,7 +965,7 @@ mod tests {
     fn test_effort_mode_computes_pd_effort() {
         let mut task = with_limit(0.5);
         task.set_mode(CuControllerMode::Effort);
-        task.set_effort_gains(CuEffortGains { kp: 10.0, kv: 2.0 })
+        task.set_effort_gains(CuEffortGains::uniform(10.0, 2.0))
             .unwrap();
         let out = run(
             &mut task,
@@ -779,8 +1034,8 @@ mod tests {
 
     #[test]
     fn test_invalid_params_rejected() {
-        let bad = |p: CuControllerParams| CuControllerTask::<2>::from_params(p).is_err();
-        let d = CuControllerParams::default();
+        let bad = |p: CuControllerParams<2>| CuControllerTask::<2>::from_params(p).is_err();
+        let d = CuControllerParams::<2>::default();
         assert!(bad(CuControllerParams {
             tracking_error_limit: 0.0,
             ..d
@@ -817,7 +1072,7 @@ mod tests {
             ..d
         }));
         assert!(bad(CuControllerParams {
-            effort_gains: CuEffortGains { kp: -1.0, kv: 0.0 },
+            effort_gains: CuEffortGains::uniform(-1.0, 0.0),
             ..d
         }));
         assert!(!bad(CuControllerParams {
@@ -830,13 +1085,409 @@ mod tests {
     fn test_set_effort_gains_rejects_invalid() {
         let mut task = CuControllerTask::<2>::default();
         assert!(
-            task.set_effort_gains(CuEffortGains {
-                kp: f64::NAN,
-                kv: 1.0
+            task.set_effort_gains(CuEffortGains::uniform(f64::NAN, 1.0))
+                .is_err()
+        );
+        // One bad entry is enough, in either array.
+        for bad in [
+            CuEffortGains {
+                kp: [10.0, -1.0],
+                kv: [1.0, 1.0],
+            },
+            CuEffortGains {
+                kp: [10.0, 10.0],
+                kv: [f64::INFINITY, 1.0],
+            },
+        ] {
+            assert!(task.set_effort_gains(bad).is_err());
+        }
+        assert_eq!(task.params().effort_gains, CuEffortGains::default());
+        assert_eq!(CuEffortGains::<2>::default().kp, [20.0; 2]);
+        assert_eq!(CuEffortGains::<2>::default().kv, [0.8; 2]);
+    }
+
+    use cu29::units::si::f64::Length;
+    use cu29::units::si::f64::Mass;
+    use cu29::units::si::f64::MomentOfInertia;
+    use cu29::units::si::length::meter;
+    use cu29::units::si::mass::kilogram;
+    use cu29::units::si::moment_of_inertia::kilogram_square_meter;
+    use repose_kinematics::CuJointAxis;
+    use repose_kinematics::CuJointLimits;
+    use repose_kinematics::CuJointSpec;
+    use repose_kinematics::CuLinkInertia;
+
+    /// Planar two-link arm swinging about `y`, a point mass on each link.
+    fn arm_chain() -> CuKinematicChain<2> {
+        let joint = |x: f64| {
+            CuJointSpec::revolute(
+                [x, 0.0, 0.0].map(Length::new::<meter>),
+                [Angle::new::<radian>(0.0); 3],
+                CuJointAxis::PosY,
+                CuJointLimits::revolute(
+                    Angle::new::<radian>(-3.0),
+                    Angle::new::<radian>(3.0),
+                    AngularVelocity::new::<radian_per_second>(2.0),
+                ),
+            )
+        };
+        CuKinematicChain::new([joint(0.0), joint(0.3)])
+    }
+
+    fn arm_inertia() -> CuChainInertia<2> {
+        let link = |mass: f64, x: f64| {
+            CuLinkInertia::new(
+                Mass::new::<kilogram>(mass),
+                [x, 0.0, 0.0].map(Length::new::<meter>),
+                [MomentOfInertia::new::<kilogram_square_meter>(0.0); 6],
+            )
+            .unwrap()
+        };
+        CuChainInertia::new([link(2.0, 0.15), link(1.0, 0.1)]).unwrap()
+    }
+
+    fn effort_task(model: bool) -> CuControllerTask<2> {
+        CuControllerTask::from_params(CuControllerParams {
+            mode: CuControllerMode::Effort,
+            effort_gains: CuEffortGains {
+                kp: [10.0, 4.0],
+                kv: [2.0, 0.5],
+            },
+            effort_model: model.then(|| CuEffortModel::new(arm_chain(), arm_inertia())),
+            ..CuControllerParams::default()
+        })
+        .unwrap()
+    }
+
+    fn rad(v: [f64; 2]) -> [CuJointPosition; 2] {
+        v.map(|v| CuJointPosition::Revolute(Angle::new::<radian>(v)))
+    }
+
+    fn rad_s(v: [f64; 2]) -> [CuJointVelocity; 2] {
+        v.map(|v| CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(v)))
+    }
+
+    const Q: [f64; 2] = [0.2, -0.4];
+    const QD: [f64; 2] = [0.3, -0.2];
+    const Q_DES: [f64; 2] = [0.25, -0.3];
+    const QD_DES: [f64; 2] = [0.5, 0.7];
+
+    fn arm_state() -> CuJointStatePayload<2> {
+        CuJointStatePayload {
+            status: CuRobotStatus::Ready,
+            positions: rad(Q),
+            velocities: rad_s(QD),
+        }
+    }
+
+    fn arm_setpoint() -> CuTrajectoryFollowOutput<2> {
+        CuTrajectoryFollowOutput {
+            positions: rad(Q_DES),
+            velocities: rad_s(QD_DES),
+            status: CuFollowStatus::Running,
+        }
+    }
+
+    /// Reference model efforts straight from `repose-kinematics`.
+    fn arm_model_efforts(velocities: [f64; 2]) -> [f64; 2] {
+        let accelerations = rad(Q).map(|q| CuJointAcceleration::from_coordinate(q, 0.0));
+        let mut out = [repose_kinematics::CuJointEffort::default(); 2];
+        arm_chain()
+            .inverse_dynamics(
+                &arm_inertia(),
+                &CuInverseDynamicsInput::new(
+                    &rad(Q),
+                    &rad_s(velocities),
+                    &accelerations,
+                    standard_gravity(),
+                ),
+                &mut out,
+            )
+            .unwrap();
+        out.map(repose_kinematics::CuJointEffort::si_value)
+    }
+
+    fn assert_efforts(out: &CuJointCommandPayload<2>, expected: [f64; 2]) {
+        for (j, (effort, expected)) in out.efforts.iter().zip(expected).enumerate() {
+            assert!(
+                (effort.si_value() - expected).abs() < 1e-12,
+                "joint {j}: {} vs {expected}",
+                effort.si_value()
+            );
+        }
+    }
+
+    /// PD term of `effort_task` for the arm state and setpoint.
+    fn arm_pd() -> [f64; 2] {
+        [
+            10.0 * (Q_DES[0] - Q[0]) + 2.0 * (QD_DES[0] - QD[0]),
+            4.0 * (Q_DES[1] - Q[1]) + 0.5 * (QD_DES[1] - QD[1]),
+        ]
+    }
+
+    #[test]
+    fn test_effort_gains_apply_per_joint() {
+        let mut task = effort_task(false);
+        let out = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Running);
+        assert_efforts(&out, arm_pd());
+        // Equal errors on both joints (0.5 rad, 0.1 rad/s): each joint
+        // answers with its own gains.
+        let out = run(
+            &mut task,
+            Some(follow(0.5, CuFollowStatus::Running)),
+            Some(state(0.0)),
+        );
+        assert_efforts(&out, [10.0 * 0.5 + 2.0 * 0.1, 4.0 * 0.5 + 0.5 * 0.1]);
+    }
+
+    #[test]
+    fn test_effort_feedforward_is_inverse_dynamics_plus_pd() {
+        let mut task = effort_task(true);
+        let out = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Running);
+        // Model at the measured positions and the desired velocities.
+        let model = arm_model_efforts(QD_DES);
+        let gravity = arm_model_efforts([0.0; 2]);
+        assert!(
+            (model[0] - gravity[0]).abs() > 1e-3,
+            "velocity terms matter"
+        );
+        assert!(gravity[0].abs() > 1.0);
+        let pd = arm_pd();
+        assert_efforts(&out, [model[0] + pd[0], model[1] + pd[1]]);
+    }
+
+    #[test]
+    fn test_effort_hold_is_gravity_plus_damping_with_model() {
+        let gravity = arm_model_efforts([0.0; 2]);
+        let expected = [gravity[0] - 2.0 * QD[0], gravity[1] - 0.5 * QD[1]];
+        // Idle: no setpoint yet.
+        let mut task = effort_task(true);
+        let out = run(&mut task, None, Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Idle);
+        assert_efforts(&out, expected);
+        // Tracking fault.
+        let far = CuTrajectoryFollowOutput {
+            positions: rad([2.0, -0.3]),
+            ..arm_setpoint()
+        };
+        let out = run(&mut task, Some(far), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_efforts(&out, expected);
+    }
+
+    #[test]
+    fn test_effort_hold_is_pure_damping_without_model() {
+        let expected = [-2.0 * QD[0], -0.5 * QD[1]];
+        let mut task = effort_task(false);
+        let out = run(&mut task, None, Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Idle);
+        assert_efforts(&out, expected);
+        let far = CuTrajectoryFollowOutput {
+            positions: rad([2.0, -0.3]),
+            ..arm_setpoint()
+        };
+        let out = run(&mut task, Some(far), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_efforts(&out, expected);
+    }
+
+    #[test]
+    fn test_effort_without_usable_state_is_zero_with_model() {
+        let mut task = effort_task(true);
+        let out = run(&mut task, Some(arm_setpoint()), None);
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_efforts(&out, [0.0; 2]);
+        let not_ready = CuJointStatePayload {
+            status: CuRobotStatus::NotReady,
+            ..arm_state()
+        };
+        let out = run(&mut task, Some(arm_setpoint()), Some(not_ready));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_efforts(&out, [0.0; 2]);
+    }
+
+    #[test]
+    fn test_effort_model_failure_faults_and_brakes() {
+        // A non-finite desired velocity breaks the feedforward but not the
+        // gravity load at the measured positions: fault, hold against gravity.
+        let mut task = effort_task(true);
+        let bad_setpoint = CuTrajectoryFollowOutput {
+            velocities: rad_s([f64::NAN, 0.0]),
+            ..arm_setpoint()
+        };
+        let out = run(&mut task, Some(bad_setpoint), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_eq!(out.positions, rad(Q));
+        let gravity = arm_model_efforts([0.0; 2]);
+        assert_efforts(&out, [gravity[0] - 2.0 * QD[0], gravity[1] - 0.5 * QD[1]]);
+
+        // A measured position of the wrong joint kind breaks the model
+        // altogether: fault, damping brake alone, on every path.
+        let mut bad_state = arm_state();
+        bad_state.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(Q[1]));
+        let damping = [-2.0 * QD[0], -0.5 * QD[1]];
+        let out = run(&mut task, Some(arm_setpoint()), Some(bad_state.clone()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_efforts(&out, damping);
+        let out = run(&mut task, None, Some(bad_state.clone()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_efforts(&out, damping);
+
+        // The same state without a model is not a fault.
+        let mut task = effort_task(false);
+        let out = run(&mut task, None, Some(bad_state));
+        assert_eq!(out.status, CuControllerStatus::Idle);
+        assert_efforts(&out, damping);
+    }
+
+    #[test]
+    fn test_effort_model_is_ignored_outside_effort_mode() {
+        let mut task = effort_task(true);
+        task.set_mode(CuControllerMode::Position);
+        let out = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Running);
+        assert_efforts(&out, [0.0; 2]);
+    }
+
+    #[test]
+    fn test_invalid_effort_model_rejected() {
+        let model = CuEffortModel::new(arm_chain(), arm_inertia());
+        let bad = |effort_model| {
+            CuControllerTask::<2>::from_params(CuControllerParams {
+                effort_model: Some(effort_model),
+                ..CuControllerParams::default()
             })
             .is_err()
+        };
+        assert!(!bad(model));
+        let mut gravity = standard_gravity();
+        gravity[2] = Acceleration::new::<meter_per_second_squared>(f64::NAN);
+        assert!(bad(model.with_gravity(gravity)));
+        // A preset whose joint count differs from N.
+        assert!(bad(CuEffortModel::new(
+            repose_kinematics::CuRobotPreset::IgusRebel,
+            arm_inertia()
+        )));
+    }
+
+    #[test]
+    fn test_freeze_thaw_keeps_per_joint_gains() {
+        let mut task = effort_task(false);
+        let _ = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+        let mut bytes = [0u8; 256];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
         );
-        assert_eq!(task.params().effort_gains, CuEffortGains::default());
+        task.freeze(&mut encoder).unwrap();
+        let len = encoder.into_writer().bytes_written();
+        let mut restored = CuControllerTask::<2>::default();
+        restored
+            .thaw(&mut bincode::de::DecoderImpl::new(
+                bincode::de::read::SliceReader::new(&bytes[..len]),
+                bincode::config::standard(),
+                (),
+            ))
+            .unwrap();
+        assert_eq!(restored.params().effort_gains, task.params().effort_gains);
+        assert_eq!(restored.params().effort_gains.kp, [10.0, 4.0]);
+        assert_eq!(restored.params().effort_gains.kv, [2.0, 0.5]);
+        assert_eq!(restored.mode(), CuControllerMode::Effort);
+        assert_eq!(restored.last_command, rad(Q_DES));
+        assert_eq!(restored.last_status, CuControllerStatus::Running);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_reads_effort_gains_config() {
+        let gains = |ron: &str| {
+            let cfg: ComponentConfig = ron::from_str(&format!(
+                "#![enable(unwrap_newtypes)] {{\"effort_gains\": {ron}}}"
+            ))
+            .unwrap();
+            CuControllerTask::<3>::new(Some(&cfg), ()).map(|task| task.params().effort_gains)
+        };
+        // Per-joint arrays.
+        assert_eq!(
+            gains(r#"{"kp": [60.0, 40.0, 4.0], "kv": [3.0, 2.0, 0.1]}"#).unwrap(),
+            CuEffortGains {
+                kp: [60.0, 40.0, 4.0],
+                kv: [3.0, 2.0, 0.1],
+            }
+        );
+        // One number per gain is that gain on every joint (the pre-0.9 form).
+        assert_eq!(
+            gains(r#"{"kp": 10.0, "kv": 2.0}"#).unwrap(),
+            CuEffortGains::uniform(10.0, 2.0)
+        );
+        assert_eq!(
+            gains(r#"{"kp": 10, "kv": 2}"#).unwrap(),
+            CuEffortGains::uniform(10.0, 2.0)
+        );
+        // Mixed forms, and a missing gain falls back to its default.
+        assert_eq!(
+            gains(r#"{"kp": [60.0, 40.0, 4.0], "kv": 0.5}"#).unwrap(),
+            CuEffortGains {
+                kp: [60.0, 40.0, 4.0],
+                kv: [0.5; 3],
+            }
+        );
+        assert_eq!(
+            gains(r#"{"kv": [3.0, 2.0, 0.1]}"#).unwrap(),
+            CuEffortGains {
+                kp: [20.0; 3],
+                kv: [3.0, 2.0, 0.1],
+            }
+        );
+        for bad in [
+            r#"{"kp": [60.0, 40.0], "kv": 0.5}"#,
+            r#"{"kp": [60.0, 40.0, 4.0, 1.0], "kv": 0.5}"#,
+            r#"{"kp": [60.0, -40.0, 4.0], "kv": 0.5}"#,
+            r#"{"kp": "stiff", "kv": 0.5}"#,
+            r#"{"kp": 10.0, "kd": 0.5}"#,
+        ] {
+            assert!(gains(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_reads_effort_model_config() {
+        let link = r#"{"mass": 1.5, "center_of_mass": [0.0, 0.0, 0.05],
+            "inertia": [0.002, 0.002, 0.001, 0.0, 0.0, 0.0]}"#;
+        let links = [link; 6].join(", ");
+        let cfg = |extra: &str| -> ComponentConfig {
+            ron::from_str(&format!(
+                r#"#![enable(unwrap_newtypes)] {{"mode": "effort", "effort_model": {{
+                "chain": "igus_rebel", "inertia": {{"links": [{links}]}}{extra}}}}}"#
+            ))
+            .unwrap()
+        };
+        let task = CuControllerTask::<6>::new(Some(&cfg("")), ()).unwrap();
+        let model = task.params().effort_model.unwrap();
+        assert_eq!(model.gravity, standard_gravity());
+        assert_eq!(model.inertia.links()[0].mass, Mass::new::<kilogram>(1.5));
+        assert_eq!(
+            task.model_chain,
+            Some(repose_kinematics::igus_rebel_chain())
+        );
+
+        let task =
+            CuControllerTask::<6>::new(Some(&cfg(r#", "gravity": [0.0, 0.0, 0.0]"#)), ()).unwrap();
+        assert_eq!(
+            task.params().effort_model.unwrap().gravity,
+            [Acceleration::new::<meter_per_second_squared>(0.0); 3]
+        );
+
+        // Unknown key, and a model that is missing its inertia.
+        assert!(CuControllerTask::<6>::new(Some(&cfg(r#", "payload": 1.0"#)), ()).is_err());
+        let cfg: ComponentConfig = ron::from_str(
+            r#"#![enable(unwrap_newtypes)] {"effort_model": {"chain": "igus_rebel"}}"#,
+        )
+        .unwrap();
+        assert!(CuControllerTask::<6>::new(Some(&cfg), ()).is_err());
     }
 
     #[cfg(feature = "std")]
@@ -860,7 +1511,7 @@ mod tests {
                 max_acceleration: 6.0
             })
         );
-        assert_eq!(p.effort_gains, CuEffortGains { kp: 10.0, kv: 2.0 });
+        assert_eq!(p.effort_gains, CuEffortGains::uniform(10.0, 2.0));
         let task = CuControllerTask::<2>::new(None, ()).unwrap();
         assert_eq!(task.params(), &CuControllerParams::default());
         for bad in [

@@ -508,3 +508,29 @@ fn velocity_kind_mismatch_is_fault() {
     let (_, action) = run2(&mut task, Some(state), Some(goal2([1.5, 0.75])));
     assert_eq!(action.status, CuPolicyStatus::Fault);
 }
+
+#[test]
+fn dynamic_batch_model_loads_and_runs() {
+    let params = CuPolicyParams::<2, 4, 4> {
+        model: fixture("batch_4.onnx"),
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let (_, action) = run2(
+        &mut task,
+        Some(state2([0.5, -0.25])),
+        Some(goal2([1.5, 0.75])),
+    );
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+    assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
+}
+
+#[test]
+fn wrong_width_behind_an_unknown_batch_dimension_is_rejected() {
+    let params = CuPolicyParams::<2, 4, 4> {
+        model: fixture("open_batch_5.onnx"),
+        ..identity_params()
+    };
+    let err = CuPolicyTask::from_params(params).err().unwrap();
+    assert!(format!("{err}").contains("shape [1, OBS]"), "{err}");
+}

@@ -21,6 +21,10 @@ Fixtures:
   identity_5.onnx   output = input, [1, 5] -> [1, 5]; loading it for OBS = 4
                     must fail at startup although the graph would run at
                     width 4, because the declared input width differs.
+  batch_4.onnx      output = input, ["batch", 4] -> ["batch", 4]: the dynamic
+                    batch dimension most trainers export. It must load.
+  open_batch_5.onnx output = input, [?, 5] -> [?, 5] with an unnamed batch
+                    dimension; loading it for OBS = 4 must fail at startup.
 """
 
 import numpy as np
@@ -43,13 +47,13 @@ def value_info(name, shape):
     return helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
 
 
-def identity(width):
+def identity(width, batch=1):
     node = helper.make_node("Identity", ["observation"], ["action"])
     graph = helper.make_graph(
         [node],
         f"identity_{width}",
-        [value_info("observation", [1, width])],
-        [value_info("action", [1, width])],
+        [value_info("observation", [batch, width])],
+        [value_info("action", [batch, width])],
     )
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
 
@@ -118,6 +122,8 @@ def double_4():
 if __name__ == "__main__":
     save(identity(4), "identity_4.onnx")
     save(identity(5), "identity_5.onnx")
+    save(identity(4, batch="batch"), "batch_4.onnx")
+    save(identity(5, batch=None), "open_batch_5.onnx")
     save(linear_24_6(), "linear_24_6.onnx")
     save(bad_shape(), "bad_shape.onnx")
     save(nan_model(), "nan.onnx")

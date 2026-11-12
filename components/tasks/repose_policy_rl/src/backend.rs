@@ -104,13 +104,15 @@ impl CuPolicyBackend {
             .datum_type
             .concretize()
             .is_some_and(|datum_type| datum_type != f32::datum_type());
-        let wrong_shape = declared.shape.concretize().is_some_and(|dims| {
-            dims.len() != 2
-                || dims
-                    .iter()
-                    .zip([1usize, obs])
-                    .any(|(dim, want)| dim.to_usize().is_ok_and(|have| have != want))
+        // Each dimension is checked on its own, so an unknown batch
+        // dimension does not hide a wrong width.
+        let wrong_rank = !declared.shape.is_open() && declared.shape.dims().count() != 2;
+        let wrong_dim = declared.shape.dims().zip([1usize, obs]).any(|(dim, want)| {
+            dim.concretize()
+                .and_then(|dim| dim.to_usize().ok())
+                .is_some_and(|have| have != want)
         });
+        let wrong_shape = wrong_rank || wrong_dim;
         if wrong_type || wrong_shape {
             return Err(CuError::from(
                 "repose-policy-rl: model input must be f32 with shape [1, OBS]",

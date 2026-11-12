@@ -113,8 +113,8 @@ impl<const N: usize> Tree<N> {
 
     fn nearest(&self, q: &[CuJointPosition; N], metric: CuJointMetric) -> usize {
         let mut best = (0, f64::INFINITY);
-        for i in 0..self.len {
-            let d = joint_distance(&self.nodes[i], q, metric);
+        for (i, node) in self.nodes.iter().enumerate().take(self.len) {
+            let d = joint_distance(node, q, metric);
             if d < best.1 {
                 best = (i, d);
             }

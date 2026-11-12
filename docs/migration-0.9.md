@@ -76,3 +76,17 @@ change.
 Command lines gain an additive `"n"` field; a 6-joint bridge still works with a
 sidecar written for the old protocol. A bridge with `N != 6` needs a sidecar
 that serves `N` joints, and a joint-count mismatch is reported as an error.
+
+## One `CuJointEffort`
+
+`repose-controller` no longer defines its own `CuJointEffort`. It re-exports
+`repose_kinematics::CuJointEffort`, the type `CuKinematicChain::inverse_dynamics`
+already fills, so `CuJointCommandPayload::efforts` and inverse-dynamics output
+are the same type and need no conversion. The variants, methods and wire
+encoding are unchanged; `From<Torque>` and `From<Force>` are new.
+
+| Before | After |
+|---|---|
+| `repose_controller::CuJointEffort` | unchanged path (re-export), or `repose_kinematics::CuJointEffort` |
+| `repose_kinematics::CuJointEffort::si_value` on controller efforts (type mismatch) | direct, same type |
+

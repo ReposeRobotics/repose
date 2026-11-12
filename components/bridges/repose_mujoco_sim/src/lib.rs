@@ -109,7 +109,7 @@ use cu29::units::si::f64::AngularVelocity;
 use cu29::units::si::f64::Time;
 use cu29::units::si::time::second;
 use repose_controller::CuJointCommandPayload;
-use repose_controller::CuJointEffort;
+use repose_kinematics::CuJointEffort;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointStatePayload;
 use repose_kinematics::CuJointVelocity;

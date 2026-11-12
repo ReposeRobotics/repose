@@ -58,11 +58,15 @@
 //! )
 //! ```
 
+mod action;
 mod backend;
 mod observation;
 mod payload;
 mod policy;
 
+pub use action::CuJointActionKind;
+pub use action::CuJointActionParams;
+pub use action::CuJointActionTask;
 pub use observation::CuObservationTerm;
 pub use payload::CuPolicyAction;
 pub use payload::CuPolicyObservation;

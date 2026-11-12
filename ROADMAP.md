@@ -139,9 +139,8 @@ Controller-interface completion, building on `v0.2.2`:
      today's `CuJointPositionsPayload<N>`) are the only interface a bridge
      sees: simulators (`repose-mujoco-sim`) and hardware (`repose-igus-cri`, Step 4)
      implement the same `joint_command`/`joint_state` channels, so swapping
-     sim for a real robot is a RON graph change, not an app change. Generalize
-     `repose-mujoco-sim` from fixed `N = 6` as the first consumer (not done:
-     the bridge is still fixed at `N = 6`).
+     sim for a real robot is a RON graph change, not an app change. `repose-mujoco-sim`
+     is generic over `N` as the first consumer (`CuMujocoSimBridge<N>`).
      Shape (per Copper component design): a new crate
      `components/tasks/repose_controller` holding the command payload and a
      `CuControllerTask<N>` (`CuJointStatePayload<N>` lives in

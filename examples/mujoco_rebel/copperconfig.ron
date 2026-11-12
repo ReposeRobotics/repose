@@ -68,7 +68,7 @@
     bridges: [
         (
             id: "mujoco",
-            type: "repose_mujoco_sim::CuMujocoSimBridge",
+            type: "repose_mujoco_sim::CuMujocoSimBridge<6>",
             config: {"host": "127.0.0.1", "port": 55091, "read_timeout": 0.25},
             channels: [
                 Tx(id: "joint_command", msg: "repose_controller::CuJointCommandPayload<6>"),

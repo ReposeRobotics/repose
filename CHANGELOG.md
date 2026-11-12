@@ -29,6 +29,22 @@ may be breaking.
   earlier versions no longer decode. See
   [docs/migration-0.9.md](docs/migration-0.9.md).
 
+- `repose-mujoco-sim`: `CuMujocoSimBridge` is now `CuMujocoSimBridge<const N: usize>`
+  (and `MujocoTxChannels<N>` / `MujocoRxChannels<N>`) instead of being fixed at
+  6 joints; `MUJOCO_DOF` is removed. The joint count comes from the type, so
+  RON graphs must write it explicitly. Migrate
+  `type: "repose_mujoco_sim::CuMujocoSimBridge"` to
+  `type: "repose_mujoco_sim::CuMujocoSimBridge<6>"` (any `N` matching the
+  `CuJointCommandPayload<N>` / `CuJointStatePayload<N>` channel `msg:` types);
+  Rust callers use `CuMujocoSimBridge::<6>::from_params(..)`. `N = 0` is
+  rejected. Wire protocol: command lines gain an additive `"n"` field and state
+  lines may carry `"n"`; a 6-joint bridge still works with a sidecar written for
+  the old protocol, so the handshake is not versioned. A joint-count mismatch
+  between bridge and sidecar is now a `CuError` naming both counts, and a
+  sidecar may answer a rejected command with
+  `{"type":"error","message":"..."}`, which the bridge reports as a `CuError`.
+  The example sidecar serves every joint of the URDF (`joint1`..`jointN`).
+
 ### Added
 
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint

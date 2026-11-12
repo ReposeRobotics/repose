@@ -62,3 +62,17 @@ with the true desired acceleration (zero reproduces the previous feedforward).
 With an effort model a non-finite or wrongly typed acceleration makes the
 controller report `Fault`; without a model it is ignored. RON graphs need no
 change.
+
+## repose-mujoco-sim: generic over the joint count
+
+`CuMujocoSimBridge` is now `CuMujocoSimBridge<const N: usize>`, with
+`MujocoTxChannels<N>` and `MujocoRxChannels<N>`; `MUJOCO_DOF` is removed.
+
+| Before | After |
+|---|---|
+| `type: "repose_mujoco_sim::CuMujocoSimBridge"` | `type: "repose_mujoco_sim::CuMujocoSimBridge<6>"` (any `N` matching the channel `msg:` types) |
+| `CuMujocoSimBridge::from_params(..)` | `CuMujocoSimBridge::<6>::from_params(..)` |
+
+Command lines gain an additive `"n"` field; a 6-joint bridge still works with a
+sidecar written for the old protocol. A bridge with `N != 6` needs a sidecar
+that serves `N` joints, and a joint-count mismatch is reported as an error.

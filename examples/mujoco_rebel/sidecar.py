@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Headless MuJoCo transport for the Copper ReBeL example."""
+"""Headless MuJoCo transport for the Copper ReBeL example.
+
+Serves N joints (every joint in the URDF, named joint1..jointN). The Copper
+bridge must be `CuMujocoSimBridge<N>` with the same N.
+"""
 import argparse
 import json
 import socket
@@ -22,8 +26,9 @@ def load_model(path):
         spec = mujoco.MjSpec.from_file(source.name)
     spec.option.timestep = 0.002
     joints = list(spec.joints)
-    if [joint.name for joint in joints] != [f'joint{i}' for i in range(1, 7)]:
-        raise ValueError('URDF must contain joint1 through joint6 in order')
+    expected = [f'joint{i}' for i in range(1, len(joints) + 1)]
+    if not joints or [joint.name for joint in joints] != expected:
+        raise ValueError('URDF must contain joint1 through jointN in order')
     for joint in joints:
         spec.add_actuator(name='motor_' + joint.name,
                           type=mujoco.mjtActuator.mjACTUATOR_MOTOR,
@@ -33,9 +38,10 @@ def load_model(path):
     return spec.compile()
 
 
-def send_state(conn, data):
-    message = {'type': 'state', 'q': data.qpos[:6].tolist(),
-               'qd': data.qvel[:6].tolist(), 'time': float(data.time)}
+def send_state(conn, model, data):
+    n = model.nu
+    message = {'type': 'state', 'n': n, 'q': data.qpos[:n].tolist(),
+               'qd': data.qvel[:n].tolist(), 'time': float(data.time)}
     conn.sendall((json.dumps(message, allow_nan=False) + '\n').encode())
 
 
@@ -64,18 +70,29 @@ def main():
 
 def serve(conn, model, data):
     with conn, conn.makefile('rb') as reader:
-        send_state(conn, data)
+        n = model.nu
+        send_state(conn, model, data)
         for line in reader:
             message = json.loads(line)
             q = np.asarray(message['q'], dtype=float)
-            qd = np.asarray(message.get('qd', [0] * 6), dtype=float)
-            if q.shape != (6,) or qd.shape != (6,) or not np.isfinite(q).all() or not np.isfinite(qd).all():
-                raise ValueError('invalid joint command')
+            qd = np.asarray(message.get('qd', [0] * n), dtype=float)
+            problem = None
+            if message.get('n', n) != n or q.shape != (n,) or qd.shape != (n,):
+                problem = (f'joint count mismatch: sidecar serves {n} joints, '
+                           f'command has n={message.get("n")}, '
+                           f'len(q)={q.size}, len(qd)={qd.size}')
+            elif not np.isfinite(q).all() or not np.isfinite(qd).all():
+                problem = 'invalid joint command: non-finite value'
+            if problem is not None:
+                # Keep the request/response lockstep: answer with an error line.
+                print(problem, flush=True)
+                conn.sendall((json.dumps({'type': 'error', 'message': problem}) + '\n').encode())
+                continue
             for _ in range(10):
                 mujoco.mj_forward(model, data)
-                data.ctrl[:] = np.clip(80 * (q - data.qpos[:6]) + 10 * (qd - data.qvel[:6]) + data.qfrc_bias[:6], -60, 60)
+                data.ctrl[:] = np.clip(80 * (q - data.qpos[:n]) + 10 * (qd - data.qvel[:n]) + data.qfrc_bias[:n], -60, 60)
                 mujoco.mj_step(model, data)
-            send_state(conn, data)
+            send_state(conn, model, data)
 
 if __name__ == '__main__':
     main()

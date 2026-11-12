@@ -1,5 +1,5 @@
-//! Wire payloads of the policy task: the observation exactly as it was fed
-//! to the model, and the raw model output before any scaling or limiting.
+//! Wire payloads of the policy task: the observation built each cycle, and
+//! the raw model output before any scaling or limiting.
 //!
 //! Both vectors are dimensionless `f32`: they are model-space numbers, not
 //! physical quantities. `Tov` stays on the `CuMsg` envelope and is propagated
@@ -28,7 +28,9 @@ pub enum CuPolicyStatus {
     Fault,
 }
 
-/// Observation vector exactly as it was fed to the model (dimensionless).
+/// Observation vector built this cycle (dimensionless). It is what the model
+/// was fed when the action of the same cycle is [`CuPolicyStatus::Fresh`];
+/// on other cycles no inference ran on it, and it is zero on `Idle`.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Serialize, Deserialize, Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
 pub struct CuPolicyObservation<const OBS: usize> {

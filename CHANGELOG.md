@@ -65,13 +65,15 @@ may be breaking.
   joint state and a joint goal, builds the RON-configured observation
   (`joint_positions`, `joint_velocities`, `goal_error`, `previous_action`),
   infers with `tract-onnx`, and publishes the `CuPolicyObservation<OBS>`
-  exactly as fed to the model plus the raw `CuPolicyAction<ACT>` with a
+  built this cycle plus the raw `CuPolicyAction<ACT>` with a
   `CuPolicyStatus` (`Idle`/`Fresh`/`Held`/`Fault`), so every observation and
-  raw action is in the log. Cycle-exact decimation, an optional pinned
+  raw action is in the log. On a `Fresh` cycle the observation is exactly
+  what the model was fed; on other cycles no inference ran. Cycle-exact decimation, an optional pinned
   `model_hash`, and real `Freezable` state keep replay deterministic.
   Inference is the workspace's one documented hot-path allocation exception:
-  14 allocations per `process` call, measured and bounded by
-  `tests/alloc.rs` (bound 32).
+  14 allocations per `process` call with the `linear_24_6` fixture, measured
+  by `tests/alloc.rs`, which asserts at most 32 on every call. Other models
+  allocate differently; measure yours the same way.
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

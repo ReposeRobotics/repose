@@ -107,8 +107,11 @@ fn allocations_per_process_are_bounded() {
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
     const CALLS: usize = 1000;
+    let mut worst = 0;
     for _ in 0..CALLS {
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
         task.process(&ctx, &input, &mut output).unwrap();
+        worst = worst.max(ALLOCATIONS.load(Ordering::Relaxed) - before);
     }
     let total = ALLOCATIONS.load(Ordering::Relaxed);
     let per_call = total as f64 / CALLS as f64;
@@ -121,7 +124,7 @@ fn allocations_per_process_are_bounded() {
         "the measured cycles must run inference"
     );
     assert!(
-        total <= MAX_ALLOCATIONS_PER_CALL * CALLS,
-        "{per_call:.2} allocations per process call exceeds the bound of {MAX_ALLOCATIONS_PER_CALL}"
+        worst <= MAX_ALLOCATIONS_PER_CALL,
+        "a process call made {worst} allocations ({per_call:.2} on average), above the bound of {MAX_ALLOCATIONS_PER_CALL}"
     );
 }

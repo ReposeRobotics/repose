@@ -454,3 +454,57 @@ fn tov_is_propagated_from_the_joint_state() {
     assert_eq!(output.0.tov, state_msg.tov);
     assert_eq!(output.1.tov, state_msg.tov);
 }
+
+#[test]
+fn declared_input_width_mismatch_is_rejected_at_startup() {
+    // The graph (an Identity) would run at any width; the declared [1, 5]
+    // input must still be rejected for OBS = 4.
+    let params = CuPolicyParams::<2, 4, 4> {
+        model: fixture("identity_5.onnx"),
+        ..identity_params()
+    };
+    let err = CuPolicyTask::from_params(params).err().unwrap();
+    assert!(format!("{err}").contains("shape [1, OBS]"), "{err}");
+}
+
+#[test]
+fn bad_inputs_fault_a_held_cycle() {
+    let params = CuPolicyParams::<2, 4, 4> {
+        decimation: 3,
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let goal = goal2([1.5, 0.75]);
+    let statuses = [
+        state2([0.5, -0.25]),
+        state2([f64::NAN, -0.25]),
+        state2([0.5, -0.25]),
+        state2([0.5, -0.25]),
+    ]
+    .map(|state| run2(&mut task, Some(state), Some(goal.clone())).1);
+    assert_eq!(statuses[0].status, CuPolicyStatus::Fresh);
+    // A non-finite state on a held cycle faults, and the fault lasts until
+    // the next inference.
+    assert_eq!(statuses[1].status, CuPolicyStatus::Fault);
+    assert_eq!(statuses[1].values, [0.0; 4]);
+    assert_eq!(statuses[2].status, CuPolicyStatus::Fault);
+    assert_eq!(statuses[3].status, CuPolicyStatus::Fresh);
+}
+
+#[test]
+fn velocity_kind_mismatch_is_fault() {
+    use cu29::units::si::f64::Velocity;
+    use cu29::units::si::velocity::meter_per_second;
+    let params = CuPolicyParams::<2, 4, 4> {
+        observation: vec![
+            CuObservationTerm::JointPositions { scale: 1.0 },
+            CuObservationTerm::JointVelocities { scale: 1.0 },
+        ],
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let mut state = state2([0.5, -0.25]);
+    state.velocities[1] = CuJointVelocity::Prismatic(Velocity::new::<meter_per_second>(0.1));
+    let (_, action) = run2(&mut task, Some(state), Some(goal2([1.5, 0.75])));
+    assert_eq!(action.status, CuPolicyStatus::Fault);
+}

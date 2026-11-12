@@ -1,6 +1,6 @@
 //! [`CuPolicyTask`]: builds the observation, runs a stateless feed-forward
 //! ONNX policy, and publishes both the observation and the raw action so a
-//! recorded run shows exactly what the model saw and produced.
+//! recorded run shows what the model saw and produced.
 
 use crate::backend::CuPolicyBackend;
 use crate::observation::CuObservationTerm;
@@ -19,6 +19,7 @@ use cu29::prelude::*;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointPositionsPayload;
 use repose_kinematics::CuJointStatePayload;
+use repose_kinematics::CuJointVelocity;
 use repose_kinematics::CuRobotStatus;
 use serde::Deserialize;
 use serde::Serialize;
@@ -133,8 +134,9 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuPolicyParams<N, OBS, 
 /// Inputs are `(joint state, goal)`: a
 /// [`CuJointStatePayload`](repose_kinematics::CuJointStatePayload) and a
 /// [`CuJointPositionsPayload`](repose_kinematics::CuJointPositionsPayload).
-/// Outputs are `(observation, action)`: the [`CuPolicyObservation`] exactly
-/// as fed to the model and the raw [`CuPolicyAction`]. Both outputs carry
+/// Outputs are `(observation, action)`: the [`CuPolicyObservation`] built
+/// this cycle (what the model was fed when the action is `Fresh`) and the
+/// raw [`CuPolicyAction`]. Both outputs carry
 /// the joint state input's `Tov`. The node `config:` block is a
 /// [`CuPolicyParams`].
 ///
@@ -142,9 +144,11 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuPolicyParams<N, OBS, 
 /// [`CuPolicyStatus::Idle`] with zero values, and the previous action and
 /// the decimation count are reset. A non-finite observation, a joint whose
 /// unit kind differs between the state and the goal or default positions it
-/// is compared with, a failed inference, or a non-finite model output is
-/// [`CuPolicyStatus::Fault`] with zero values. A fault lasts until the next
-/// inference: the cycles in between report `Fault`, never `Held`. Neither
+/// is compared with (or between a joint's position and velocity), a failed
+/// inference, or a non-finite model output is [`CuPolicyStatus::Fault`]
+/// with zero values. The inputs are checked on every cycle, so bad inputs
+/// fault a held cycle too. A fault lasts until the next inference: the
+/// cycles in between report `Fault`, never `Held`. Neither
 /// case is a `CuError`, because the downstream action task turns the status
 /// into a held setpoint.
 ///
@@ -212,7 +216,19 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuPolicyTask<N, OBS, AC
                 .iter()
                 .zip(&goal.positions)
                 .all(|(a, b)| same(a, b)),
-            CuObservationTerm::JointVelocities { .. } | CuObservationTerm::PreviousAction => true,
+            CuObservationTerm::JointVelocities { .. } => state
+                .positions
+                .iter()
+                .zip(&state.velocities)
+                .all(|(position, velocity)| {
+                    matches!(
+                        (position, velocity),
+                        (CuJointPosition::Revolute(_), CuJointVelocity::Revolute(_))
+                            | (CuJointPosition::Prismatic(_), CuJointVelocity::Prismatic(_))
+                            | (CuJointPosition::Fixed, CuJointVelocity::Fixed)
+                    )
+                }),
+            CuObservationTerm::PreviousAction => true,
         })
     }
 }
@@ -287,12 +303,15 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTask
         );
         observation_out.set_payload(observation.clone());
 
+        // Checked on every cycle, not only when inferring: a held action
+        // must not outlive inputs the policy could not have acted on.
+        let input_bad = !self.kinds_match(state, goal)
+            || observation.values.iter().any(|value| !value.is_finite());
         let infer_now = self.cycle.is_multiple_of(u64::from(self.params.decimation));
         self.cycle = self.cycle.wrapping_add(1);
         let (values, status) = if infer_now {
             let mut fresh = [0.0f32; ACT];
-            let failed = !self.kinds_match(state, goal)
-                || observation.values.iter().any(|value| !value.is_finite())
+            let failed = input_bad
                 || self.backend.infer(&observation.values, &mut fresh).is_err()
                 || fresh.iter().any(|value| !value.is_finite());
             if failed {
@@ -302,7 +321,7 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTask
                 self.last_action = fresh;
                 (fresh, CuPolicyStatus::Fresh)
             }
-        } else if self.last_status == CuPolicyStatus::Fault {
+        } else if input_bad || self.last_status == CuPolicyStatus::Fault {
             // A fault lasts until the next inference; its zero values are
             // never presented as a usable held action.
             ([0.0; ACT], CuPolicyStatus::Fault)

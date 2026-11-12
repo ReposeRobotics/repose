@@ -18,6 +18,9 @@ Fixtures:
                     path (non-finite model output).
   double_4.onnx     identity_4 with float64 tensors; loading it must fail at
                     startup because the model input is not f32.
+  identity_5.onnx   output = input, [1, 5] -> [1, 5]; loading it for OBS = 4
+                    must fail at startup although the graph would run at
+                    width 4, because the declared input width differs.
 """
 
 import numpy as np
@@ -40,13 +43,13 @@ def value_info(name, shape):
     return helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
 
 
-def identity_4():
+def identity(width):
     node = helper.make_node("Identity", ["observation"], ["action"])
     graph = helper.make_graph(
         [node],
-        "identity_4",
-        [value_info("observation", [1, 4])],
-        [value_info("action", [1, 4])],
+        f"identity_{width}",
+        [value_info("observation", [1, width])],
+        [value_info("action", [1, width])],
     )
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
 
@@ -113,7 +116,8 @@ def double_4():
 
 
 if __name__ == "__main__":
-    save(identity_4(), "identity_4.onnx")
+    save(identity(4), "identity_4.onnx")
+    save(identity(5), "identity_5.onnx")
     save(linear_24_6(), "linear_24_6.onnx")
     save(bad_shape(), "bad_shape.onnx")
     save(nan_model(), "nan.onnx")

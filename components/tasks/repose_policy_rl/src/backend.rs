@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tract_onnx::prelude::*;
 use tract_onnx::tract_hir::infer::Factoid;
+use tract_onnx::tract_hir::internal::DimLike;
 
 /// FNV-1a 64-bit hash of the model file bytes.
 ///
@@ -92,12 +93,25 @@ impl CuPolicyBackend {
         }
         // Pinning the input fact below overwrites the declared element type,
         // so a non-f32 model has to be rejected before that.
+        // The same goes for the declared shape: a concrete rank or dimension
+        // that differs from [1, OBS] is a different model, even when its
+        // graph would run at the pinned width. Open (symbolic) dimensions are
+        // accepted; pinning specializes them.
         let declared = model
             .input_fact(0)
-            .map_err(|e| backend_error("repose-policy-rl: model input fact", e))?
+            .map_err(|e| backend_error("repose-policy-rl: model input fact", e))?;
+        let wrong_type = declared
             .datum_type
-            .concretize();
-        if declared.is_some_and(|datum_type| datum_type != f32::datum_type()) {
+            .concretize()
+            .is_some_and(|datum_type| datum_type != f32::datum_type());
+        let wrong_shape = declared.shape.concretize().is_some_and(|dims| {
+            dims.len() != 2
+                || dims
+                    .iter()
+                    .zip([1usize, obs])
+                    .any(|(dim, want)| dim.to_usize().is_ok_and(|have| have != want))
+        });
+        if wrong_type || wrong_shape {
             return Err(CuError::from(
                 "repose-policy-rl: model input must be f32 with shape [1, OBS]",
             ));

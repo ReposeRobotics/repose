@@ -29,11 +29,19 @@
 //!
 //! Without a robot model `ff` is zero (pure PD). With an optional
 //! [`CuEffortModel`] (`"effort_model"` in RON), `ff` is the inverse dynamics
-//! of the chain evaluated at the **measured** positions, the **desired**
-//! velocities, and **zero** acceleration: the gravity load plus the
-//! Coriolis/centrifugal load of the planned motion. The follower setpoint
-//! carries no acceleration, so the inertial term `M(q) * qdd_des` is not fed
-//! forward and is left to the PD feedback.
+//! of the chain evaluated at the **measured** positions and the **desired**
+//! velocities and accelerations from the follower setpoint:
+//!
+//! ```text
+//! ff = inverse_dynamics(q_measured, qd_des, qdd_des)
+//! ```
+//!
+//! That is the gravity load, the Coriolis/centrifugal load of the planned
+//! motion and the inertial term `M(q) * qdd_des`. Non-finite or wrongly typed
+//! desired accelerations are never sanitized: the dynamics rejects them and
+//! the controller reports `Fault` with the damping/gravity brake, exactly as
+//! for a non-finite desired velocity. Without a model the setpoint
+//! acceleration is not read at all, so the pure-PD path is unchanged.
 //!
 //! Hold and fault paths command a damping brake (`-kv[j] * qd[j]`), plus the
 //! gravity load at the measured positions when a model is configured, so the
@@ -259,8 +267,8 @@ impl<const N: usize> CuEffortGains<N> {
 /// feedback. The model is evaluated at the **measured** joint positions, so
 /// the gravity term cancels the load the arm actually carries, at the
 /// **desired** joint velocities, which are smooth where measured ones are
-/// noisy, and at **zero** acceleration, because the follower setpoint carries
-/// none. Hold and fault paths use the gravity load at the measured positions.
+/// noisy, and at the **desired** joint accelerations of the follower setpoint,
+/// so the inertial term `M(q) * qdd_des` is fed forward too. Hold and fault paths use the gravity load at the measured positions.
 ///
 /// Set `gravity` to zero when the bridge or drive already compensates
 /// gravity, so it is not applied twice; the velocity terms remain.
@@ -551,13 +559,13 @@ impl<const N: usize> CuControllerTask<N> {
     }
 
     /// Writes the model efforts (SI per joint kind) at `positions` into
-    /// `out`: the gravity load, plus the Coriolis/centrifugal load of
-    /// `velocities` when given. Acceleration is zero. Without a model `out`
-    /// is all zero. On error `out` is left untouched.
+    /// `out`: the gravity load, plus, when `motion` (desired velocities and
+    /// accelerations) is given, the full inverse dynamics of that motion.
+    /// Without a model `out` is all zero. On error `out` is left untouched.
     fn model_efforts(
         &self,
         positions: &[CuJointPosition; N],
-        velocities: Option<&[CuJointVelocity; N]>,
+        motion: Option<(&[CuJointVelocity; N], &[CuJointAcceleration; N])>,
         out: &mut [f64; N],
     ) -> CuResult<()> {
         let (Some(chain), Some(model)) = (&self.model_chain, &self.params.effort_model) else {
@@ -565,16 +573,12 @@ impl<const N: usize> CuControllerTask<N> {
             return Ok(());
         };
         let mut efforts = [repose_kinematics::CuJointEffort::default(); N];
-        match velocities {
-            Some(velocities) => {
-                let mut accelerations = [CuJointAcceleration::default(); N];
-                for j in 0..N {
-                    accelerations[j] = CuJointAcceleration::from_coordinate(positions[j], 0.0);
-                }
+        match motion {
+            Some((velocities, accelerations)) => {
                 let input = CuInverseDynamicsInput::new(
                     positions,
                     velocities,
-                    &accelerations,
+                    accelerations,
                     model.gravity,
                 );
                 chain.inverse_dynamics(&model.inertia, &input, &mut efforts)?;
@@ -748,14 +752,14 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                 }
                 command.max_tracking_error = max_kind.with_si_value(max_err);
                 // Feedforward: model efforts at the measured positions and the
-                // desired velocities (zero without a model). A model that
+                // desired velocities and accelerations (zero without a model). A model that
                 // cannot be evaluated is a fault, not a silent pure-PD cycle.
                 let mut feedforward = [0.0; N];
                 let model_failed = effort
                     && self
                         .model_efforts(
                             &state.positions,
-                            Some(&setpoint.velocities),
+                            Some((&setpoint.velocities, &setpoint.accelerations)),
                             &mut feedforward,
                         )
                         .is_err();
@@ -868,14 +872,16 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
 mod tests {
     use super::*;
     use cu29::units::si::angle::radian;
+    use cu29::units::si::angular_acceleration::radian_per_second_squared;
     use cu29::units::si::angular_velocity::radian_per_second;
-    use cu29::units::si::f64::{Angle, AngularVelocity};
+    use cu29::units::si::f64::{Angle, AngularAcceleration, AngularVelocity};
 
     fn follow(pos: f64, status: CuFollowStatus) -> CuTrajectoryFollowOutput<2> {
         CuTrajectoryFollowOutput {
             positions: [CuJointPosition::Revolute(Angle::new::<radian>(pos)); 2],
             velocities: [CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(0.1));
                 2],
+            accelerations: [CuJointAcceleration::default(); 2],
             status,
         }
     }
@@ -1171,6 +1177,13 @@ mod tests {
     const QD: [f64; 2] = [0.3, -0.2];
     const Q_DES: [f64; 2] = [0.25, -0.3];
     const QD_DES: [f64; 2] = [0.5, 0.7];
+    const QDD_DES: [f64; 2] = [1.5, -2.0];
+
+    fn rad_s2(v: [f64; 2]) -> [CuJointAcceleration; 2] {
+        v.map(|v| {
+            CuJointAcceleration::Revolute(AngularAcceleration::new::<radian_per_second_squared>(v))
+        })
+    }
 
     fn arm_state() -> CuJointStatePayload<2> {
         CuJointStatePayload {
@@ -1184,13 +1197,19 @@ mod tests {
         CuTrajectoryFollowOutput {
             positions: rad(Q_DES),
             velocities: rad_s(QD_DES),
+            accelerations: rad_s2(QDD_DES),
             status: CuFollowStatus::Running,
         }
     }
 
-    /// Reference model efforts straight from `repose-kinematics`.
+    /// Reference model efforts straight from `repose-kinematics`, at zero
+    /// acceleration.
     fn arm_model_efforts(velocities: [f64; 2]) -> [f64; 2] {
-        let accelerations = rad(Q).map(|q| CuJointAcceleration::from_coordinate(q, 0.0));
+        arm_model_efforts_at(velocities, [0.0; 2])
+    }
+
+    fn arm_model_efforts_at(velocities: [f64; 2], accelerations: [f64; 2]) -> [f64; 2] {
+        let accelerations = rad_s2(accelerations);
         let mut out = [repose_kinematics::CuJointEffort::default(); 2];
         arm_chain()
             .inverse_dynamics(
@@ -1246,8 +1265,15 @@ mod tests {
         let mut task = effort_task(true);
         let out = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
         assert_eq!(out.status, CuControllerStatus::Running);
-        // Model at the measured positions and the desired velocities.
-        let model = arm_model_efforts(QD_DES);
+        // Model at the measured positions and the desired velocities and
+        // accelerations, so the inertial term is fed forward.
+        let model = arm_model_efforts_at(QD_DES, QDD_DES);
+        let zero_acceleration = arm_model_efforts(QD_DES);
+        assert!(
+            (model[0] - zero_acceleration[0]).abs() > 1e-3
+                && (model[1] - zero_acceleration[1]).abs() > 1e-3,
+            "inertial term matters"
+        );
         let gravity = arm_model_efforts([0.0; 2]);
         assert!(
             (model[0] - gravity[0]).abs() > 1e-3,
@@ -1306,6 +1332,78 @@ mod tests {
         let out = run(&mut task, Some(arm_setpoint()), Some(not_ready));
         assert_eq!(out.status, CuControllerStatus::Fault);
         assert_efforts(&out, [0.0; 2]);
+    }
+
+    #[test]
+    fn test_effort_feedforward_acceleration_scales_the_inertial_term() {
+        let mut task = effort_task(true);
+        let out = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+        let rest = CuTrajectoryFollowOutput {
+            accelerations: rad_s2([0.0; 2]),
+            ..arm_setpoint()
+        };
+        let out_rest = run(&mut task, Some(rest), Some(arm_state()));
+        // Same PD, so the difference is exactly M(q) * qdd_des.
+        let inertial = [
+            out.efforts[0].si_value() - out_rest.efforts[0].si_value(),
+            out.efforts[1].si_value() - out_rest.efforts[1].si_value(),
+        ];
+        let expected = arm_model_efforts_at(QD_DES, QDD_DES);
+        let baseline = arm_model_efforts(QD_DES);
+        for j in 0..2 {
+            assert!((inertial[j] - (expected[j] - baseline[j])).abs() < 1e-12);
+            assert!(inertial[j].abs() > 1e-3);
+        }
+    }
+
+    #[test]
+    fn test_effort_non_finite_acceleration_faults_with_model_and_is_ignored_without() {
+        let bad = CuTrajectoryFollowOutput {
+            accelerations: rad_s2([f64::NAN, 0.0]),
+            ..arm_setpoint()
+        };
+        // With a model it never reaches the dynamics: fault, gravity plus
+        // damping brake.
+        let mut task = effort_task(true);
+        let out = run(&mut task, Some(bad.clone()), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_eq!(out.positions, rad(Q));
+        let gravity = arm_model_efforts([0.0; 2]);
+        assert_efforts(&out, [gravity[0] - 2.0 * QD[0], gravity[1] - 0.5 * QD[1]]);
+        // Infinity is rejected the same way.
+        let inf = CuTrajectoryFollowOutput {
+            accelerations: rad_s2([0.0, f64::INFINITY]),
+            ..arm_setpoint()
+        };
+        let out = run(&mut task, Some(inf), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        // A wrongly typed acceleration is rejected too.
+        let mut wrong = arm_setpoint();
+        wrong.accelerations[1] =
+            CuJointAcceleration::Prismatic(Acceleration::new::<meter_per_second_squared>(1.0));
+        let out = run(&mut task, Some(wrong), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        // Without a model the acceleration is not read: plain PD.
+        let mut task = effort_task(false);
+        let out = run(&mut task, Some(bad), Some(arm_state()));
+        assert_eq!(out.status, CuControllerStatus::Running);
+        assert_efforts(&out, arm_pd());
+    }
+
+    #[test]
+    fn test_effort_pure_pd_is_independent_of_setpoint_acceleration() {
+        let mut task = effort_task(false);
+        let with = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+        let without = run(
+            &mut task,
+            Some(CuTrajectoryFollowOutput {
+                accelerations: rad_s2([0.0; 2]),
+                ..arm_setpoint()
+            }),
+            Some(arm_state()),
+        );
+        assert_eq!(with.efforts, without.efforts);
+        assert_efforts(&with, arm_pd());
     }
 
     #[test]

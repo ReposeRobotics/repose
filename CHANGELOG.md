@@ -60,6 +60,18 @@ may be breaking.
 
 ### Added
 
+- `repose-policy-rl`: new `std`-only crate running a stateless feed-forward
+  ONNX policy in the graph. `CuPolicyTask<N, OBS, ACT>` consumes the measured
+  joint state and a joint goal, builds the RON-configured observation
+  (`joint_positions`, `joint_velocities`, `goal_error`, `previous_action`),
+  infers with `tract-onnx`, and publishes the `CuPolicyObservation<OBS>`
+  exactly as fed to the model plus the raw `CuPolicyAction<ACT>` with a
+  `CuPolicyStatus` (`Idle`/`Fresh`/`Held`/`Fault`), so every observation and
+  raw action is in the log. Cycle-exact decimation, an optional pinned
+  `model_hash`, and real `Freezable` state keep replay deterministic.
+  Inference is the workspace's one documented hot-path allocation exception:
+  14 allocations per `process` call, measured and bounded by
+  `tests/alloc.rs` (bound 32).
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

@@ -48,8 +48,8 @@ examples:
 # Build every library crate except the simulator for bare-metal targets (no OS, `core` + `alloc` only):
 # 64-bit Arm and Cortex-M. Guards the `no_std` surface that a qualified toolchain (Ferrocene) would build.
 bare-metal:
-    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --target aarch64-unknown-none
-    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --target thumbv7em-none-eabihf
+    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --target aarch64-unknown-none
+    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --target thumbv7em-none-eabihf
 
 # Run the divan benchmarks (kinematics, collision, planning, trajectory); CI runs them under CodSpeed.
 bench:
@@ -78,6 +78,7 @@ api-check:
     cargo public-api -p repose-motion-planning
     cargo public-api -p repose-joint-rrt-star
     cargo public-api -p repose-mujoco-sim
+    cargo public-api -p repose-policy-rl
     cargo public-api -p repose
 
 # Check every library crate for SemVer breaks against the latest release tag (needs cargo-semver-checks).
@@ -123,6 +124,7 @@ release-dry-run:
     cargo publish --dry-run -p repose-motion-planning
     cargo publish --dry-run -p repose-joint-rrt-star
     cargo publish --dry-run -p repose-mujoco-sim
+    cargo publish --dry-run -p repose-policy-rl
     cargo publish --dry-run -p repose
 
 # Verify strict no_std compatibility across shared crates.

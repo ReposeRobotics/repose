@@ -118,3 +118,4 @@ impl_const_array_serde!(
     crate::dynamics::CuLinkInertia,
     "CuLinkInertia"
 );
+impl_const_array_serde!(f32_array, f32, "f32");

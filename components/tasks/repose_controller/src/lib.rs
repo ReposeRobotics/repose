@@ -9,8 +9,9 @@
 //! is a RON graph change, not an application change.
 //!
 //! Behaviour per cycle:
-//! - No setpoint yet: `Idle`, holding the last measured state (zeros before
-//!   the first state arrives).
+//! - No setpoint yet, or a follower reporting `Idle` (no trajectory yet, or
+//!   cancelled; its positions are not a target): `Idle`, holding the last
+//!   measured state (zeros before the first state arrives).
 //! - Setpoint + fresh state: command mirrors the setpoint; status maps the
 //!   follower status (`Running` → `Running`, `Finished` → `Holding`,
 //!   `ErrorEmptyTrajectory` → `Fault`).
@@ -659,7 +660,13 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
     ) -> CuResult<()> {
         output.tov = input.1.tov;
         let state = input.1.payload();
-        let setpoint = input.0.payload();
+        // An `Idle` follower (no trajectory yet, or cancelled) carries no
+        // motion request: treat it as no setpoint, so the controller holds the
+        // measured state instead of driving to the placeholder positions.
+        let setpoint = input
+            .0
+            .payload()
+            .filter(|setpoint| setpoint.status != CuFollowStatus::Idle);
 
         let mode = self.params.mode;
         let effort = mode == CuControllerMode::Effort;
@@ -759,6 +766,7 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                     command.status = match setpoint.status {
                         CuFollowStatus::Running => CuControllerStatus::Running,
                         CuFollowStatus::Finished => CuControllerStatus::Holding,
+                        // Filtered out above; kept for exhaustiveness.
                         CuFollowStatus::Idle => CuControllerStatus::Idle,
                         CuFollowStatus::ErrorEmptyTrajectory => CuControllerStatus::Fault,
                     };
@@ -912,6 +920,53 @@ mod tests {
         let (ctx, _clock) = CuContext::new_mock_clock();
         task.process(&ctx, &input, &mut output).unwrap();
         output.payload().unwrap().clone()
+    }
+
+    #[test]
+    fn test_idle_follower_holds_measured_state_not_its_positions() {
+        // Follower idle (never started, or cancelled) with placeholder zero
+        // positions 0.3 rad from the measured state: hold, never chase zero.
+        for held in [0.0, 0.1] {
+            let mut task = CuControllerTask::<2>::default();
+            let out = run(
+                &mut task,
+                Some(follow(held, CuFollowStatus::Idle)),
+                Some(state(0.3)),
+            );
+            assert_eq!(out.status, CuControllerStatus::Idle);
+            assert_eq!(out.positions[0].si_value(), 0.3);
+            assert_eq!(out.positions[1].si_value(), 0.3);
+        }
+    }
+
+    #[test]
+    fn test_follower_cancel_then_idle_cycles_hold_measured_state() {
+        use repose_trajectory::{CuFollowTrajectoryTask, CuTrajectoryPayload};
+        let (ctx, _clock) = CuContext::new_mock_clock();
+        let mut follower = CuFollowTrajectoryTask::<2>::default();
+        let mut controller = CuControllerTask::<2>::default();
+        let mut follow_out = CuMsg::<CuTrajectoryFollowOutput<2>>::default();
+        let state_msg = CuMsg::new(Some(state(0.3)));
+        let mut cmd = CuMsg::<CuJointCommandPayload<2>>::default();
+        let cancel = CuMsg::new(Some(CuTrajectoryPayload::<2>::new()));
+        follower.process(&ctx, &cancel, &mut follow_out).unwrap();
+        controller
+            .process(&ctx, &(&follow_out, &state_msg), &mut cmd)
+            .unwrap();
+        assert_eq!(cmd.payload().unwrap().status, CuControllerStatus::Fault);
+        assert_eq!(cmd.payload().unwrap().positions[0].si_value(), 0.3);
+        for _ in 0..3 {
+            follower
+                .process(&ctx, &CuMsg::new(None), &mut follow_out)
+                .unwrap();
+            controller
+                .process(&ctx, &(&follow_out, &state_msg), &mut cmd)
+                .unwrap();
+            let out = cmd.payload().unwrap();
+            assert_eq!(out.status, CuControllerStatus::Idle);
+            assert_eq!(out.positions[0].si_value(), 0.3);
+            assert_eq!(out.positions[1].si_value(), 0.3);
+        }
     }
 
     #[test]

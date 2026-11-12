@@ -81,6 +81,21 @@ may be breaking.
 - `repose-controller`: per-joint effort gains in RON, as an array of `N`
   numbers per gain (`"effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": 0.8}`).
 
+### Fixed
+
+- `repose-trajectory` / `repose-controller`: cancelling a trajectory no longer
+  commands joint zero. After an empty trajectory the follower used to emit
+  `Idle` with zero positions, and the controller chased them whenever zero was
+  within `tracking_error_limit` of the measured state. Now the follower holds
+  the last commanded positions (zero velocity and acceleration) after a
+  cancel, reporting `ErrorEmptyTrajectory` once and then `Idle`; a new
+  non-empty trajectory releases the cancel. The controller treats an `Idle`
+  follower setpoint as no setpoint: it holds the measured state with status
+  `Idle` (also before any trajectory was received, when the follower's
+  positions are zero placeholders). The follower's frozen state gains the held
+  positions, so keyframes written by earlier versions do not thaw; this
+  rides with the other breaking frozen-state changes above.
+
 ## [0.8.4] - 2026-11-10
 
 ### Added

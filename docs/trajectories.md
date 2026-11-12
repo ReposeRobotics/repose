@@ -38,6 +38,12 @@ derivative of the emitted velocity for the active interpolation (see
 setpoint is held, and the effort controller feeds it forward through the
 inertial term.
 
+An empty trajectory cancels the follower. It reports `ErrorEmptyTrajectory`
+once, then `Idle`, holding the last commanded positions with zero velocity and
+acceleration (zero positions if nothing was ever commanded); a new non-empty
+trajectory releases the cancel. An `Idle` setpoint is not a target: the
+controller holds the measured state while the follower is `Idle`.
+
 Timing is conservative and automatic. Finite joint jerk bounds apply to the
 S-curve profile with quintic execution. Collision and zone checks apply to the geometric spline; the reconstructed
 execution curve still needs a separate collision and zone recheck. Checks are discrete and depend on their configured

@@ -90,3 +90,16 @@ encoding are unchanged; `From<Torque>` and `From<Force>` are new.
 | `repose_controller::CuJointEffort` | unchanged path (re-export), or `repose_kinematics::CuJointEffort` |
 | `repose_kinematics::CuJointEffort::si_value` on controller efforts (type mismatch) | direct, same type |
 
+## repose-trajectory / repose-controller: cancel holds position
+
+An empty trajectory used to leave the follower emitting `Idle` with zero
+positions, which the controller followed toward joint zero. The follower now
+holds the last commanded positions (zero velocity and acceleration) after a
+cancel: `ErrorEmptyTrajectory` once, then `Idle`, until a new non-empty
+trajectory arrives. Before any trajectory the positions remain zero.
+
+The controller treats a follower setpoint with status `Idle` as no setpoint
+and holds the measured state (`Idle`). Custom consumers of
+`CuTrajectoryFollowOutput` must not treat an `Idle` setpoint as a target.
+`CuFollowTrajectoryTask` frozen state gains the held positions, so 0.8
+keyframes do not thaw. RON graphs need no change.

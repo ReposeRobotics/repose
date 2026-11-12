@@ -4,6 +4,13 @@
 //! input, samples it at the elapsed time since adoption, and emits joint
 //! positions, velocities, accelerations, and a [`CuFollowStatus`]. A differing trajectory
 //! preempts the running one; an empty trajectory cancels it.
+//!
+//! After a cancel the follower reports [`CuFollowStatus::ErrorEmptyTrajectory`]
+//! once and then [`CuFollowStatus::Idle`], in both cases holding the last
+//! commanded positions with zero velocity and acceleration (never joint zero).
+//! Before any trajectory was received the positions are zero; a consumer must
+//! not treat an `Idle` setpoint as a target (the controller holds the measured
+//! state). A new non-empty trajectory releases the cancel.
 
 use crate::CuTrajectoryInterpolation;
 use crate::CuTrajectoryPayload;
@@ -29,14 +36,19 @@ use serde::Serialize;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CuFollowStatus {
-    /// No trajectory has been adopted yet.
+    /// No active trajectory: none has been adopted yet, or it was cancelled.
+    /// The setpoint carries no motion request (zero velocity and
+    /// acceleration); after a cancel its positions are the last commanded
+    /// positions, before any trajectory they are zero and meaningless.
     #[default]
     Idle,
     /// Sampling a stored trajectory before its end time.
     Running,
     /// Elapsed time reached the trajectory duration; the final point is held.
     Finished,
-    /// The input carried an empty trajectory; any stored trajectory is cancelled.
+    /// The input carried an empty trajectory; any stored trajectory is
+    /// cancelled. Reported once, on the cancelling cycle; the follower then
+    /// reports [`Idle`](Self::Idle) until a new trajectory arrives.
     ErrorEmptyTrajectory,
 }
 
@@ -111,6 +123,9 @@ pub struct CuFollowTrajectoryTask<const N: usize, const MAX_POINTS: usize = MAX_
     trajectory: Option<CuTrajectoryPayload<N, MAX_POINTS>>,
     #[reflect(ignore)]
     start: CuTime,
+    /// Last commanded positions, held while no trajectory is active.
+    #[reflect(ignore)]
+    held: Option<[CuJointPosition; N]>,
     params: CuFollowTrajectoryParams,
 }
 
@@ -121,6 +136,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuFollowTrajectoryTask<N, MAX_POIN
         Ok(Self {
             trajectory: None,
             start: CuTime::MIN,
+            held: None,
             params,
         })
     }
@@ -137,6 +153,7 @@ impl<const N: usize, const MAX_POINTS: usize> Default for CuFollowTrajectoryTask
         Self {
             trajectory: None,
             start: CuTime::MIN,
+            held: None,
             params: CuFollowTrajectoryParams::default(),
         }
     }
@@ -146,12 +163,14 @@ impl<const N: usize, const MAX_POINTS: usize> Freezable for CuFollowTrajectoryTa
     fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         Encode::encode(&self.trajectory, encoder)?;
         Encode::encode(&self.start, encoder)?;
+        Encode::encode(&self.held, encoder)?;
         Encode::encode(&self.params.interpolation, encoder)
     }
 
     fn thaw<D: Decoder>(&mut self, decoder: &mut D) -> Result<(), DecodeError> {
         self.trajectory = Decode::decode(decoder)?;
         self.start = Decode::decode(decoder)?;
+        self.held = Decode::decode(decoder)?;
         self.params.interpolation = Decode::decode(decoder)?;
         Ok(())
     }
@@ -189,6 +208,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTask for CuFollowTrajectoryTask<
             if traj.is_empty() {
                 self.trajectory = None;
                 output.set_payload(CuTrajectoryFollowOutput {
+                    positions: self.held.unwrap_or([CuJointPosition::default(); N]),
                     status: CuFollowStatus::ErrorEmptyTrajectory,
                     ..Default::default()
                 });
@@ -201,7 +221,12 @@ impl<const N: usize, const MAX_POINTS: usize> CuTask for CuFollowTrajectoryTask<
         }
 
         let Some(stored) = self.trajectory.as_ref() else {
-            output.set_payload(CuTrajectoryFollowOutput::default());
+            // No active trajectory: hold the last commanded positions (zeros
+            // if none was ever commanded), never a target nobody asked for.
+            output.set_payload(CuTrajectoryFollowOutput {
+                positions: self.held.unwrap_or([CuJointPosition::default(); N]),
+                ..Default::default()
+            });
             return Ok(());
         };
 
@@ -223,6 +248,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTask for CuFollowTrajectoryTask<
         } else {
             CuFollowStatus::Running
         };
+        self.held = Some(positions);
         output.set_payload(CuTrajectoryFollowOutput {
             positions,
             velocities,
@@ -435,6 +461,109 @@ mod tests {
         );
         task.process(&ctx, &CuMsg::new(None), &mut output).unwrap();
         assert_eq!(output.payload().unwrap().status, CuFollowStatus::Idle);
+    }
+
+    fn cancel_msg(secs: u64) -> CuMsg<CuTrajectoryPayload<1>> {
+        msg_at(Some(CuTrajectoryPayload::new()), secs)
+    }
+
+    #[test]
+    fn cancel_holds_the_last_commanded_position() {
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut task = CuFollowTrajectoryTask::<1>::default();
+        let mut output = CuMsg::new(None);
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 100), &mut output)
+            .unwrap();
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 101), &mut output)
+            .unwrap();
+        // Last commanded position is 1.0 (midpoint).
+        task.process(&ctx, &cancel_msg(102), &mut output).unwrap();
+        let out = output.payload().unwrap();
+        assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory);
+        assert_eq!(out.positions[0].si_value(), 1.0);
+        for secs in 103..106 {
+            task.process(&ctx, &msg_at(None, secs), &mut output)
+                .unwrap();
+            let out = output.payload().unwrap();
+            assert_eq!(out.status, CuFollowStatus::Idle);
+            assert_eq!(out.positions[0].si_value(), 1.0);
+            assert_eq!(out.velocities[0].si_value(), 0.0);
+            assert_eq!(out.accelerations[0].si_value(), 0.0);
+        }
+    }
+
+    #[test]
+    fn freeze_thaw_preserves_held_position_after_cancel() {
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut original = CuFollowTrajectoryTask::<1>::default();
+        let mut output = CuMsg::new(None);
+        original
+            .process(&ctx, &msg_at(Some(two_point_traj()), 100), &mut output)
+            .unwrap();
+        original
+            .process(&ctx, &msg_at(Some(two_point_traj()), 101), &mut output)
+            .unwrap();
+        original
+            .process(&ctx, &cancel_msg(102), &mut output)
+            .unwrap();
+
+        let mut bytes = [0u8; 8192];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
+        );
+        original.freeze(&mut encoder).unwrap();
+        let len = encoder.into_writer().bytes_written();
+        let mut decoder = bincode::de::DecoderImpl::new(
+            bincode::de::read::SliceReader::new(&bytes[..len]),
+            bincode::config::standard(),
+            (),
+        );
+        let mut restored = CuFollowTrajectoryTask::<1>::default();
+        restored.thaw(&mut decoder).unwrap();
+
+        // The restored follower keeps holding the last commanded position (1.0),
+        // not the zero placeholder of a fresh follower.
+        restored
+            .process(&ctx, &msg_at(None, 103), &mut output)
+            .unwrap();
+        let out = output.payload().unwrap();
+        assert_eq!(out.status, CuFollowStatus::Idle);
+        assert_eq!(out.positions[0].si_value(), 1.0);
+    }
+
+    #[test]
+    fn cancel_before_any_trajectory_stays_at_zero() {
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut task = CuFollowTrajectoryTask::<1>::default();
+        let mut output = CuMsg::new(None);
+        task.process(&ctx, &cancel_msg(100), &mut output).unwrap();
+        task.process(&ctx, &msg_at(None, 101), &mut output).unwrap();
+        let out = output.payload().unwrap();
+        assert_eq!(out.status, CuFollowStatus::Idle);
+        assert_eq!(out.positions[0].si_value(), 0.0);
+    }
+
+    #[test]
+    fn new_trajectory_releases_the_cancel() {
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut task = CuFollowTrajectoryTask::<1>::default();
+        let mut output = CuMsg::new(None);
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 100), &mut output)
+            .unwrap();
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 101), &mut output)
+            .unwrap();
+        task.process(&ctx, &cancel_msg(102), &mut output).unwrap();
+        task.process(&ctx, &msg_at(None, 103), &mut output).unwrap();
+        // Even an identical trajectory restarts from its own clock.
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 110), &mut output)
+            .unwrap();
+        let out = output.payload().unwrap();
+        assert_eq!(out.status, CuFollowStatus::Running);
+        assert_eq!(out.positions[0].si_value(), 0.0);
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 111), &mut output)
+            .unwrap();
+        assert!((output.payload().unwrap().positions[0].si_value() - 1.0).abs() < 1e-12);
     }
 
     #[test]

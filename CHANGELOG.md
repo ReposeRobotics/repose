@@ -101,8 +101,9 @@ may be breaking.
   the measured positions and the desired velocities and accelerations of the
   follower setpoint (gravity, Coriolis/centrifugal and inertial load). A
   non-finite or wrongly typed desired acceleration faults the controller and
-  falls back to the brake; without a model it is ignored. Hold and fault paths add gravity compensation at the measured
-  positions to the damping brake, so the arm no longer sags. A model that
+  falls back to the brake. Without a model a finite desired acceleration is
+  ignored and a non-finite one faults. Hold and fault paths add gravity
+  compensation at the measured positions to the damping brake, so the arm no longer sags. A model that
   cannot be evaluated faults the controller and falls back to the damping
   brake. Without a model, effort mode is the same PD law as before.
 - `repose-controller`: per-joint effort gains in RON, as an array of `N`

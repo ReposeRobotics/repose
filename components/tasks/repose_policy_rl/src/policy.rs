@@ -61,7 +61,8 @@ pub struct CuPolicyParams<const N: usize, const OBS: usize, const ACT: usize> {
     /// Infer every `decimation`-th cycle and hold the action in between.
     /// Counts cycles, not wall time, so replay is cycle-exact. The policy
     /// period is `decimation / rate_target_hz` and must equal the period the
-    /// policy was trained at.
+    /// policy was trained at. An `Idle` cycle restarts the count, so the
+    /// first usable cycle after a gap always infers.
     #[serde(default = "default_decimation")]
     pub decimation: u32,
     /// Reference joint positions subtracted by the `joint_positions`
@@ -138,10 +139,14 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuPolicyParams<N, OBS, 
 /// [`CuPolicyParams`].
 ///
 /// Without a usable joint state or goal the action is
-/// [`CuPolicyStatus::Idle`] with zero values. A non-finite observation,
-/// a failed inference, or a non-finite model output is
-/// [`CuPolicyStatus::Fault`] with zero values; neither case is a `CuError`,
-/// because the downstream action task turns the status into a held setpoint.
+/// [`CuPolicyStatus::Idle`] with zero values, and the previous action and
+/// the decimation count are reset. A non-finite observation, a joint whose
+/// unit kind differs between the state and the goal or default positions it
+/// is compared with, a failed inference, or a non-finite model output is
+/// [`CuPolicyStatus::Fault`] with zero values. A fault lasts until the next
+/// inference: the cycles in between report `Fault`, never `Held`. Neither
+/// case is a `CuError`, because the downstream action task turns the status
+/// into a held setpoint.
 ///
 /// Frozen state (last action, decimation cycle counter, last status)
 /// round-trips through `Freezable`, so deterministic replay resumes
@@ -184,6 +189,31 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuPolicyTask<N, OBS, AC
     /// Params this task runs with.
     pub fn params(&self) -> &CuPolicyParams<N, OBS, ACT> {
         &self.params
+    }
+
+    /// Whether every joint has the same unit kind in the values the layout
+    /// subtracts from each other. Radians minus meters is not an observation.
+    fn kinds_match(
+        &self,
+        state: &CuJointStatePayload<N>,
+        goal: &CuJointPositionsPayload<N>,
+    ) -> bool {
+        let same = |a: &CuJointPosition, b: &CuJointPosition| {
+            core::mem::discriminant(a) == core::mem::discriminant(b)
+        };
+        self.params.observation.iter().all(|term| match term {
+            CuObservationTerm::JointPositions { .. } => state
+                .positions
+                .iter()
+                .zip(&self.params.default_positions)
+                .all(|(a, b)| same(a, b)),
+            CuObservationTerm::GoalError { .. } => state
+                .positions
+                .iter()
+                .zip(&goal.positions)
+                .all(|(a, b)| same(a, b)),
+            CuObservationTerm::JointVelocities { .. } | CuObservationTerm::PreviousAction => true,
+        })
     }
 }
 
@@ -236,6 +266,8 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTask
         };
         let Some((state, goal)) = usable else {
             self.last_status = CuPolicyStatus::Idle;
+            self.last_action = [0.0; ACT];
+            self.cycle = 0;
             observation_out.set_payload(CuPolicyObservation::default());
             action_out.set_payload(CuPolicyAction {
                 values: [0.0; ACT],
@@ -259,7 +291,8 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTask
         self.cycle = self.cycle.wrapping_add(1);
         let (values, status) = if infer_now {
             let mut fresh = [0.0f32; ACT];
-            let failed = observation.values.iter().any(|value| !value.is_finite())
+            let failed = !self.kinds_match(state, goal)
+                || observation.values.iter().any(|value| !value.is_finite())
                 || self.backend.infer(&observation.values, &mut fresh).is_err()
                 || fresh.iter().any(|value| !value.is_finite());
             if failed {
@@ -269,6 +302,10 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTask
                 self.last_action = fresh;
                 (fresh, CuPolicyStatus::Fresh)
             }
+        } else if self.last_status == CuPolicyStatus::Fault {
+            // A fault lasts until the next inference; its zero values are
+            // never presented as a usable held action.
+            ([0.0; ACT], CuPolicyStatus::Fault)
         } else {
             (self.last_action, CuPolicyStatus::Held)
         };

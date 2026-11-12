@@ -19,6 +19,7 @@ use repose_policy_rl::CuObservationTerm;
 use repose_policy_rl::CuPolicyAction;
 use repose_policy_rl::CuPolicyObservation;
 use repose_policy_rl::CuPolicyParams;
+use repose_policy_rl::CuPolicyStatus;
 use repose_policy_rl::CuPolicyTask;
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
@@ -113,8 +114,11 @@ fn allocations_per_process_are_bounded() {
     let per_call = total as f64 / CALLS as f64;
     println!("allocations: {total} over {CALLS} process calls ({per_call:.2} per call)");
     assert!(
-        output.1.payload().is_some(),
-        "the measured cycles must produce actions"
+        output
+            .1
+            .payload()
+            .is_some_and(|action| action.status == CuPolicyStatus::Fresh),
+        "the measured cycles must run inference"
     );
     assert!(
         total <= MAX_ALLOCATIONS_PER_CALL * CALLS,

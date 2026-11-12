@@ -108,8 +108,8 @@ pub(crate) fn validate_layout(
 /// Positions and velocities are read in SI base units of each joint kind
 /// (radians / meters, radians per second / meters per second), so the
 /// observation is dimensionless after scaling. The caller guarantees the
-/// layout width equals `OBS` (see [`validate_layout`]); an unchecked layout
-/// leaves the tail of `out` at its previous values, so `out` is zeroed first.
+/// layout width equals `OBS` (see [`validate_layout`]). `out` is zeroed
+/// first, so nothing from an earlier cycle can remain in it.
 pub(crate) fn fill<const N: usize, const OBS: usize, const ACT: usize>(
     terms: &[CuObservationTerm],
     state: &CuJointStatePayload<N>,

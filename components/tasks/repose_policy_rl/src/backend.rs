@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use tract_onnx::prelude::*;
+use tract_onnx::tract_hir::infer::Factoid;
 
 /// FNV-1a 64-bit hash of the model file bytes.
 ///
@@ -87,6 +88,18 @@ impl CuPolicyBackend {
         if outputs.len() != 1 {
             return Err(CuError::from(
                 "repose-policy-rl: model must have exactly one output",
+            ));
+        }
+        // Pinning the input fact below overwrites the declared element type,
+        // so a non-f32 model has to be rejected before that.
+        let declared = model
+            .input_fact(0)
+            .map_err(|e| backend_error("repose-policy-rl: model input fact", e))?
+            .datum_type
+            .concretize();
+        if declared.is_some_and(|datum_type| datum_type != f32::datum_type()) {
+            return Err(CuError::from(
+                "repose-policy-rl: model input must be f32 with shape [1, OBS]",
             ));
         }
         let model = model

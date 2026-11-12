@@ -16,6 +16,8 @@ Fixtures:
                     loading it for OBS = 4 must fail at startup.
   nan.onnx          output = input + NaN, [1, 4] -> [1, 4]; drives the Fault
                     path (non-finite model output).
+  double_4.onnx     identity_4 with float64 tensors; loading it must fail at
+                    startup because the model input is not f32.
 """
 
 import numpy as np
@@ -99,8 +101,20 @@ def nan_model():
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
 
 
+def double_4():
+    node = helper.make_node("Identity", ["observation"], ["action"])
+    graph = helper.make_graph(
+        [node],
+        "double_4",
+        [helper.make_tensor_value_info("observation", TensorProto.DOUBLE, [1, 4])],
+        [helper.make_tensor_value_info("action", TensorProto.DOUBLE, [1, 4])],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
+
+
 if __name__ == "__main__":
     save(identity_4(), "identity_4.onnx")
     save(linear_24_6(), "linear_24_6.onnx")
     save(bad_shape(), "bad_shape.onnx")
     save(nan_model(), "nan.onnx")
+    save(double_4(), "double_4.onnx")

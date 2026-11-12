@@ -351,3 +351,106 @@ fn freeze_thaw_resumes_identically() {
         assert_eq!(act_a, act_b);
     }
 }
+
+#[test]
+fn double_model_is_rejected_at_startup() {
+    let params = CuPolicyParams::<2, 4, 4> {
+        model: fixture("double_4.onnx"),
+        ..identity_params()
+    };
+    let err = CuPolicyTask::from_params(params).err().unwrap();
+    assert!(format!("{err}").contains("must be f32"), "{err}");
+}
+
+#[test]
+fn fault_lasts_until_the_next_inference() {
+    let params = CuPolicyParams::<2, 4, 4> {
+        model: fixture("nan.onnx"),
+        decimation: 2,
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    for _ in 0..4 {
+        let (_, action) = run2(
+            &mut task,
+            Some(state2([0.5, -0.25])),
+            Some(goal2([1.5, 0.75])),
+        );
+        assert_eq!(action.status, CuPolicyStatus::Fault);
+        assert_eq!(action.values, [0.0; 4]);
+    }
+}
+
+#[test]
+fn idle_restarts_the_decimation_count() {
+    let params = CuPolicyParams::<2, 4, 4> {
+        decimation: 3,
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let goal = goal2([1.5, 0.75]);
+    let statuses = [
+        Some(state2([0.5, -0.25])),
+        None,
+        Some(state2([0.5, -0.25])),
+        Some(state2([0.5, -0.25])),
+    ]
+    .map(|state| run2(&mut task, state, Some(goal.clone())).1.status);
+    assert_eq!(
+        statuses,
+        [
+            CuPolicyStatus::Fresh,
+            CuPolicyStatus::Idle,
+            CuPolicyStatus::Fresh,
+            CuPolicyStatus::Held,
+        ]
+    );
+}
+
+#[test]
+fn non_finite_observation_is_fault_and_recovers() {
+    let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
+    let (_, action) = run2(
+        &mut task,
+        Some(state2([f64::NAN, -0.25])),
+        Some(goal2([1.5, 0.75])),
+    );
+    assert_eq!(action.status, CuPolicyStatus::Fault);
+    assert_eq!(action.values, [0.0; 4]);
+    let (_, action) = run2(
+        &mut task,
+        Some(state2([0.5, -0.25])),
+        Some(goal2([1.5, 0.75])),
+    );
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+}
+
+#[test]
+fn mismatched_joint_kinds_are_fault() {
+    use cu29::units::si::f64::Length;
+    use cu29::units::si::length::meter;
+    let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
+    // A prismatic goal against a revolute state: meters minus radians.
+    let mut goal = goal2([1.5, 0.75]);
+    goal.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.75));
+    let (_, action) = run2(&mut task, Some(state2([0.5, -0.25])), Some(goal));
+    assert_eq!(action.status, CuPolicyStatus::Fault);
+    assert_eq!(action.values, [0.0; 4]);
+}
+
+#[test]
+fn tov_is_propagated_from_the_joint_state() {
+    let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
+    let mut state_msg = CuMsg::new(Some(state2([0.5, -0.25])));
+    state_msg.tov = Tov::Time(CuTime::from_nanos(424_242));
+    let goal_msg = CuMsg::new(Some(goal2([1.5, 0.75])));
+    let mut output = (
+        CuMsg::<CuPolicyObservation<4>>::default(),
+        CuMsg::<CuPolicyAction<4>>::default(),
+    );
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    task.process(&ctx, &(&state_msg, &goal_msg), &mut output)
+        .unwrap();
+    assert_eq!(output.0.tov, state_msg.tov);
+    assert_eq!(output.1.tov, state_msg.tov);
+}

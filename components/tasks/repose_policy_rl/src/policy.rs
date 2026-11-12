@@ -323,7 +323,10 @@ impl<const N: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTask
             }
         } else if input_bad || self.last_status == CuPolicyStatus::Fault {
             // A fault lasts until the next inference; its zero values are
-            // never presented as a usable held action.
+            // never presented as a usable held action. The previous action
+            // is cleared so the `previous_action` term matches what was
+            // published.
+            self.last_action = [0.0; ACT];
             ([0.0; ACT], CuPolicyStatus::Fault)
         } else {
             (self.last_action, CuPolicyStatus::Held)

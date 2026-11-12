@@ -30,7 +30,7 @@ pub enum CuPolicyStatus {
 
 /// Observation vector built this cycle (dimensionless). It is what the model
 /// was fed when the action of the same cycle is [`CuPolicyStatus::Fresh`];
-/// on other cycles no inference ran on it, and it is zero on `Idle`.
+/// `Held` and `Idle` cycles run no inference on it, and it is zero on `Idle`.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Serialize, Deserialize, Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
 pub struct CuPolicyObservation<const OBS: usize> {

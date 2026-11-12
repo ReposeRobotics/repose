@@ -7,8 +7,8 @@
 //! `tract-onnx` runtime, and publishes two payloads: the
 //! [`CuPolicyObservation`] built this cycle and the raw [`CuPolicyAction`]
 //! before any scaling or limiting. On a `Fresh` cycle the observation is
-//! exactly what the model was fed; on `Held`, `Idle` and `Fault` cycles no
-//! inference ran on it. Every observation and every raw action is in the
+//! exactly what the model was fed; `Held` and `Idle` cycles run no
+//! inference, and a `Fault` cycle may or may not have. Every observation and every raw action is in the
 //! log, so a recorded run shows whether
 //! the model or the downstream execution layer caused a given motion.
 //! Turning the raw action into joint setpoints is a separate task.

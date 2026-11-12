@@ -492,6 +492,56 @@ fn bad_inputs_fault_a_held_cycle() {
 }
 
 #[test]
+fn held_cycle_fault_clears_the_previous_action_term() {
+    let params = CuPolicyParams::<6, 24, 6> {
+        model: fixture("linear_24_6.onnx"),
+        decimation: 3,
+        observation: vec![
+            CuObservationTerm::JointPositions { scale: 1.0 },
+            CuObservationTerm::JointVelocities { scale: 1.0 },
+            CuObservationTerm::GoalError { scale: 1.0 },
+            CuObservationTerm::PreviousAction,
+        ],
+        ..CuPolicyParams::default()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let goal = CuJointPositionsPayload::<6> {
+        positions: [pos(1.0); 6],
+    };
+    let state = |q: f64| CuJointStatePayload::<6> {
+        status: CuRobotStatus::Ready,
+        positions: [pos(q); 6],
+        velocities: [vel(0.0); 6],
+    };
+    let mut run = |state: CuJointStatePayload<6>| {
+        let state_msg = CuMsg::new(Some(state));
+        let goal_msg = CuMsg::new(Some(goal.clone()));
+        let mut output = (
+            CuMsg::<CuPolicyObservation<24>>::default(),
+            CuMsg::<CuPolicyAction<6>>::default(),
+        );
+        let (ctx, _clock) = CuContext::new_mock_clock();
+        task.process(&ctx, &(&state_msg, &goal_msg), &mut output)
+            .unwrap();
+        (
+            output.0.payload().unwrap().clone(),
+            output.1.payload().unwrap().clone(),
+        )
+    };
+    // Inference: a nonzero action (0.5 * goal error).
+    let (_, action) = run(state(0.0));
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+    assert_eq!(action.values, [0.5; 6]);
+    // A held cycle with a non-finite state faults and publishes zeros.
+    let (_, action) = run(state(f64::NAN));
+    assert_eq!(action.status, CuPolicyStatus::Fault);
+    // The next observation's previous_action term is what was published
+    // (zeros), not the action from before the fault.
+    let (observation, _) = run(state(0.0));
+    assert_eq!(observation.values[18..24], [0.0; 6]);
+}
+
+#[test]
 fn velocity_kind_mismatch_is_fault() {
     use cu29::units::si::f64::Velocity;
     use cu29::units::si::velocity::meter_per_second;

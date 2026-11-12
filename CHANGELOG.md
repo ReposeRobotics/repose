@@ -68,7 +68,7 @@ may be breaking.
   built this cycle plus the raw `CuPolicyAction<ACT>` with a
   `CuPolicyStatus` (`Idle`/`Fresh`/`Held`/`Fault`), so every observation and
   raw action is in the log. On a `Fresh` cycle the observation is exactly
-  what the model was fed; on other cycles no inference ran. Cycle-exact decimation, an optional pinned
+  what the model was fed; `Held` and `Idle` cycles run no inference. Cycle-exact decimation, an optional pinned
   `model_hash`, and real `Freezable` state keep replay deterministic.
   Inference is the workspace's one documented hot-path allocation exception:
   14 allocations per `process` call with the `linear_24_6` fixture, measured

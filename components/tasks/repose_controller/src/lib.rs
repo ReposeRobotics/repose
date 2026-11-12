@@ -601,15 +601,13 @@ impl<const N: usize> CuControllerTask<N> {
         let kv = &self.params.effort_gains.kv;
         for j in 0..N {
             let raw = gravity[j] - kv[j] * state.velocities[j].si_value();
+            // An overflowed brake is not a brake: command no effort at all
+            // instead of the largest representable one.
             let effort = if raw.is_finite() {
                 raw
             } else {
                 command.status = CuControllerStatus::Fault;
-                if raw.is_nan() {
-                    0.0
-                } else {
-                    raw.clamp(-f64::MAX, f64::MAX)
-                }
+                0.0
             };
             command.efforts[j] = CuJointEffort::from_position(state.positions[j], effort);
         }
@@ -899,12 +897,11 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                         .clamp(old_v - max_acceleration * dt, old_v + max_acceleration * dt)
                         .clamp(-max_speed, max_speed);
                     let raw_next = current + v * dt;
+                    // On overflow stay where the last command was.
                     let next = if raw_next.is_finite() {
                         raw_next
-                    } else if raw_next.is_nan() {
-                        current
                     } else {
-                        raw_next.clamp(-f64::MAX, f64::MAX)
+                        current
                     };
                     command.positions[j] = self.last_command[j].with_si_value(next);
                     command.velocities[j] =

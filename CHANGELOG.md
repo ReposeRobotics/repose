@@ -101,14 +101,27 @@ may be breaking.
   the measured positions and the desired velocities and accelerations of the
   follower setpoint (gravity, Coriolis/centrifugal and inertial load). A
   non-finite or wrongly typed desired acceleration faults the controller and
-  falls back to the brake; without a model it is ignored. Hold and fault paths add gravity compensation at the measured
-  positions to the damping brake, so the arm no longer sags. A model that
+  falls back to the brake. Without a model a finite desired acceleration is
+  ignored and a non-finite one faults. Hold and fault paths add gravity
+  compensation at the measured positions to the damping brake, so the arm no longer sags. A model that
   cannot be evaluated faults the controller and falls back to the damping
   brake. Without a model, effort mode is the same PD law as before.
 - `repose-controller`: per-joint effort gains in RON, as an array of `N`
   numbers per gain (`"effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": 0.8}`).
 
 ### Fixed
+
+- `repose-controller`: `CuControllerTask::process` never emits a non-finite
+  field (`positions`, `velocities`, `efforts`, `max_tracking_error`) in
+  `CuJointCommandPayload` or stores non-finite state across cycles (`last_command`,
+  rate-limiter state, or frozen state). Measured states with any non-finite
+  position or velocity are treated as unusable (`Fault`, holding the last finite
+  command with zero effort without echoing the bad state); active setpoints
+  with any non-finite position, velocity, or acceleration fault across all
+  modes (holding the finite measured state with the effort brake, or the last
+  finite command otherwise); tracking-error and effort arithmetic guards against
+  overflow; and subsequent good cycles resume normal operation without latching
+  `NaN` or `±∞` in the rate limiter.
 
 - `repose-trajectory` / `repose-controller`: cancelling a trajectory no longer
   commands joint zero. After an empty trajectory the follower used to emit

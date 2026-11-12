@@ -63,14 +63,13 @@ use bincode::error::DecodeError;
 use bincode::error::EncodeError;
 use cu29::prelude::*;
 use cu29::units::si::acceleration::meter_per_second_squared;
-use cu29::units::si::f64::{Acceleration, Force, Time, Torque};
-use cu29::units::si::force::newton;
+use cu29::units::si::f64::{Acceleration, Time};
 use cu29::units::si::time::second;
-use cu29::units::si::torque::newton_meter;
 use repose_kinematics::CuChainInertia;
 use repose_kinematics::CuChainSpec;
 use repose_kinematics::CuInverseDynamicsInput;
 use repose_kinematics::CuJointAcceleration;
+pub use repose_kinematics::CuJointEffort;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointStatePayload;
 use repose_kinematics::CuJointVelocity;
@@ -102,40 +101,6 @@ pub enum CuControllerMode {
     /// bridge applies them as raw torque/force (plus its own gravity
     /// compensation, if it has one; see [`CuEffortModel`]).
     Effort,
-}
-
-/// A joint effort carries the physical unit of its joint (torque or force).
-#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Serialize, Deserialize, Reflect)]
-#[serde(rename_all = "snake_case")]
-pub enum CuJointEffort {
-    Revolute(Torque),
-    Prismatic(Force),
-    Fixed,
-}
-
-impl Default for CuJointEffort {
-    fn default() -> Self {
-        Self::Revolute(Torque::default())
-    }
-}
-
-impl CuJointEffort {
-    /// Builds an effort matching the kind of the given joint coordinate.
-    pub fn from_position(position: CuJointPosition, value: f64) -> Self {
-        match position {
-            CuJointPosition::Revolute(_) => Self::Revolute(Torque::new::<newton_meter>(value)),
-            CuJointPosition::Prismatic(_) => Self::Prismatic(Force::new::<newton>(value)),
-            CuJointPosition::Fixed => Self::Fixed,
-        }
-    }
-    /// Returns the effort in its joint's SI unit (N m or N; `0.0` for fixed).
-    pub fn si_value(self) -> f64 {
-        match self {
-            Self::Revolute(v) => v.get::<newton_meter>(),
-            Self::Prismatic(v) => v.get::<newton>(),
-            Self::Fixed => 0.0,
-        }
-    }
 }
 
 /// Controller status carried by [`CuJointCommandPayload`].
@@ -170,7 +135,7 @@ pub struct CuJointCommandPayload<const N: usize> {
     /// Command level the bridge is asked to apply.
     pub mode: CuControllerMode,
     /// Effort setpoints (only meaningful when `mode` is `Effort`).
-    #[serde(with = "crate::serde_arrays::effort_array")]
+    #[serde(with = "repose_kinematics::serde_arrays::effort_array")]
     pub efforts: [CuJointEffort; N],
 }
 
@@ -572,7 +537,7 @@ impl<const N: usize> CuControllerTask<N> {
             *out = [0.0; N];
             return Ok(());
         };
-        let mut efforts = [repose_kinematics::CuJointEffort::default(); N];
+        let mut efforts = [CuJointEffort::default(); N];
         match motion {
             Some((velocities, accelerations)) => {
                 let input = CuInverseDynamicsInput::new(
@@ -875,6 +840,39 @@ mod tests {
     use cu29::units::si::angular_acceleration::radian_per_second_squared;
     use cu29::units::si::angular_velocity::radian_per_second;
     use cu29::units::si::f64::{Angle, AngularAcceleration, AngularVelocity};
+
+    /// Pins the bincode wire encoding of `CuJointCommandPayload::efforts`: a
+    /// variant index (`Revolute` 0, `Prismatic` 1, `Fixed` 2) followed by the
+    /// SI value as a little-endian `f64` (none for `Fixed`). The field is last
+    /// in the payload, so its bytes are the tail of the encoded payload.
+    #[test]
+    fn command_effort_wire_encoding_is_pinned() {
+        let payload = CuJointCommandPayload::<3> {
+            efforts: [
+                CuJointEffort::from_position(CuJointPosition::Revolute(Angle::default()), 1.5),
+                CuJointEffort::from_position(CuJointPosition::Prismatic(Length::default()), -2.0),
+                CuJointEffort::Fixed,
+            ],
+            ..CuJointCommandPayload::default()
+        };
+        let mut expected = [0u8; 19];
+        expected[1..9].copy_from_slice(&1.5f64.to_le_bytes());
+        expected[9] = 1;
+        expected[10..18].copy_from_slice(&(-2.0f64).to_le_bytes());
+        expected[18] = 2;
+
+        let mut bytes = [0u8; 512];
+        let len =
+            bincode::encode_into_slice(&payload, &mut bytes, bincode::config::standard()).unwrap();
+        let bytes = &bytes[..len];
+        assert!(
+            bytes.ends_with(&expected),
+            "efforts encoding changed: {bytes:?}"
+        );
+        let (decoded, _): (CuJointCommandPayload<3>, usize) =
+            bincode::decode_from_slice(bytes, bincode::config::standard()).unwrap();
+        assert_eq!(decoded, payload);
+    }
 
     fn follow(pos: f64, status: CuFollowStatus) -> CuTrajectoryFollowOutput<2> {
         CuTrajectoryFollowOutput {
@@ -1210,7 +1208,7 @@ mod tests {
 
     fn arm_model_efforts_at(velocities: [f64; 2], accelerations: [f64; 2]) -> [f64; 2] {
         let accelerations = rad_s2(accelerations);
-        let mut out = [repose_kinematics::CuJointEffort::default(); 2];
+        let mut out = [CuJointEffort::default(); 2];
         arm_chain()
             .inverse_dynamics(
                 &arm_inertia(),
@@ -1223,7 +1221,7 @@ mod tests {
                 &mut out,
             )
             .unwrap();
-        out.map(repose_kinematics::CuJointEffort::si_value)
+        out.map(CuJointEffort::si_value)
     }
 
     fn assert_efforts(out: &CuJointCommandPayload<2>, expected: [f64; 2]) {

@@ -45,6 +45,19 @@ may be breaking.
   `{"type":"error","message":"..."}`, which the bridge reports as a `CuError`.
   The example sidecar serves every joint of the URDF (`joint1`..`jointN`).
 
+- `repose-controller`: `CuJointEffort` is now the same type as
+  `repose_kinematics::CuJointEffort`; the controller's own duplicate is
+  removed and re-exported from `repose-kinematics`, so a bridge or controller
+  payload effort is exactly what `inverse_dynamics` produces, with no
+  conversion. Variants (`Revolute(Torque)`, `Prismatic(Force)`, `Fixed`),
+  `from_position`, `si_value`, derives and the bincode/serde encoding are
+  unchanged, so the `CuJointCommandPayload::efforts` wire format and RON are
+  identical (now pinned by a test). `From<Torque>` and `From<Force>` are
+  gained. `repose_controller::CuJointEffort` still resolves, but it is a
+  re-export; code that implemented traits for it or named it through other
+  paths needs no change except where listed in
+  [docs/migration-0.9.md](docs/migration-0.9.md).
+
 ### Added
 
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint

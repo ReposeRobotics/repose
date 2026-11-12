@@ -28,7 +28,7 @@ compensation.
 - Rust 1.95 or newer and the Copper dependencies in `Cargo.toml`.
 - Python 3 with `mujoco` and `numpy` (`python -m pip install mujoco numpy`).
 - An expanded igus ReBeL URDF whose movable joints are named `joint1` through
-  `joint6`, ordered to match `repose_kinematics::igus_rebel_chain()`. The URDF supplies MuJoCo's
+  `joint6` (the sidecar serves every joint in the URDF as `joint1`..`jointN`; the RON graph and `CuMujocoSimBridge<N>` must use the same `N`), ordered to match `repose_kinematics::igus_rebel_chain()`. The URDF supplies MuJoCo's
   inertial model; verify that it describes the same robot as the Copper preset.
 
 From this directory, start the sidecar in one terminal:

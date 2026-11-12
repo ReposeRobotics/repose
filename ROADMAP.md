@@ -21,24 +21,43 @@ in that order.
 
 - `repose-kinematics`: `CuKinematicChain<N>` FK, space/body Jacobians,
   manipulability, DLS and differential IK with singularity/joint-limit damping,
-  FK/IK/servo `CuTask`s, igus ReBeL preset.
+  FK/IK/servo `CuTask`s, igus ReBeL preset. Serial-chain rigid-body dynamics
+  (`v0.8.4`): `CuChainInertia<N>`, recursive Newton-Euler `inverse_dynamics`,
+  and `gravity_compensation`.
 - `repose-collision`: fixed-capacity sphere/capsule model, signed-distance queries,
-  self/environment checking, `CuCollisionCheckTask<N>`.
+  self/environment checking, `CuCollisionCheckTask<N>`, the versioned
+  `CuPlanningScene`, and the `CuCollisionMonitor` transition policy (`v0.8.3`;
+  not yet wired into execution, see Step 3).
 - `repose-robot-description`: startup URDF serial-chain and SRDF group/exclusion/
-  state import into fixed-size kinematic and collision models.
+  state import into fixed-size kinematic and collision models; URDF
+  `<inertial>` import into `CuChainInertia<N>` (`v0.8.4`).
 - `repose-motion-planning`: planner-agnostic `CuJointPlanner` trait, request/path
   payloads with explicit `CuPlanStatus`, shared scene validity checks, the
   generic anytime `CuJointPlannerTask<P, N>`, and built-in planners:
   RRT-Connect and PRM (sampling), A* lattice (search), gradient path
-  optimizer and STOMP (optimization), direct joint line.
+  optimizer and STOMP (optimization), direct joint line. Pose-goal and
+  Cartesian planning tasks (`v0.8.0`) and path constraints honoured by every
+  planner (`v0.8.4`).
 - `repose-joint-rrt-star`: sampling-based RRT* implementing `CuJointPlanner`, with
   deterministic `CuRng` seeding, informed pruning, rewiring, and shortcutting.
 - `repose-trajectory`: fixed-capacity trajectory payloads, profile timing, per-waypoint
   Cartesian TCP zones, C² spline geometry, quintic interpolation, and S-curve
   joint jerk bounds; follower preemption and empty-trajectory cancellation.
+- `repose-controller`: `CuControllerTask<N>` with position, velocity, and
+  effort modes, tracking-error fault, state watchdog, and rate limiting
+  (see Release 0.3).
+- `repose-io`: digital IO payloads and the IO-driven `CuGripperTask<IN, OUT>`.
+- `repose-robot-interface`: vendor-neutral bridge contract, with the standard
+  channel set and session lifecycle payloads (`v0.7.1`).
 - `repose-mujoco-sim`: `CuBridge` to a MuJoCo sidecar over TCP/JSON carrying
-  `CuJointPositionsPayload<6>` both ways (released in `v0.2.1`); the local
-  playground closes the plan → follow → sim → feedback loop.
+  `CuJointCommandPayload<6>` out and `CuJointStatePayload<6>` back (first
+  released in `v0.2.1`); `examples/mujoco_rebel` and the local playground
+  close the plan → follow → sim → feedback loop.
+- `repose`: umbrella crate re-exporting every crate, with the
+  `repose::planners` registry (`v0.7.1`), simulator-free library examples
+  (`v0.8.4`), and Divan benchmarks tracked by CodSpeed.
+- Checks beyond `just pr-check`: cross-process determinism, bare-metal
+  builds, and IK fuzzing (`v0.8.0`–`v0.8.3`).
 - All crates pass `just pr-check` and are published at
   https://github.com/ReposeRobotics/repose.
 
@@ -91,8 +110,9 @@ Controller-interface completion, building on `v0.2.2`:
 2. **Planning and simulated robot execution (implemented; see v0.2.2, v0.8.0).**
    The planning scene, scene snapshots and revision semantics, motion planning
    and planners, simulated execution, the unified robot controller, pose-goal
-   planning, Cartesian planning with TCP zones, and the benchmark harness are
-   all shipped (latest: `v0.8.0`). Historical build order:
+   planning, and Cartesian planning with TCP zones are all shipped (latest:
+   `v0.8.0`). Timing benchmarks are shipped; the success-rate and path-cost
+   report is not. Historical build order:
    - A versioned, fixed-capacity planning scene shared by collision checking and
      planner tasks: stable object IDs, obstacle add/update/remove, attached
      objects with link-relative transforms, and explicit collision exclusions.
@@ -120,10 +140,12 @@ Controller-interface completion, building on `v0.2.2`:
      sees: simulators (`repose-mujoco-sim`) and hardware (`repose-igus-cri`, Step 4)
      implement the same `joint_command`/`joint_state` channels, so swapping
      sim for a real robot is a RON graph change, not an app change. Generalize
-     `repose-mujoco-sim` from fixed `N = 6` as the first consumer.
+     `repose-mujoco-sim` from fixed `N = 6` as the first consumer (not done:
+     the bridge is still fixed at `N = 6`).
      Shape (per Copper component design): a new crate
-     `components/tasks/repose_controller` holding the payloads and a
-     `CuControllerTask<N>` — a multi-input `CuTask` (follower setpoint +
+     `components/tasks/repose_controller` holding the command payload and a
+     `CuControllerTask<N>` (`CuJointStatePayload<N>` lives in
+     `repose-kinematics`) — a multi-input `CuTask` (follower setpoint +
      measured state in, unified command out), `Reflect` + `Freezable`
      (last command, status, watchdog state round-trip for replay), zero
      hot-path allocation, `Tov` propagated from the state input. Bridges stay
@@ -145,13 +167,22 @@ Controller-interface completion, building on `v0.2.2`:
    attaches an object, and plans joint, pose-goal, and Cartesian requests
    consistently against the selected scene revision, plus the Validation Plan
    checks.
-3. **Execution collision monitoring (next).** Monitor the follower's setpoints
-   against the live planning scene during execution and abort/hold with defined
-   stop/hold reporting when a violation appears. This serves the existing
+3. **Execution collision monitoring (policy landed in `v0.8.3`; integration
+   next).** Monitor the follower's setpoints against the live planning scene
+   during execution and abort/hold with defined stop/hold reporting when a
+   violation appears. This serves the existing
    plan → execute stack and is distinct from geometric validation before
    execution: plans are still checked upfront; monitoring runs while they
    execute. It defines the scene-revision-during-execution semantics (the
    roadmap's highest-risk item).
+   Done: `CuCollisionMonitor` / `CuMonitorTransition` in `repose-collision`,
+   an allocation-free policy that turns a caller's per-cycle check result into
+   one event per collision episode, plus its overhead benchmark.
+   Remaining: a task that checks follower setpoints against the live scene and
+   feeds the monitor; abort/hold on a violation with a reported status; the
+   scene-revision-during-execution semantics (trajectories carry no scene
+   revision today); and an end-to-end demonstration. No task, RON graph, or
+   example uses the monitor yet.
 4. **Real-time servoing (deferred).** Harden `CuServoTask<N>` into a production
    servo loop — singularity/limit behaviour under load, latency/allocation
    budgets enforced by tests — only when a pose-stream consumer exists
@@ -166,6 +197,13 @@ Controller-interface completion, building on `v0.2.2`:
    then closed-chain mechanisms, then dynamics and torque-level control. No
    Phase 1–4 API may be designed so these become impossible; none of this
    starts before Step 4 is done.
+   Already shipped for serial chains, ahead of this order: PD effort commands
+   in `CuControllerTask<N>` (`v0.2.3`) and rigid-body inverse dynamics with
+   gravity compensation in `repose-kinematics` (`v0.8.4`), which no task uses
+   yet. In progress: model-based effort control in `CuControllerTask<N>`
+   (per-joint gains, inverse-dynamics feedforward, gravity-compensated hold;
+   issue #1). Not started: tree/branched and closed-chain structures and
+   their dynamics.
 7. **1.0 stabilization and publishing.** Rustdoc and doctests on every public
    item; semver commitment; a stated compatibility policy for RON
    configuration schemas. Publishing is pre-wired so this step is a flip, not
@@ -182,8 +220,8 @@ Controller-interface completion, building on `v0.2.2`:
 
 A phase counts as done only when all four hold:
 
-1. `just pr-check` passes: fmt, `std` and `no_std` clippy with denied
-   warnings, nextest, and doctests.
+1. `just pr-check` passes: fmt, `std`, `no_std`, and reflect clippy with
+   denied warnings, nextest, doctests, and the SemVer check.
 2. The phase's public API is documented and semver-stable in intent.
 3. Packaging metadata (repository, license, keywords, categories) is correct
    and crates.io-ready.
@@ -209,13 +247,16 @@ Passing tests alone does not close a phase.
   graph and RON policies are the model.
 - **No early generality.** Branched/closed chains and dynamics appear only in
   Step 6, on that step's terms — not as additions to earlier phases.
+  (Serial-chain dynamics shipped early in `v0.8.4`; see Step 6.)
 
 ## Risks / Open Questions
 
 - Highest risk: scene revision and invalidation semantics across anytime planning
   and later execution monitoring. Define ownership and stale-result handling
-  before freezing the scene/request/result contracts.
+  before freezing the scene/request/result contracts. Planning requests and
+  results carry the scene revision; execution does not yet (Step 3).
 - Undecided: additional robot presets beyond the igus ReBeL (added only when a
   bridge or user needs one); the second bridge target after `repose-igus-cri`
-  (decided by hardware access); whether benchmark results ship as a report
-  crate or as local demonstrations.
+  (decided by hardware access); whether the planner success-rate and
+  path-cost report ships as a report crate or as local demonstrations
+  (timing results ship through CodSpeed and the `benchmark-data` branch).

@@ -11,7 +11,8 @@
 //! inference, and a `Fault` cycle may or may not have. Every observation and every raw action is in the
 //! log, so a recorded run shows whether
 //! the model or the downstream execution layer caused a given motion.
-//! Turning the raw action into joint setpoints is a separate task.
+//! [`CuJointActionTask`] turns the raw action into the limited joint
+//! setpoint that `repose_controller::CuControllerTask` consumes.
 //!
 //! This crate is `std`-only: a policy runtime is a host component. There is
 //! no `no_std` surface and no `#![no_std]` attribute; the `std` feature

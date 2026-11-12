@@ -84,8 +84,10 @@ may be breaking.
   or `ErrorEmptyTrajectory` status. A robot that is not `Ready` drops the
   target and holds the measured position, so motion after a fault or an
   emergency stop restarts from where the arm is. The previous target
-  round-trips through `Freezable`. The setpoint carries positions only: run
-  the controller in `position` or `effort` mode.
+  round-trips through `Freezable`. With the optional `period` (the control
+  cycle period) the setpoint velocity is the target change per cycle, which
+  a controller in `velocity` mode executes; without it the setpoint velocity
+  is zero and the controller must run in `position` or `effort` mode.
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

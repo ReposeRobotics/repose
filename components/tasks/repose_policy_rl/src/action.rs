@@ -9,6 +9,8 @@ use bincode::enc::Encoder;
 use bincode::error::DecodeError;
 use bincode::error::EncodeError;
 use cu29::prelude::*;
+use cu29::units::si::f64::Time;
+use cu29::units::si::time::second;
 use repose_kinematics::CuChainSpec;
 use repose_kinematics::CuJointAcceleration;
 use repose_kinematics::CuJointPosition;
@@ -117,6 +119,7 @@ pub enum CuJointActionKind {
 ///     "scale": 0.05,                     // dimensionless, or one value per joint
 ///     "default_positions": [{"revolute": 0.0}], // used by position_absolute
 ///     "max_step": 0.03,                  // optional; largest target change per cycle
+///     "period": 0.02,                    // optional; s, enables the setpoint velocity
 /// }
 /// ```
 ///
@@ -150,6 +153,12 @@ pub struct CuJointActionParams<const N: usize> {
     /// disables the step limit (the controller's own limits still apply).
     #[serde(default)]
     pub max_step: Option<f64>,
+    /// Control cycle period (`1 / rate_target_hz`). When set, the setpoint
+    /// velocity is the target change of the cycle divided by this period,
+    /// which is what a controller in `velocity` mode executes. `None` emits
+    /// zero setpoint velocity (`position` and `effort` modes only).
+    #[serde(default)]
+    pub period: Option<Time>,
 }
 
 impl<const N: usize> Default for CuJointActionParams<N> {
@@ -162,6 +171,7 @@ impl<const N: usize> Default for CuJointActionParams<N> {
             scale: default_scale(),
             default_positions: [CuJointPosition::default(); N],
             max_step: None,
+            period: None,
         }
     }
 }
@@ -197,6 +207,14 @@ impl<const N: usize> CuJointActionParams<N> {
                 "repose-policy-rl: 'max_step' must be positive and finite",
             ));
         }
+        if let Some(period) = self.period {
+            let s = period.get::<second>();
+            if !s.is_finite() || s <= 0.0 {
+                return Err(CuError::from(
+                    "repose-policy-rl: 'period' must be positive and finite",
+                ));
+            }
+        }
         if self.kind == CuJointActionKind::PositionAbsolute {
             for (j, pos) in self.default_positions.iter().enumerate() {
                 let limits = chain.joints()[j].limits;
@@ -220,9 +238,16 @@ impl<const N: usize> CuJointActionParams<N> {
 /// with zero velocity and acceleration; its `Tov` is propagated from the
 /// joint-state input.
 ///
-/// The setpoint carries a position target only, so the controller must run
-/// in `position` or `effort` mode. In `velocity` mode the zero setpoint
-/// velocity is what the bridge would execute, and the arm would not move.
+/// Without `period` the setpoint carries a position target only, so the
+/// controller must run in `position` or `effort` mode: in `velocity` mode
+/// the zero setpoint velocity is what the bridge would execute, and the arm
+/// would not move. With `period` set to the control cycle period, the
+/// setpoint velocity is the target change of the cycle divided by the
+/// period, so a controller in `velocity` mode moves the arm by exactly that
+/// change. Every hold case, and a held delta, has zero velocity. With a
+/// policy `decimation` above 1 a delta is therefore executed in the one
+/// cycle it is inferred in, as in `position` mode; bound its speed with
+/// `max_step` (`max_step / period`).
 ///
 /// Per cycle, for a usable (`Fresh` or `Held`) action and a `Ready` robot:
 ///
@@ -295,7 +320,7 @@ impl<const N: usize> CuJointActionTask<N> {
         &self.params
     }
 
-    /// Position-only setpoint: zero velocity and acceleration carrying each
+    /// Setpoint at rest: zero velocity and acceleration carrying each
     /// joint's unit kind.
     fn setpoint(
         positions: [CuJointPosition; N],
@@ -438,9 +463,18 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
             output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
             return Ok(());
         }
+        let mut setpoint = Self::setpoint(target, CuFollowStatus::Running);
+        if let Some(period) = self.params.period {
+            let period = period.get::<second>();
+            for j in 0..N {
+                let change = target[j].si_value() - reference[j].si_value();
+                setpoint.velocities[j] =
+                    CuJointVelocity::from_coordinate(target[j], change / period);
+            }
+        }
         self.previous_target = target;
         self.has_target = true;
-        output.set_payload(Self::setpoint(target, CuFollowStatus::Running));
+        output.set_payload(setpoint);
         Ok(())
     }
 }
@@ -493,6 +527,7 @@ mod tests {
             scale: [1.0; N],
             default_positions: [CuJointPosition::default(); N],
             max_step: None,
+            period: None,
         }
     }
 
@@ -937,6 +972,57 @@ mod tests {
             Some(state(0.0)),
         );
         assert_si(&out, 1.0);
+    }
+
+    #[test]
+    fn period_sets_the_setpoint_velocity_from_the_target_change() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+        p.scale = [0.05; 2];
+        p.period = Some(Time::new::<second>(0.02));
+        let mut task = CuJointActionTask::from_params(p).unwrap();
+        // 0.05 rad in one 0.02 s cycle is 2.5 rad/s.
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(state(0.10)),
+        );
+        assert_si(&out, 0.15);
+        assert!(
+            out.velocities
+                .iter()
+                .all(|v| (v.si_value() - 2.5).abs() < 1e-9)
+        );
+        // A held delta keeps the target: no change, zero velocity.
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Held)),
+            Some(state(0.10)),
+        );
+        assert_si(&out, 0.15);
+        assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
+        // A hold case has zero velocity too.
+        let out = run(&mut task, None, Some(state(0.10)));
+        assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
+        // Integrating the velocity over the cycles reproduces the target.
+        let mut integrated = 0.15;
+        for _ in 0..5 {
+            let out = run(
+                &mut task,
+                Some(action(-0.5, CuPolicyStatus::Fresh)),
+                Some(state(0.10)),
+            );
+            integrated += out.velocities[0].si_value() * 0.02;
+            assert!((integrated - out.positions[0].si_value()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn period_must_be_positive_and_finite() {
+        for bad in [0.0, -0.02, f64::NAN] {
+            let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+            p.period = Some(Time::new::<second>(bad));
+            assert!(CuJointActionTask::from_params(p).is_err(), "{bad}");
+        }
     }
 
     #[test]

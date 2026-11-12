@@ -74,6 +74,19 @@ may be breaking.
   14 allocations per `process` call with the `linear_24_6` fixture, measured
   by `tests/alloc.rs`, which asserts at most 32 on every call. Other models
   allocate differently; measure yours the same way.
+- `repose-policy-rl`: `CuJointActionTask<N>` turns a raw `CuPolicyAction<N>` into the `CuTrajectoryFollowOutput<N>` the
+  controller already consumes. It applies `position_delta` (an offset from
+  the measured position) or `position_absolute` (from typed default positions)
+  actions with a dimensionless scalar or per-joint `scale`, an optional
+  per-cycle `max_step`, and clamping to the configured chain's joint limits.
+  Idle, faulted, and non-finite inputs, a robot that is not `Ready`, and a
+  joint state whose units do not match the chain drop the target and hold
+  the measured position with `Idle` or `ErrorEmptyTrajectory` status, so
+  motion after any hold restarts from where the arm is. The previous target
+  round-trips through `Freezable`. With the optional `period` (the control
+  cycle period) the setpoint velocity is the target change per cycle, which
+  a controller in `velocity` mode executes; without it the setpoint velocity
+  is zero and the controller must run in `position` or `effort` mode.
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

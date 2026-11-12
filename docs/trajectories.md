@@ -32,6 +32,12 @@ type parameter to the generated payload capacity. The default follower
 interpolation remains linear. Interpolation mode is included in newly frozen follower state;
 earlier frozen snapshots need migration.
 
+The follower setpoint also carries the desired joint acceleration, the analytic
+derivative of the emitted velocity for the active interpolation (see
+`CuTrajectoryPayload::sample_with_acceleration`); it is zero while the
+setpoint is held, and the effort controller feeds it forward through the
+inertial term.
+
 Timing is conservative and automatic. Finite joint jerk bounds apply to the
 S-curve profile with quintic execution. Collision and zone checks apply to the geometric spline; the reconstructed
 execution curve still needs a separate collision and zone recheck. Checks are discrete and depend on their configured

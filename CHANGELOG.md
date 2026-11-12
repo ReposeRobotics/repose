@@ -17,18 +17,35 @@ may be breaking.
   `kv = 0.8` on every joint). RON configs keep working: a single number for
   `kp` or `kv` still means that gain on every joint. The controller's frozen
   state now stores `2 * N` gain values instead of two, so keyframes of
-  `CuControllerTask` written by earlier versions do not thaw. See
+  `CuControllerTask` written by earlier versions are not supported (frozen
+  layouts are not versioned, so thawing one is not detected). See
+  [docs/migration-0.9.md](docs/migration-0.9.md).
+
+- `repose-trajectory`: `CuTrajectoryFollowOutput<N>` gains an
+  `accelerations: [CuJointAcceleration; N]` field (between `velocities` and
+  `status`), so the follower setpoint payload encoding changes. Code that
+  builds the struct in full must set it (`CuJointAcceleration::from_coordinate`
+  per joint, or `..Default::default()`); logs of the setpoint written by
+  earlier versions no longer decode. See
   [docs/migration-0.9.md](docs/migration-0.9.md).
 
 ### Added
 
+- `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
+  accelerations from the active interpolation, analytically and without
+  allocation: the derivative of the emitted velocity (constant per segment for
+  linear, the Hermite second derivative for cubic, the quintic's acceleration
+  for quintic). Held setpoints (idle, before the start, from the end, single
+  point) report zero; at an interior knot the segment ending there is used.
+  The same sampling is public as `CuTrajectoryPayload::sample_with_acceleration`.
 - `repose-controller`: model-based effort mode. With the optional
   `effort_model` parameter (`CuEffortModel<N>`: a chain preset or inline
   chain, its `CuChainInertia<N>`, and a gravity vector), effort mode adds
   inverse-dynamics feedforward to the PD feedback: the model is evaluated at
-  the measured positions, the desired velocities, and zero acceleration
-  (gravity plus Coriolis/centrifugal load; the follower setpoint carries no
-  acceleration). Hold and fault paths add gravity compensation at the measured
+  the measured positions and the desired velocities and accelerations of the
+  follower setpoint (gravity, Coriolis/centrifugal and inertial load). A
+  non-finite or wrongly typed desired acceleration faults the controller and
+  falls back to the brake; without a model it is ignored. Hold and fault paths add gravity compensation at the measured
   positions to the damping brake, so the arm no longer sags. A model that
   cannot be evaluated faults the controller and falls back to the damping
   brake. Without a model, effort mode is the same PD law as before.

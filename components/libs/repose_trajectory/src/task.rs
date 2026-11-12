@@ -2,7 +2,7 @@
 //!
 //! [`CuFollowTrajectoryTask`] adopts the latest non-empty trajectory from its
 //! input, samples it at the elapsed time since adoption, and emits joint
-//! positions, velocities, and a [`CuFollowStatus`]. A differing trajectory
+//! positions, velocities, accelerations, and a [`CuFollowStatus`]. A differing trajectory
 //! preempts the running one; an empty trajectory cancels it.
 
 use crate::CuTrajectoryInterpolation;
@@ -17,6 +17,7 @@ use bincode::error::EncodeError;
 use cu29::prelude::*;
 use cu29::units::si::f64::Time;
 use cu29::units::si::time::second;
+use repose_kinematics::CuJointAcceleration;
 use repose_kinematics::CuJointPosition;
 use repose_kinematics::CuJointVelocity;
 use serde::Deserialize;
@@ -50,6 +51,12 @@ pub struct CuTrajectoryFollowOutput<const N: usize> {
     pub positions: [CuJointPosition; N],
     #[serde(with = "repose_kinematics::serde_arrays::velocity_array")]
     pub velocities: [CuJointVelocity; N],
+    /// Desired joint accelerations: the analytic derivative of `velocities`
+    /// for the active interpolation, zero while a trajectory is held (idle,
+    /// empty, before its start and from its end). See
+    /// [`CuTrajectoryPayload::sample_with_acceleration`].
+    #[serde(with = "repose_kinematics::serde_arrays::acceleration_array")]
+    pub accelerations: [CuJointAcceleration; N],
     pub status: CuFollowStatus,
 }
 
@@ -58,6 +65,7 @@ impl<const N: usize> Default for CuTrajectoryFollowOutput<N> {
         Self {
             positions: [CuJointPosition::default(); N],
             velocities: [CuJointVelocity::default(); N],
+            accelerations: [CuJointAcceleration::default(); N],
             status: CuFollowStatus::default(),
         }
     }
@@ -201,12 +209,14 @@ impl<const N: usize, const MAX_POINTS: usize> CuTask for CuFollowTrajectoryTask<
         let elapsed_s = elapsed.as_nanos() as f64 / 1_000_000_000.0;
         let mut positions = [CuJointPosition::default(); N];
         let mut velocities = [CuJointVelocity::default(); N];
+        let mut accelerations = [CuJointAcceleration::default(); N];
         let interpolation = self.params.interpolation.unwrap_or(stored.interpolation);
-        stored.sample_with(
+        stored.sample_with_acceleration(
             interpolation,
             Time::new::<second>(elapsed_s),
             &mut positions,
             &mut velocities,
+            &mut accelerations,
         )?;
         let status = if elapsed_s >= stored.duration().get::<second>() {
             CuFollowStatus::Finished
@@ -216,6 +226,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTask for CuFollowTrajectoryTask<
         output.set_payload(CuTrajectoryFollowOutput {
             positions,
             velocities,
+            accelerations,
             status,
         });
         Ok(())
@@ -331,6 +342,43 @@ mod tests {
         let out = output.payload().unwrap();
         assert!((out.positions[0].si_value() - 0.0).abs() < 1e-12);
         assert!((out.velocities[0].si_value() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn follower_emits_analytic_acceleration_and_zero_when_held() {
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut task = CuFollowTrajectoryTask::<1>::from_params(cubic()).unwrap();
+        let mut output = CuMsg::new(None);
+        task.process(&ctx, &CuMsg::new(None), &mut output).unwrap();
+        assert_eq!(output.payload().unwrap().accelerations[0].si_value(), 0.0);
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 100), &mut output)
+            .unwrap();
+        // Hold before the start: zero acceleration.
+        assert_eq!(output.payload().unwrap().accelerations[0].si_value(), 0.0);
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 101), &mut output)
+            .unwrap();
+        // Cubic Hermite 0 -> 2 over 2 s with v0 = 0, v1 = 4 has b = -2 and
+        // c = 4, so qdd(u = 0.5) = (2b + 6c u) / T^2 = 2.0.
+        let out = output.payload().unwrap();
+        assert_eq!(out.status, CuFollowStatus::Running);
+        assert!((out.accelerations[0].si_value() - 2.0).abs() < 1e-12);
+        assert!(matches!(
+            out.accelerations[0],
+            CuJointAcceleration::Revolute(_)
+        ));
+        task.process(&ctx, &msg_at(Some(two_point_traj()), 110), &mut output)
+            .unwrap();
+        let out = output.payload().unwrap();
+        assert_eq!(out.status, CuFollowStatus::Finished);
+        assert_eq!(out.accelerations[0].si_value(), 0.0);
+        // Empty trajectory error output carries no acceleration.
+        task.process(
+            &ctx,
+            &msg_at(Some(CuTrajectoryPayload::new()), 111),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.payload().unwrap().accelerations[0].si_value(), 0.0);
     }
 
     #[test]

@@ -11,8 +11,9 @@
 //!
 //! What this does not model: joint friction, gear and rotor inertia, torque
 //! limits, sensor noise, latency, and model error. The controller's model is
-//! the plant's model, so the feedforward is exact up to the acceleration term
-//! the controller does not have. The link inertias are hand estimates, not
+//! the plant's model, so the feedforward is exact when the setpoint carries
+//! the reference acceleration and misses only the inertial term when it does
+//! not (the `acceleration feedforward` comparison below). The link inertias are hand estimates, not
 //! igus data (see [`rebel_inertia`]).
 
 use cu29::prelude::*;
@@ -177,18 +178,26 @@ fn forward_dynamics(
     solve(mass, rhs)
 }
 
-/// Quintic rest-to-rest move from `START` to `GOAL`, then a hold.
-fn reference(t: f64) -> ([f64; N], [f64; N]) {
+/// Quintic rest-to-rest move from `START` to `GOAL`, then a hold:
+/// positions, velocities and accelerations.
+fn reference(t: f64) -> ([f64; N], [f64; N], [f64; N]) {
     let s = (t / MOVE_TIME).clamp(0.0, 1.0);
     let blend = s * s * s * (10.0 - 15.0 * s + 6.0 * s * s);
     let rate = 30.0 * s * s * (1.0 - s) * (1.0 - s) / MOVE_TIME;
+    let curvature = if t > 0.0 && t < MOVE_TIME {
+        60.0 * s * (1.0 - s) * (1.0 - 2.0 * s) / (MOVE_TIME * MOVE_TIME)
+    } else {
+        0.0
+    };
     let mut q = [0.0; N];
     let mut qd = [0.0; N];
+    let mut qdd = [0.0; N];
     for j in 0..N {
         q[j] = START[j] + (GOAL[j] - START[j]) * blend;
         qd[j] = (GOAL[j] - START[j]) * rate;
+        qdd[j] = (GOAL[j] - START[j]) * curvature;
     }
-    (q, qd)
+    (q, qd, qdd)
 }
 
 #[derive(Debug)]
@@ -204,7 +213,19 @@ struct Report {
     never_faulted: bool,
 }
 
-fn simulate(gains: CuEffortGains<N>, with_model: bool) -> Report {
+/// What the controller is given to feed forward.
+#[derive(Clone, Copy, PartialEq)]
+enum Feedforward {
+    /// Pure PD, no model.
+    None,
+    /// Model, but the setpoint carries zero acceleration (the old follower).
+    ModelZeroAcceleration,
+    /// Model and the reference acceleration in the setpoint.
+    ModelWithAcceleration,
+}
+
+fn simulate(gains: CuEffortGains<N>, feedforward: Feedforward) -> Report {
+    let with_model = feedforward != Feedforward::None;
     let chain = igus_rebel_chain();
     let inertia = rebel_inertia();
     let mut task = CuControllerTask::<N>::from_params(CuControllerParams {
@@ -227,10 +248,16 @@ fn simulate(gains: CuEffortGains<N>, with_model: bool) -> Report {
     let mut sum_squares = 0.0;
     let mut never_faulted = true;
     for step in 0..steps {
-        let (q_des, qd_des) = reference(step as f64 * CONTROL_DT);
+        let (q_des, qd_des, qdd_des) = reference(step as f64 * CONTROL_DT);
+        let qdd_sent = if feedforward == Feedforward::ModelWithAcceleration {
+            qdd_des
+        } else {
+            [0.0; N]
+        };
         let setpoint = CuMsg::new(Some(CuTrajectoryFollowOutput {
             positions: positions(&q_des),
             velocities: velocities(&qd_des),
+            accelerations: accelerations(&qdd_sent),
             status: CuFollowStatus::Running,
         }));
         let state = CuMsg::new(Some(CuJointStatePayload {
@@ -284,8 +311,8 @@ const PER_JOINT: CuEffortGains<N> = CuEffortGains {
 
 #[test]
 fn feedforward_removes_gravity_sag_at_equal_gains() {
-    let pd = simulate(PER_JOINT, false);
-    let model = simulate(PER_JOINT, true);
+    let pd = simulate(PER_JOINT, Feedforward::None);
+    let model = simulate(PER_JOINT, Feedforward::ModelZeroAcceleration);
     let largest = |errors: &[f64; N]| errors.iter().copied().fold(0.0f64, f64::max);
 
     assert!(pd.never_faulted && model.never_faulted);
@@ -293,7 +320,8 @@ fn feedforward_removes_gravity_sag_at_equal_gains() {
     // joint 3 (6.6 N m against kp = 100).
     assert!(largest(&pd.final_error) > 0.03, "{pd:?}");
     // With the model the hold error is gone and the error during the move,
-    // left by the acceleration term that is not fed forward, is far smaller.
+    // left by the acceleration term when the setpoint carries none, is far
+    // smaller.
     assert!(largest(&model.final_error) < 1e-3, "{model:?}");
     assert!(model.max_error < pd.max_error / 5.0, "{model:?} vs {pd:?}");
     assert!(model.rms_error < pd.rms_error / 5.0, "{model:?} vs {pd:?}");
@@ -301,7 +329,7 @@ fn feedforward_removes_gravity_sag_at_equal_gains() {
 
 #[test]
 fn model_based_per_joint_control_beats_scalar_pd() {
-    let model = simulate(PER_JOINT, true);
+    let model = simulate(PER_JOINT, Feedforward::ModelWithAcceleration);
     assert!(model.never_faulted);
     assert!(model.max_error < 0.02, "{model:?}");
 
@@ -309,14 +337,47 @@ fn model_based_per_joint_control_beats_scalar_pd() {
     // damping is beyond the 1 kHz zero-order-hold limit `kv * T / I < 2` of
     // the last wrist joint (I is about 1.8e-4 kg m² in this model), so the
     // loop diverges.
-    let default_pd = simulate(CuEffortGains::default(), false);
+    let default_pd = simulate(CuEffortGains::default(), Feedforward::None);
     assert!(default_pd.max_error.is_infinite(), "{default_pd:?}");
 
     // A scalar pair the wrist tolerates is far too soft for the shoulder.
-    let soft_pd = simulate(CuEffortGains::uniform(20.0, 0.3), false);
+    let soft_pd = simulate(CuEffortGains::uniform(20.0, 0.3), Feedforward::None);
     assert!(soft_pd.never_faulted);
     assert!(
         model.max_error < soft_pd.max_error / 50.0,
         "{model:?} vs {soft_pd:?}"
     );
+}
+
+#[test]
+fn acceleration_feedforward_cuts_tracking_error() {
+    let pd = simulate(PER_JOINT, Feedforward::None);
+    let without = simulate(PER_JOINT, Feedforward::ModelZeroAcceleration);
+    let with = simulate(PER_JOINT, Feedforward::ModelWithAcceleration);
+    let largest = |errors: &[f64; N]| errors.iter().copied().fold(0.0f64, f64::max);
+    for (name, r) in [
+        ("pure PD", &pd),
+        ("model, zero acceleration", &without),
+        ("model + acceleration", &with),
+    ] {
+        println!(
+            "{name:<26} max {:.3e} rad  rms {:.3e} rad  final {:.3e} rad",
+            r.max_error,
+            r.rms_error,
+            largest(&r.final_error)
+        );
+    }
+    assert!(pd.never_faulted && without.never_faulted && with.never_faulted);
+    // The plant is the controller's model, so the full feedforward leaves only
+    // the 1 kHz zero-order-hold and integration error.
+    assert!(
+        with.max_error < without.max_error / 20.0,
+        "{with:?} vs {without:?}"
+    );
+    assert!(
+        with.rms_error < without.rms_error / 20.0,
+        "{with:?} vs {without:?}"
+    );
+    assert!(with.max_error < 1e-3, "{with:?}");
+    assert!(largest(&with.final_error) < 1e-3, "{with:?}");
 }

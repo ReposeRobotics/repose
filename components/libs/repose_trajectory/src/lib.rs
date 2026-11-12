@@ -73,7 +73,8 @@ pub struct CuTrajectoryPoint<const N: usize> {
     pub velocities: [CuJointVelocity; N],
     /// Joint accelerations (`rad/s^2` revolute, `m/s^2` prismatic).
     ///
-    /// Only [`CuTrajectoryPayload::sample_quintic`] reads them; trajectories
+    /// Only quintic sampling ([`CuTrajectoryPayload::sample_quintic`]) reads
+    /// them; the other kinds derive acceleration from velocities. Trajectories
     /// that rest at, or have zero acceleration at, every waypoint store zero.
     #[serde(with = "repose_kinematics::serde_arrays::acceleration_array")]
     pub accelerations: [CuJointAcceleration; N],
@@ -257,6 +258,47 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         }
     }
 
+    /// Samples at `t` like [`sample_with`](Self::sample_with) and also writes
+    /// the desired joint accelerations in place.
+    ///
+    /// Acceleration is the analytic time derivative of the velocity that the
+    /// chosen interpolation emits, never a finite difference:
+    /// - [`Linear`](CuTrajectoryInterpolation::Linear): the segment's constant
+    ///   `(v1 - v0) / dt` (the derivative of the interpolated velocity).
+    /// - [`Cubic`](CuTrajectoryInterpolation::Cubic): the Hermite segment's
+    ///   second derivative, linear in time within a segment.
+    /// - [`Quintic`](CuTrajectoryInterpolation::Quintic): the quintic's
+    ///   acceleration, which interpolates the stored knot accelerations and is
+    ///   continuous across knots.
+    ///
+    /// At an interior knot the segment ending there is used (the left-sided
+    /// value), so linear and cubic accelerations may jump across a knot. Held
+    /// endpoints (`t` at or before the first knot, at or after the last, or a
+    /// single-point trajectory) report zero acceleration: the setpoint is
+    /// stationary there, whatever the stored endpoint accelerations are. The
+    /// units follow the position kind of each joint.
+    pub fn sample_with_acceleration(
+        &self,
+        interpolation: CuTrajectoryInterpolation,
+        t: Time,
+        out_positions: &mut [CuJointPosition; N],
+        out_velocities: &mut [CuJointVelocity; N],
+        out_accelerations: &mut [CuJointAcceleration; N],
+    ) -> CuResult<()> {
+        let acc = Some(out_accelerations);
+        match interpolation {
+            CuTrajectoryInterpolation::Linear => {
+                self.sample_linear_impl(t, out_positions, out_velocities, acc)
+            }
+            CuTrajectoryInterpolation::Cubic => {
+                self.sample_cubic_impl(t, out_positions, out_velocities, acc)
+            }
+            CuTrajectoryInterpolation::Quintic => {
+                self.sample_quintic_impl(t, out_positions, out_velocities, acc)
+            }
+        }
+    }
+
     /// Samples joint positions and velocities at `t` in place by linear
     /// interpolation between the bracketing waypoints.
     ///
@@ -269,12 +311,23 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         out_positions: &mut [CuJointPosition; N],
         out_velocities: &mut [CuJointVelocity; N],
     ) -> CuResult<()> {
+        self.sample_linear_impl(t, out_positions, out_velocities, None)
+    }
+
+    fn sample_linear_impl(
+        &self,
+        t: Time,
+        out_positions: &mut [CuJointPosition; N],
+        out_velocities: &mut [CuJointVelocity; N],
+        mut out_accelerations: Option<&mut [CuJointAcceleration; N]>,
+    ) -> CuResult<()> {
         if self.is_empty() {
             return Err(CuError::from("Cannot sample an empty trajectory"));
         }
         if self.len() == 1 {
             *out_positions = self.points[0].positions;
             *out_velocities = self.points[0].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         let pts = self.points();
@@ -292,11 +345,13 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         if t_s <= pts[0].time_from_start.get::<second>() {
             *out_positions = pts[0].positions;
             *out_velocities = pts[0].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         if t_s >= pts[last].time_from_start.get::<second>() {
             *out_positions = pts[last].positions;
             *out_velocities = pts[last].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         let mut i = 0;
@@ -312,6 +367,11 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
                 pts[i].positions[j].interpolate(pts[i + 1].positions[j], fraction)?;
             out_velocities[j] =
                 lerp_velocity(pts[i].velocities[j], pts[i + 1].velocities[j], fraction)?;
+            if let Some(acc) = out_accelerations.as_deref_mut() {
+                // Derivative of the linearly interpolated velocity.
+                let dv = pts[i + 1].velocities[j].si_value() - pts[i].velocities[j].si_value();
+                acc[j] = CuJointAcceleration::from_coordinate(pts[i].positions[j], dv / (t1 - t0));
+            }
             j += 1;
         }
         Ok(())
@@ -329,6 +389,16 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         out_positions: &mut [CuJointPosition; N],
         out_velocities: &mut [CuJointVelocity; N],
     ) -> CuResult<()> {
+        self.sample_cubic_impl(t, out_positions, out_velocities, None)
+    }
+
+    fn sample_cubic_impl(
+        &self,
+        t: Time,
+        out_positions: &mut [CuJointPosition; N],
+        out_velocities: &mut [CuJointVelocity; N],
+        mut out_accelerations: Option<&mut [CuJointAcceleration; N]>,
+    ) -> CuResult<()> {
         if self.is_empty() || self.len() > MAX_POINTS || !t.get::<second>().is_finite() {
             return Err(CuError::from("Invalid cubic trajectory or sample time"));
         }
@@ -337,12 +407,14 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         if ts <= pts[0].time_from_start.get::<second>() {
             *out_positions = pts[0].positions;
             *out_velocities = pts[0].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         let last = pts.len() - 1;
         if ts >= pts[last].time_from_start.get::<second>() {
             *out_positions = pts[last].positions;
             *out_velocities = pts[last].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         let mut i = 0;
@@ -386,6 +458,12 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
                 a.positions[j],
                 (aa + u * (2.0 * bb + 3.0 * cc * u)) / duration,
             );
+            if let Some(acc) = out_accelerations.as_deref_mut() {
+                acc[j] = CuJointAcceleration::from_coordinate(
+                    a.positions[j],
+                    (2.0 * bb + 6.0 * cc * u) / (duration * duration),
+                );
+            }
         }
         Ok(())
     }
@@ -403,6 +481,16 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         out_positions: &mut [CuJointPosition; N],
         out_velocities: &mut [CuJointVelocity; N],
     ) -> CuResult<()> {
+        self.sample_quintic_impl(t, out_positions, out_velocities, None)
+    }
+
+    fn sample_quintic_impl(
+        &self,
+        t: Time,
+        out_positions: &mut [CuJointPosition; N],
+        out_velocities: &mut [CuJointVelocity; N],
+        mut out_accelerations: Option<&mut [CuJointAcceleration; N]>,
+    ) -> CuResult<()> {
         if self.is_empty() || self.len() > MAX_POINTS || !t.get::<second>().is_finite() {
             return Err(CuError::from("Invalid quintic trajectory or sample time"));
         }
@@ -412,11 +500,13 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         if ts <= pts[0].time_from_start.get::<second>() {
             *out_positions = pts[0].positions;
             *out_velocities = pts[0].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         if ts >= pts[last].time_from_start.get::<second>() {
             *out_positions = pts[last].positions;
             *out_velocities = pts[last].velocities;
+            hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
         let mut i = 0;
@@ -465,14 +555,29 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
                 [a.accelerations[j].si_value(), b.accelerations[j].si_value()],
                 duration,
             );
-            let (q, v, _) = quintic.eval(u);
-            if !q.is_finite() || !v.is_finite() {
+            let (q, v, acceleration) = quintic.eval(u);
+            if !q.is_finite() || !v.is_finite() || !acceleration.is_finite() {
                 return Err(CuError::from("Non-finite trajectory knot"));
             }
             out_positions[j] = a.positions[j].with_si_value(q);
             out_velocities[j] = CuJointVelocity::from_coordinate(a.positions[j], v);
+            if let Some(acc) = out_accelerations.as_deref_mut() {
+                acc[j] = CuJointAcceleration::from_coordinate(a.positions[j], acceleration);
+            }
         }
         Ok(())
+    }
+}
+
+/// Writes zero acceleration (of each joint's unit kind) for a held setpoint.
+fn hold_accelerations<const N: usize>(
+    positions: &[CuJointPosition; N],
+    accelerations: Option<&mut [CuJointAcceleration; N]>,
+) {
+    if let Some(acc) = accelerations {
+        for j in 0..N {
+            acc[j] = CuJointAcceleration::from_coordinate(positions[j], 0.0);
+        }
     }
 }
 
@@ -651,5 +756,198 @@ mod tests {
         let after = traj.quintic_limit_ratio(&limits).unwrap();
         assert!(after < before);
         assert!(traj.stretch_time(0.0).is_err());
+    }
+
+    fn mixed_point(t: f64, q: [f64; 2], v: [f64; 2], a: [f64; 2]) -> CuTrajectoryPoint<2> {
+        use cu29::units::si::acceleration::meter_per_second_squared;
+        use cu29::units::si::angular_acceleration::radian_per_second_squared;
+        use cu29::units::si::f64::{Acceleration, AngularAcceleration, Length, Velocity};
+        use cu29::units::si::length::meter;
+        CuTrajectoryPoint {
+            time_from_start: Time::new::<second>(t),
+            positions: [
+                CuJointPosition::Revolute(cu29::units::si::f64::Angle::new::<radian>(q[0])),
+                CuJointPosition::Prismatic(Length::new::<meter>(q[1])),
+            ],
+            velocities: [
+                CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(v[0])),
+                CuJointVelocity::Prismatic(Velocity::new::<meter_per_second>(v[1])),
+            ],
+            accelerations: [
+                CuJointAcceleration::Revolute(
+                    AngularAcceleration::new::<radian_per_second_squared>(a[0]),
+                ),
+                CuJointAcceleration::Prismatic(Acceleration::new::<meter_per_second_squared>(a[1])),
+            ],
+        }
+    }
+
+    fn three_knot_traj() -> CuTrajectoryPayload<2> {
+        let mut traj = CuTrajectoryPayload::new();
+        traj.push(mixed_point(0.0, [0.0, 0.1], [0.0, 0.0], [0.0, 0.0]))
+            .unwrap();
+        traj.push(mixed_point(1.0, [0.5, 0.3], [1.2, -0.4], [2.0, 0.7]))
+            .unwrap();
+        traj.push(mixed_point(2.5, [0.9, -0.2], [0.0, 0.0], [-1.0, 0.0]))
+            .unwrap();
+        traj
+    }
+
+    fn sample_all(
+        traj: &CuTrajectoryPayload<2>,
+        kind: CuTrajectoryInterpolation,
+        t: f64,
+    ) -> (
+        [CuJointPosition; 2],
+        [CuJointVelocity; 2],
+        [CuJointAcceleration; 2],
+    ) {
+        let mut q = [CuJointPosition::default(); 2];
+        let mut v = [CuJointVelocity::default(); 2];
+        let mut a = [CuJointAcceleration::default(); 2];
+        traj.sample_with_acceleration(kind, Time::new::<second>(t), &mut q, &mut v, &mut a)
+            .unwrap();
+        (q, v, a)
+    }
+
+    /// The reported acceleration is the derivative of the reported velocity
+    /// (and, for the smooth kinds, the second derivative of position),
+    /// checked here against high-resolution central differences.
+    #[test]
+    fn acceleration_matches_finite_difference_of_velocity_for_each_kind() {
+        let traj = three_knot_traj();
+        let h = 1e-6;
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            let mut checked = 0;
+            let mut t: f64 = 0.013;
+            while t < 2.5 {
+                // Stay clear of the knots, where one-sided values differ.
+                if (t - 1.0).abs() > 1e-3 && (t - 2.5).abs() > 1e-3 {
+                    let (_, _, acc) = sample_all(&traj, kind, t);
+                    let (q_hi, v_hi, _) = sample_all(&traj, kind, t + h);
+                    let (q_lo, v_lo, _) = sample_all(&traj, kind, t - h);
+                    let (q_mid, _, _) = sample_all(&traj, kind, t);
+                    for j in 0..2 {
+                        let fd = (v_hi[j].si_value() - v_lo[j].si_value()) / (2.0 * h);
+                        assert!(
+                            (acc[j].si_value() - fd).abs() < 1e-5 * (1.0 + fd.abs()),
+                            "{kind:?} t={t} j={j}: {} vs {fd}",
+                            acc[j].si_value()
+                        );
+                        if kind != CuTrajectoryInterpolation::Linear {
+                            // Smooth kinds: velocity is also d(position)/dt and
+                            // acceleration the second difference of position.
+                            let second_diff = (q_hi[j].si_value() - 2.0 * q_mid[j].si_value()
+                                + q_lo[j].si_value())
+                                / (h * h);
+                            assert!(
+                                (acc[j].si_value() - second_diff).abs() < 5e-2 * (1.0 + fd.abs()),
+                                "{kind:?} t={t} j={j}: {} vs second diff {second_diff}",
+                                acc[j].si_value()
+                            );
+                        }
+                    }
+                    checked += 1;
+                }
+                t += 0.037;
+            }
+            assert!(checked > 50);
+        }
+    }
+
+    #[test]
+    fn acceleration_units_follow_the_joint_kind() {
+        let traj = three_knot_traj();
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            let (_, _, acc) = sample_all(&traj, kind, 0.5);
+            assert!(matches!(acc[0], CuJointAcceleration::Revolute(_)));
+            assert!(matches!(acc[1], CuJointAcceleration::Prismatic(_)));
+        }
+    }
+
+    #[test]
+    fn quintic_acceleration_is_continuous_and_hits_the_knot_value() {
+        let traj = three_knot_traj();
+        let kind = CuTrajectoryInterpolation::Quintic;
+        let (_, _, before) = sample_all(&traj, kind, 1.0 - 1e-9);
+        let (_, _, after) = sample_all(&traj, kind, 1.0 + 1e-9);
+        let (_, _, at) = sample_all(&traj, kind, 1.0);
+        for j in 0..2 {
+            let knot = traj.points()[1].accelerations[j].si_value();
+            for acc in [before, after, at] {
+                assert!((acc[j].si_value() - knot).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn linear_and_cubic_knot_acceleration_is_left_sided() {
+        let traj = three_knot_traj();
+        // Linear: at the knot the ending segment's constant (1.2 - 0) / 1.
+        let (_, _, at) = sample_all(&traj, CuTrajectoryInterpolation::Linear, 1.0);
+        let (_, _, after) = sample_all(&traj, CuTrajectoryInterpolation::Linear, 1.0 + 1e-9);
+        assert!((at[0].si_value() - 1.2).abs() < 1e-12);
+        assert!((after[0].si_value() - (0.0 - 1.2) / 1.5).abs() < 1e-12);
+        // Cubic: equals the value just before the knot.
+        let (_, _, at) = sample_all(&traj, CuTrajectoryInterpolation::Cubic, 1.0);
+        let (_, _, before) = sample_all(&traj, CuTrajectoryInterpolation::Cubic, 1.0 - 1e-9);
+        assert!((at[0].si_value() - before[0].si_value()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn held_endpoints_report_zero_acceleration() {
+        let traj = three_knot_traj();
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            for t in [-1.0, 0.0, 2.5, 9.0] {
+                let (_, _, acc) = sample_all(&traj, kind, t);
+                assert_eq!(acc[0].si_value(), 0.0, "{kind:?} t={t}");
+                assert_eq!(acc[1].si_value(), 0.0, "{kind:?} t={t}");
+                assert!(matches!(acc[1], CuJointAcceleration::Prismatic(_)));
+            }
+        }
+        // A single-point trajectory holds its point.
+        let mut one = CuTrajectoryPayload::<2>::new();
+        one.push(mixed_point(0.0, [0.1, 0.2], [0.3, 0.4], [5.0, 6.0]))
+            .unwrap();
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            let (_, _, acc) = sample_all(&one, kind, 0.4);
+            assert_eq!(acc[0].si_value(), 0.0);
+        }
+    }
+
+    #[test]
+    fn sample_with_acceleration_matches_sample_with_for_positions_and_velocities() {
+        let traj = three_knot_traj();
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            for t in [0.0, 0.3, 1.0, 1.7, 2.5, 3.0] {
+                let (q, v, _) = sample_all(&traj, kind, t);
+                let mut q2 = [CuJointPosition::default(); 2];
+                let mut v2 = [CuJointVelocity::default(); 2];
+                traj.sample_with(kind, Time::new::<second>(t), &mut q2, &mut v2)
+                    .unwrap();
+                assert_eq!(q, q2);
+                assert_eq!(v, v2);
+            }
+        }
     }
 }

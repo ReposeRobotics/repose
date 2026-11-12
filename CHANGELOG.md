@@ -74,10 +74,9 @@ may be breaking.
   14 allocations per `process` call with the `linear_24_6` fixture, measured
   by `tests/alloc.rs`, which asserts at most 32 on every call. Other models
   allocate differently; measure yours the same way.
-- `repose-policy-rl`: `CuJointActionTask<N>` turns a raw `CuPolicyAction<N>`
-  into the `CuTrajectoryFollowOutput<N>` the
-  controller already consumes. It applies `position_delta` (accumulating from
-  the measured start) or `position_absolute` (from typed default positions)
+- `repose-policy-rl`: `CuJointActionTask<N>` turns a raw `CuPolicyAction<N>` into the `CuTrajectoryFollowOutput<N>` the
+  controller already consumes. It applies `position_delta` (an offset from
+  the measured position) or `position_absolute` (from typed default positions)
   actions with a dimensionless scalar or per-joint `scale`, an optional
   per-cycle `max_step`, and clamping to the configured chain's joint limits.
   Idle, faulted, and non-finite inputs hold the previous target with `Idle`

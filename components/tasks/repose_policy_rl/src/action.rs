@@ -102,8 +102,9 @@ fn default_positions<const N: usize>() -> [CuJointPosition; N] {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CuJointActionKind {
-    /// `target = previous_target + scale * action`; the first target starts
-    /// from the measured position.
+    /// `target = measured_position + scale * action`: an offset from where
+    /// the arm is, the usual meaning of a relative joint action in RL
+    /// trainers.
     #[default]
     PositionDelta,
     /// `target = default_positions + scale * action`.
@@ -251,8 +252,10 @@ impl<const N: usize> CuJointActionParams<N> {
 ///
 /// Per cycle, for a usable (`Fresh` or `Held`) action and a `Ready` robot:
 ///
-/// 1. `position_delta`: `target = previous_target + scale * action` (the
-///    first target starts from the measured position).
+/// 1. `position_delta`: `target = measured_position + scale * action`. The
+///    offset is taken from the measured position, not from the previous
+///    target, so a target cannot run ahead of an arm that lags behind it.
+///    A zero action therefore commands the measured position.
 ///    `position_absolute`: `target = default_positions + scale * action`.
 /// 2. The change from the previous target (from the measured position when
 ///    there is no previous target yet) is limited to `max_step`.
@@ -427,13 +430,7 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
         // Usable action (`Fresh` or `Held`): build the raw target in each
         // joint's SI unit, keeping the joint kind of the base coordinate.
         let base: [CuJointPosition; N] = match self.params.kind {
-            CuJointActionKind::PositionDelta => {
-                if self.has_target {
-                    self.previous_target
-                } else {
-                    state.positions
-                }
-            }
+            CuJointActionKind::PositionDelta => state.positions,
             CuJointActionKind::PositionAbsolute => self.params.default_positions,
         };
         let reference: [CuJointPosition; N] = if self.has_target {
@@ -573,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn delta_accumulates_from_the_measured_start() {
+    fn delta_is_an_offset_from_the_measured_position() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
         let mut task = CuJointActionTask::from_params(p).unwrap();
@@ -589,12 +586,23 @@ mod tests {
             "{:?}",
             si(&out)
         );
-        // The measured position has not moved: the next delta accumulates
-        // from the previous target, not from the measurement.
+        // The measured position has not moved: the next delta is taken from
+        // the measurement again and does not accumulate.
         let out = run(
             &mut task,
             Some(action(1.0, CuPolicyStatus::Fresh)),
             Some(state(0.10)),
+        );
+        assert!(
+            si(&out).iter().all(|v| (*v - 0.15).abs() < 1e-12),
+            "{:?}",
+            si(&out)
+        );
+        // The arm moved: the same delta now lands further along.
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(state(0.15)),
         );
         assert!(
             si(&out).iter().all(|v| (*v - 0.20).abs() < 1e-12),
@@ -818,10 +826,11 @@ mod tests {
             assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory, "{bad}");
             assert_si(&out, 0.15);
         }
-        // The fault did not move the target: a valid action resumes from it.
+        // The fault did not move the target, and a valid action resumes
+        // from the measured position.
         let out = run(
             &mut task,
-            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(action(2.0, CuPolicyStatus::Fresh)),
             Some(state(0.10)),
         );
         assert_eq!(out.status, CuFollowStatus::Running);

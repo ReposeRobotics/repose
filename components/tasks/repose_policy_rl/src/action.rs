@@ -176,7 +176,8 @@ impl<const N: usize> CuJointActionParams<N> {
     }
 
     /// Checks the chain, scale, step limit, and (for `position_absolute`)
-    /// that the default positions carry each joint's unit kind.
+    /// that the default positions carry each joint's unit kind and lie
+    /// inside its limits.
     pub fn validate(&self) -> CuResult<()> {
         if N == 0 {
             return Err(CuError::from(
@@ -198,7 +199,13 @@ impl<const N: usize> CuJointActionParams<N> {
         }
         if self.kind == CuJointActionKind::PositionAbsolute {
             for (j, pos) in self.default_positions.iter().enumerate() {
-                chain.joints()[j].limits.validate(*pos)?;
+                let limits = chain.joints()[j].limits;
+                limits.validate(*pos)?;
+                if !limits.contains(*pos) {
+                    return Err(CuError::from(
+                        "repose-policy-rl: 'default_positions' must lie inside the joint limits",
+                    ));
+                }
             }
         }
         Ok(())
@@ -213,6 +220,10 @@ impl<const N: usize> CuJointActionParams<N> {
 /// with zero velocity and acceleration; its `Tov` is propagated from the
 /// joint-state input.
 ///
+/// The setpoint carries a position target only, so the controller must run
+/// in `position` or `effort` mode. In `velocity` mode the zero setpoint
+/// velocity is what the bridge would execute, and the arm would not move.
+///
 /// Per cycle, for a usable (`Fresh` or `Held`) action and a `Ready` robot:
 ///
 /// 1. `position_delta`: `target = previous_target + scale * action` (the
@@ -220,28 +231,40 @@ impl<const N: usize> CuJointActionParams<N> {
 ///    `position_absolute`: `target = default_positions + scale * action`.
 /// 2. The change from the previous target (from the measured position when
 ///    there is no previous target yet) is limited to `max_step`.
-/// 3. The target is clamped to the chain's joint limits.
+/// 3. The target is clamped to the chain's joint limits. The clamp wins
+///    over `max_step`: a target that starts outside the limits (a measured
+///    position beyond them) moves to the limit in one cycle.
 /// 4. The target is emitted with [`CuFollowStatus::Running`].
 ///
 /// A `Held` action repeats the last inferred action (policy decimation). A
 /// delta is applied once, on the cycle it was inferred: while it is `Held`
-/// the previous target is kept with [`CuFollowStatus::Running`], which is
-/// how trainers hold a target across control substeps. A `Held` absolute
-/// action is re-applied, so a `max_step`-limited target keeps approaching
-/// it. Hold cases emit the
-/// previous target (the measured position before the first target, zeros
-/// before the first state) with zero velocity:
+/// the existing target is kept with [`CuFollowStatus::Running`], which is
+/// how trainers hold a target across control substeps. With no target yet
+/// (the first action seen is already `Held`) the delta is applied once. A
+/// `Held` absolute action is re-applied, so a `max_step`-limited target
+/// keeps approaching it.
+///
+/// Hold cases emit the previous target (the measured position when there is
+/// no target, zeros before the first state) with zero velocity:
 ///
 /// | Situation | Status emitted |
 /// |---|---|
-/// | No action yet, action status `Idle`, no joint state, or robot not `Ready` | `Idle` |
-/// | Action status `Fault`, or a non-finite action value | `ErrorEmptyTrajectory` |
+/// | No action yet, action status `Idle`, or no joint state | `Idle` |
+/// | Robot not `Ready` | `Idle`, and the target is dropped |
+/// | Action status `Fault`, a non-finite action value, or a joint state whose units do not match the chain | `ErrorEmptyTrajectory` |
+///
+/// A robot that is not `Ready` (fault, emergency stop) may be moved while
+/// it is down, so the target is dropped: the hold emits the measured
+/// position and the first delta after recovery starts from where the arm
+/// is, not from where it was.
 ///
 /// `ErrorEmptyTrajectory` is the plan's naming compromise so the unchanged
 /// controller maps it to its `Fault` status.
 ///
 /// Previous target and whether a target exists round-trip through
-/// `Freezable`, so deterministic replay resumes identically.
+/// `Freezable`, so deterministic replay resumes identically. Parameters are
+/// not frozen: they come from the configuration and cannot change at run
+/// time.
 #[derive(Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
 pub struct CuJointActionTask<const N: usize> {
@@ -272,6 +295,20 @@ impl<const N: usize> CuJointActionTask<N> {
         &self.params
     }
 
+    /// Position-only setpoint: zero velocity and acceleration carrying each
+    /// joint's unit kind.
+    fn setpoint(
+        positions: [CuJointPosition; N],
+        status: CuFollowStatus,
+    ) -> CuTrajectoryFollowOutput<N> {
+        CuTrajectoryFollowOutput {
+            positions,
+            velocities: positions.map(|q| CuJointVelocity::from_coordinate(q, 0.0)),
+            accelerations: positions.map(|q| CuJointAcceleration::from_coordinate(q, 0.0)),
+            status,
+        }
+    }
+
     fn held_positions(&self, state: Option<&CuJointStatePayload<N>>) -> [CuJointPosition; N] {
         if self.has_target {
             self.previous_target
@@ -285,19 +322,11 @@ impl<const N: usize> CuJointActionTask<N> {
 
 impl<const N: usize> Freezable for CuJointActionTask<N> {
     fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        Encode::encode(&self.params.kind, encoder)?;
-        Encode::encode(&self.params.scale, encoder)?;
-        Encode::encode(&self.params.default_positions, encoder)?;
-        Encode::encode(&self.params.max_step, encoder)?;
         Encode::encode(&self.previous_target, encoder)?;
         Encode::encode(&self.has_target, encoder)
     }
 
     fn thaw<D: Decoder>(&mut self, decoder: &mut D) -> Result<(), DecodeError> {
-        self.params.kind = Decode::decode(decoder)?;
-        self.params.scale = Decode::decode(decoder)?;
-        self.params.default_positions = Decode::decode(decoder)?;
-        self.params.max_step = Decode::decode(decoder)?;
         self.previous_target = Decode::decode(decoder)?;
         self.has_target = Decode::decode(decoder)?;
         Ok(())
@@ -330,18 +359,22 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
         let action = input.0.payload();
         let state = input.1.payload();
 
-        let hold = |task: &Self, status: CuFollowStatus| CuTrajectoryFollowOutput {
-            positions: task.held_positions(state),
-            velocities: [CuJointVelocity::default(); N],
-            accelerations: [CuJointAcceleration::default(); N],
-            status,
+        let hold = |task: &Self, status: CuFollowStatus| {
+            Self::setpoint(task.held_positions(state), status)
         };
 
-        // Robot not ready (or no state at all): hold, whatever the action.
-        let Some(state) = state.filter(|s| s.status == CuRobotStatus::Ready) else {
+        // No state at all: hold, whatever the action.
+        let Some(state) = state else {
             output.set_payload(hold(self, CuFollowStatus::Idle));
             return Ok(());
         };
+        // Robot not ready: drop the target (the arm may be moved while it is
+        // down) and hold the measured position.
+        if state.status != CuRobotStatus::Ready {
+            self.has_target = false;
+            output.set_payload(hold(self, CuFollowStatus::Idle));
+            return Ok(());
+        }
         // No action yet, or an idle action: hold.
         let Some(action) = action.filter(|a| a.status != CuPolicyStatus::Idle) else {
             output.set_payload(hold(self, CuFollowStatus::Idle));
@@ -359,12 +392,10 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
             && action.status == CuPolicyStatus::Held
             && self.has_target
         {
-            output.set_payload(CuTrajectoryFollowOutput {
-                positions: self.previous_target,
-                velocities: [CuJointVelocity::default(); N],
-                accelerations: [CuJointAcceleration::default(); N],
-                status: CuFollowStatus::Running,
-            });
+            output.set_payload(Self::setpoint(
+                self.previous_target,
+                CuFollowStatus::Running,
+            ));
             return Ok(());
         }
 
@@ -401,15 +432,15 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
             };
             target[j] = base[j].with_si_value(stepped);
         }
-        self.chain.clamp_to_limits(&mut target)?;
+        // A joint state whose units do not match the chain is a fault of
+        // the cycle, not of the task: hold and report it.
+        if self.chain.clamp_to_limits(&mut target).is_err() {
+            output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
+            return Ok(());
+        }
         self.previous_target = target;
         self.has_target = true;
-        output.set_payload(CuTrajectoryFollowOutput {
-            positions: target,
-            velocities: [CuJointVelocity::default(); N],
-            accelerations: [CuJointAcceleration::default(); N],
-            status: CuFollowStatus::Running,
-        });
+        output.set_payload(Self::setpoint(target, CuFollowStatus::Running));
         Ok(())
     }
 }
@@ -666,7 +697,13 @@ mod tests {
         assert_si(&out, 0.15);
         assert!(out.velocities.iter().all(|v| v.si_value() == 0.0));
 
-        // Robot not Ready (every non-Ready status).
+        // No joint state at all.
+        let out = run(&mut task, Some(action(1.0, CuPolicyStatus::Fresh)), None);
+        assert_eq!(out.status, CuFollowStatus::Idle);
+        assert_si(&out, 0.15);
+
+        // Robot not Ready (every non-Ready status): the target is dropped
+        // and the measured position is held.
         for status in [
             CuRobotStatus::NotReady,
             CuRobotStatus::Fault(7),
@@ -680,13 +717,41 @@ mod tests {
                 Some(st),
             );
             assert_eq!(out.status, CuFollowStatus::Idle, "{status:?}");
-            assert_si(&out, 0.15);
+            assert_si(&out, 0.10);
         }
+    }
 
-        // No joint state at all.
-        let out = run(&mut task, Some(action(1.0, CuPolicyStatus::Fresh)), None);
-        assert_eq!(out.status, CuFollowStatus::Idle);
+    #[test]
+    fn recovery_after_not_ready_starts_from_the_measured_position() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+        p.scale = [0.05; 2];
+        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(state(0.10)),
+        );
         assert_si(&out, 0.15);
+
+        // Emergency stop; the arm is moved by hand to 0.60 while it is down.
+        let mut down = state::<2>(0.60);
+        down.status = CuRobotStatus::EmergencyStop;
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(down),
+        );
+        assert_eq!(out.status, CuFollowStatus::Idle);
+        assert_si(&out, 0.60);
+
+        // Ready again: the delta starts from 0.60, not from the stale 0.15.
+        let out = run(
+            &mut task,
+            Some(action(1.0, CuPolicyStatus::Fresh)),
+            Some(state(0.60)),
+        );
+        assert_eq!(out.status, CuFollowStatus::Running);
+        assert_si(&out, 0.65);
     }
 
     #[test]
@@ -830,6 +895,59 @@ mod tests {
         assert!(matches!(out.positions[1], CuJointPosition::Prismatic(_)));
         assert!((out.positions[0].si_value() - 0.15).abs() < 1e-6);
         assert!((out.positions[1].si_value() - 0.15).abs() < 1e-6);
+        // The zero velocity and acceleration carry each joint's unit kind.
+        assert!(matches!(out.velocities[0], CuJointVelocity::Revolute(_)));
+        assert!(matches!(out.velocities[1], CuJointVelocity::Prismatic(_)));
+        assert!(matches!(
+            out.accelerations[1],
+            CuJointAcceleration::Prismatic(_)
+        ));
+    }
+
+    #[test]
+    fn position_absolute_ramps_to_a_far_target_with_max_step() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
+        p.default_positions = [rev(1.0); 2];
+        p.max_step = Some(0.25);
+        let mut task = CuJointActionTask::from_params(p).unwrap();
+        // Target 1.0 from a measured 0.0: one step per cycle, and a held
+        // action keeps approaching.
+        let out = run(
+            &mut task,
+            Some(action(0.0, CuPolicyStatus::Fresh)),
+            Some(state(0.0)),
+        );
+        assert_si(&out, 0.25);
+        let out = run(
+            &mut task,
+            Some(action(0.0, CuPolicyStatus::Held)),
+            Some(state(0.0)),
+        );
+        assert_si(&out, 0.50);
+        for _ in 0..4 {
+            run(
+                &mut task,
+                Some(action(0.0, CuPolicyStatus::Held)),
+                Some(state(0.0)),
+            );
+        }
+        let out = run(
+            &mut task,
+            Some(action(0.0, CuPolicyStatus::Held)),
+            Some(state(0.0)),
+        );
+        assert_si(&out, 1.0);
+    }
+
+    #[test]
+    fn default_positions_outside_the_limits_are_rejected() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
+        p.default_positions = [rev(3.0); 2];
+        assert!(CuJointActionTask::from_params(p).is_err());
+        // Unused in delta mode, so not checked there.
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+        p.default_positions = [rev(3.0); 2];
+        assert!(CuJointActionTask::from_params(p).is_ok());
     }
 
     #[cfg(feature = "std")]

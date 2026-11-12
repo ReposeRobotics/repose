@@ -80,9 +80,12 @@ may be breaking.
   the measured start) or `position_absolute` (from typed default positions)
   actions with a dimensionless scalar or per-joint `scale`, an optional
   per-cycle `max_step`, and clamping to the configured chain's joint limits.
-  Idle, faulted, non-finite, and not-ready inputs hold the previous target
-  with `Idle` or `ErrorEmptyTrajectory` status, and the previous target
-  round-trips through `Freezable`.
+  Idle, faulted, and non-finite inputs hold the previous target with `Idle`
+  or `ErrorEmptyTrajectory` status. A robot that is not `Ready` drops the
+  target and holds the measured position, so motion after a fault or an
+  emergency stop restarts from where the arm is. The previous target
+  round-trips through `Freezable`. The setpoint carries positions only: run
+  the controller in `position` or `effort` mode.
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

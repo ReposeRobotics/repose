@@ -11,13 +11,29 @@
 //! Behaviour per cycle:
 //! - No setpoint yet, or a follower reporting `Idle` (no trajectory yet, or
 //!   cancelled; its positions are not a target): `Idle`, holding the last
-//!   measured state (zeros before the first state arrives).
-//! - Setpoint + fresh state: command mirrors the setpoint; status maps the
-//!   follower status (`Running` → `Running`, `Finished` → `Holding`,
+//!   measured state (zeros before the first state arrives) when the state is
+//!   usable and finite.
+//! - Setpoint + fresh finite state: command mirrors the setpoint; status maps
+//!   the follower status (`Running` → `Running`, `Finished` → `Holding`,
 //!   `ErrorEmptyTrajectory` → `Fault`).
 //! - Tracking error above `tracking_error_limit`: `Fault`, command
 //!   holds the measured state instead of chasing the setpoint.
 //! - Setpoint without any measured state: `Fault`, holding the last command.
+//! - **Finiteness invariant:** no field of an emitted [`CuJointCommandPayload`]
+//!   (`positions`, `velocities`, `efforts`, `max_tracking_error`) is ever
+//!   non-finite (`NaN` or `±∞`), in any mode, for any input, and nothing
+//!   non-finite is stored in state that survives a cycle (`last_command`,
+//!   rate-limiter state, or frozen state):
+//!   - A measured joint state with any non-finite position or velocity is
+//!     treated as unusable: `Fault`, holding the last finite command (zeros
+//!     before the first command) with zero velocities, efforts, and tracking
+//!     error; the bad state is never echoed.
+//!   - An active (non-`Idle`) setpoint with any non-finite position, velocity,
+//!     or acceleration is a `Fault`, holding the measured state if it is usable
+//!     and finite (with the effort brake below) or otherwise the last finite
+//!     command with zero effort.
+//!   - After any fault cycle, subsequent cycles with good inputs resume normal
+//!     operation with nothing latched.
 //!
 //! # Effort mode
 //!
@@ -38,18 +54,20 @@
 //! ```
 //!
 //! That is the gravity load, the Coriolis/centrifugal load of the planned
-//! motion and the inertial term `M(q) * qdd_des`. Non-finite or wrongly typed
-//! desired accelerations are never sanitized: the dynamics rejects them and
-//! the controller reports `Fault` with the damping/gravity brake, exactly as
-//! for a non-finite desired velocity. Without a model the setpoint
-//! acceleration is not read at all, so the pure-PD path is unchanged.
+//! motion and the inertial term `M(q) * qdd_des`. Non-finite desired
+//! positions, velocities, or accelerations fault in every mode (with the
+//! damping/gravity brake in effort mode when the measured state is usable);
+//! with a model, wrongly typed desired accelerations are also rejected by the
+//! dynamics and fault with the brake. Without a model, finite setpoint
+//! accelerations are not used by the pure-PD effort formula.
 //!
-//! Hold and fault paths command a damping brake (`-kv[j] * qd[j]`), plus the
-//! gravity load at the measured positions when a model is configured, so the
-//! arm neither goes limp nor sags. If the model cannot be evaluated (for
-//! example a non-finite or wrongly typed joint value) the controller reports
-//! `Fault` and falls back to the damping brake alone. With no usable measured
-//! state (none yet, stale, or the robot not `Ready`) the effort is zero.
+//! Hold and fault paths with a usable finite measured state command a damping
+//! brake (`-kv[j] * qd[j]`), plus the gravity load at the measured positions
+//! when a model is configured, so the arm neither goes limp nor sags. If the
+//! model cannot be evaluated (for example a wrongly typed joint value) the
+//! controller reports `Fault` and falls back to the damping brake alone. With
+//! no usable measured state (none yet, stale, non-finite position or velocity,
+//! or the robot not `Ready`) the effort is zero.
 //!
 //! State that affects later cycles (last command, last status) round-trips
 //! through `Freezable`, so deterministic replay resumes correctly.
@@ -118,7 +136,8 @@ pub enum CuControllerStatus {
     /// Holding a finished setpoint (or the measured state while idle).
     Holding,
     /// Tracking error exceeded the limit, the follower reported an error,
-    /// or a setpoint arrived without measured state.
+    /// an input carried a non-finite value, or a setpoint arrived without
+    /// usable measured state.
     Fault,
 }
 
@@ -566,25 +585,57 @@ impl<const N: usize> CuControllerTask<N> {
 
     /// Effort-mode hold: a damping brake on the measured velocity plus, with
     /// a model, the gravity load at the measured positions. No stiffness
-    /// towards any setpoint. If the model cannot be evaluated the command
-    /// faults and brakes with damping alone.
+    /// towards any setpoint. If the model cannot be evaluated (or any resulting
+    /// effort overflows to non-finite), the command faults and keeps every
+    /// emitted effort finite.
     fn brake(&self, state: &CuJointStatePayload<N>, command: &mut CuJointCommandPayload<N>) {
         let mut gravity = [0.0; N];
         if self
             .model_efforts(&state.positions, None, &mut gravity)
             .is_err()
+            || gravity.iter().any(|g| !g.is_finite())
         {
             gravity = [0.0; N];
             command.status = CuControllerStatus::Fault;
         }
         let kv = &self.params.effort_gains.kv;
         for j in 0..N {
-            command.efforts[j] = CuJointEffort::from_position(
-                state.positions[j],
-                gravity[j] - kv[j] * state.velocities[j].si_value(),
-            );
+            let raw = gravity[j] - kv[j] * state.velocities[j].si_value();
+            let effort = if raw.is_finite() {
+                raw
+            } else {
+                command.status = CuControllerStatus::Fault;
+                if raw.is_nan() {
+                    0.0
+                } else {
+                    raw.clamp(-f64::MAX, f64::MAX)
+                }
+            };
+            command.efforts[j] = CuJointEffort::from_position(state.positions[j], effort);
         }
     }
+}
+
+fn is_finite_position<const N: usize>(positions: &[CuJointPosition; N]) -> bool {
+    positions.iter().all(|p| p.si_value().is_finite())
+}
+
+fn is_finite_velocity<const N: usize>(velocities: &[CuJointVelocity; N]) -> bool {
+    velocities.iter().all(|v| v.si_value().is_finite())
+}
+
+fn is_finite_acceleration<const N: usize>(accelerations: &[CuJointAcceleration; N]) -> bool {
+    accelerations.iter().all(|a| a.si_value().is_finite())
+}
+
+fn is_finite_state<const N: usize>(state: &CuJointStatePayload<N>) -> bool {
+    is_finite_position(&state.positions) && is_finite_velocity(&state.velocities)
+}
+
+fn is_finite_setpoint<const N: usize>(setpoint: &CuTrajectoryFollowOutput<N>) -> bool {
+    is_finite_position(&setpoint.positions)
+        && is_finite_velocity(&setpoint.velocities)
+        && is_finite_acceleration(&setpoint.accelerations)
 }
 
 impl<const N: usize> Default for CuControllerTask<N> {
@@ -688,6 +739,10 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                 command.positions = self.last_command;
                 command.status = CuControllerStatus::Fault;
             }
+            (_, Some(state)) if !is_finite_state(state) => {
+                command.positions = self.last_command;
+                command.status = CuControllerStatus::Fault;
+            }
             (_, Some(state)) if state.status != CuRobotStatus::Ready => {
                 command.positions = state.positions;
                 command.status = CuControllerStatus::Fault;
@@ -711,13 +766,25 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                 command.positions = self.last_command;
                 command.status = CuControllerStatus::Fault;
             }
+            (Some(setpoint), Some(state)) if !is_finite_setpoint(setpoint) => {
+                command.positions = state.positions;
+                command.status = CuControllerStatus::Fault;
+                if effort {
+                    self.brake(state, &mut command);
+                }
+            }
             (Some(setpoint), Some(state)) => {
                 let mut max_err = 0.0f64;
                 let mut max_kind = CuJointPosition::default();
+                let mut err_overflow = false;
                 for j in 0..N {
                     let err =
                         (setpoint.positions[j].si_value() - state.positions[j].si_value()).abs();
-                    if err > max_err {
+                    if !err.is_finite() {
+                        err_overflow = true;
+                        max_err = f64::MAX;
+                        max_kind = setpoint.positions[j];
+                    } else if !err_overflow && err > max_err {
                         max_err = err;
                         max_kind = setpoint.positions[j];
                     }
@@ -728,14 +795,16 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                 // cannot be evaluated is a fault, not a silent pure-PD cycle.
                 let mut feedforward = [0.0; N];
                 let model_failed = effort
-                    && self
+                    && (self
                         .model_efforts(
                             &state.positions,
                             Some((&setpoint.velocities, &setpoint.accelerations)),
                             &mut feedforward,
                         )
-                        .is_err();
+                        .is_err()
+                        || feedforward.iter().any(|f| !f.is_finite()));
                 if setpoint.status == CuFollowStatus::ErrorEmptyTrajectory
+                    || err_overflow
                     || max_err > self.params.tracking_error_limit
                     || model_failed
                 {
@@ -750,6 +819,7 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                 } else {
                     command.positions = setpoint.positions;
                     command.velocities = setpoint.velocities;
+                    let mut effort_non_finite = false;
                     if effort {
                         let CuEffortGains { kp, kv } = &self.params.effort_gains;
                         for j in 0..N {
@@ -757,19 +827,30 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                                 setpoint.positions[j].si_value() - state.positions[j].si_value();
                             let vel_err =
                                 setpoint.velocities[j].si_value() - state.velocities[j].si_value();
-                            command.efforts[j] = CuJointEffort::from_position(
-                                setpoint.positions[j],
-                                kp[j] * pos_err + kv[j] * vel_err + feedforward[j],
-                            );
+                            let tau = kp[j] * pos_err + kv[j] * vel_err + feedforward[j];
+                            if !tau.is_finite() {
+                                effort_non_finite = true;
+                                break;
+                            }
+                            command.efforts[j] =
+                                CuJointEffort::from_position(setpoint.positions[j], tau);
                         }
                     }
-                    command.status = match setpoint.status {
-                        CuFollowStatus::Running => CuControllerStatus::Running,
-                        CuFollowStatus::Finished => CuControllerStatus::Holding,
-                        // Filtered out above; kept for exhaustiveness.
-                        CuFollowStatus::Idle => CuControllerStatus::Idle,
-                        CuFollowStatus::ErrorEmptyTrajectory => CuControllerStatus::Fault,
-                    };
+                    if effort_non_finite {
+                        command.positions = state.positions;
+                        command.velocities = [CuJointVelocity::default(); N];
+                        command.efforts = [CuJointEffort::default(); N];
+                        command.status = CuControllerStatus::Fault;
+                        self.brake(state, &mut command);
+                    } else {
+                        command.status = match setpoint.status {
+                            CuFollowStatus::Running => CuControllerStatus::Running,
+                            CuFollowStatus::Finished => CuControllerStatus::Holding,
+                            // Filtered out above; kept for exhaustiveness.
+                            CuFollowStatus::Idle => CuControllerStatus::Idle,
+                            CuFollowStatus::ErrorEmptyTrajectory => CuControllerStatus::Fault,
+                        };
+                    }
                 }
             }
         }
@@ -812,13 +893,20 @@ impl<const N: usize> CuTask for CuControllerTask<N> {
                 for j in 0..N {
                     let current = self.last_command[j].si_value();
                     let old_v = self.last_velocity[j].si_value();
-                    let desired = ((command.positions[j].si_value() - current) / dt)
-                        .clamp(-max_speed, max_speed);
+                    let target = command.positions[j].si_value();
+                    let desired = ((target - current) / dt).clamp(-max_speed, max_speed);
                     let v = desired
                         .clamp(old_v - max_acceleration * dt, old_v + max_acceleration * dt)
                         .clamp(-max_speed, max_speed);
-                    let target = command.positions[j].si_value();
-                    command.positions[j] = self.last_command[j].with_si_value(current + v * dt);
+                    let raw_next = current + v * dt;
+                    let next = if raw_next.is_finite() {
+                        raw_next
+                    } else if raw_next.is_nan() {
+                        current
+                    } else {
+                        raw_next.clamp(-f64::MAX, f64::MAX)
+                    };
+                    command.positions[j] = self.last_command[j].with_si_value(next);
                     command.velocities[j] =
                         CuJointVelocity::from_coordinate(command.positions[j], v);
                     settled &=
@@ -1410,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_effort_non_finite_acceleration_faults_with_model_and_is_ignored_without() {
+    fn test_effort_non_finite_acceleration_faults_with_and_without_model() {
         let bad = CuTrajectoryFollowOutput {
             accelerations: rad_s2([f64::NAN, 0.0]),
             ..arm_setpoint()
@@ -1436,11 +1524,13 @@ mod tests {
             CuJointAcceleration::Prismatic(Acceleration::new::<meter_per_second_squared>(1.0));
         let out = run(&mut task, Some(wrong), Some(arm_state()));
         assert_eq!(out.status, CuControllerStatus::Fault);
-        // Without a model the acceleration is not read: plain PD.
+        // Without a model a non-finite acceleration still faults with the
+        // damping brake.
         let mut task = effort_task(false);
         let out = run(&mut task, Some(bad), Some(arm_state()));
-        assert_eq!(out.status, CuControllerStatus::Running);
-        assert_efforts(&out, arm_pd());
+        assert_eq!(out.status, CuControllerStatus::Fault);
+        assert_eq!(out.positions, rad(Q));
+        assert_efforts(&out, [-2.0 * QD[0], -0.5 * QD[1]]);
     }
 
     #[test]
@@ -1673,6 +1763,382 @@ mod tests {
             let cfg: ComponentConfig =
                 ron::from_str(&format!("#![enable(unwrap_newtypes)] {bad}")).unwrap();
             assert!(CuControllerTask::<2>::new(Some(&cfg), ()).is_err(), "{bad}");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ModeCase {
+        Position,
+        Velocity,
+        EffortNoModel,
+        EffortWithModel,
+    }
+
+    #[derive(Clone, Copy)]
+    enum BadSlot {
+        MeasuredPos,
+        MeasuredVel,
+        SetpointPos,
+        SetpointVel,
+        SetpointAcc,
+    }
+
+    fn build_mode_task(case: ModeCase, rate_limit: Option<CuRateLimit>) -> CuControllerTask<2> {
+        let (mode, effort_model) = match case {
+            ModeCase::Position => (CuControllerMode::Position, None),
+            ModeCase::Velocity => (CuControllerMode::Velocity, None),
+            ModeCase::EffortNoModel => (CuControllerMode::Effort, None),
+            ModeCase::EffortWithModel => (
+                CuControllerMode::Effort,
+                Some(CuEffortModel::new(arm_chain(), arm_inertia())),
+            ),
+        };
+        CuControllerTask::from_params(CuControllerParams {
+            mode,
+            rate_limit,
+            effort_gains: CuEffortGains {
+                kp: [10.0, 4.0],
+                kv: [2.0, 0.5],
+            },
+            effort_model,
+            ..CuControllerParams::default()
+        })
+        .unwrap()
+    }
+
+    fn assert_command_finite(out: &CuJointCommandPayload<2>) {
+        assert!(out.positions.iter().all(|p| p.si_value().is_finite()));
+        assert!(out.velocities.iter().all(|v| v.si_value().is_finite()));
+        assert!(out.efforts.iter().all(|e| e.si_value().is_finite()));
+        assert!(out.max_tracking_error.si_value().is_finite());
+    }
+
+    fn run_at(
+        task: &mut CuControllerTask<2>,
+        ctx: &CuContext,
+        setpoint: Option<CuTrajectoryFollowOutput<2>>,
+        state: Option<CuJointStatePayload<2>>,
+    ) -> CuJointCommandPayload<2> {
+        let setpoint_msg = CuMsg::new(setpoint);
+        let state_msg = CuMsg::new(state);
+        let input = (&setpoint_msg, &state_msg);
+        let mut output = CuMsg::<CuJointCommandPayload<2>>::default();
+        task.process(ctx, &input, &mut output).unwrap();
+        output.payload().unwrap().clone()
+    }
+
+    fn freeze_and_thaw(
+        task: &CuControllerTask<2>,
+        mut restored: CuControllerTask<2>,
+    ) -> CuControllerTask<2> {
+        let mut bytes = [0u8; 512];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
+        );
+        task.freeze(&mut encoder).unwrap();
+        let len = encoder.into_writer().bytes_written();
+        restored
+            .thaw(&mut bincode::de::DecoderImpl::new(
+                bincode::de::read::SliceReader::new(&bytes[..len]),
+                bincode::config::standard(),
+                (),
+            ))
+            .unwrap();
+        restored
+    }
+
+    fn inject_non_finite(
+        slot: BadSlot,
+        bad: f64,
+    ) -> (CuTrajectoryFollowOutput<2>, CuJointStatePayload<2>) {
+        let mut sp = arm_setpoint();
+        let mut st = arm_state();
+        match slot {
+            BadSlot::MeasuredPos => {
+                st.positions[0] = CuJointPosition::Revolute(Angle::new::<radian>(bad));
+            }
+            BadSlot::MeasuredVel => {
+                st.velocities[1] =
+                    CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(bad));
+            }
+            BadSlot::SetpointPos => {
+                sp.positions[0] = CuJointPosition::Revolute(Angle::new::<radian>(bad));
+            }
+            BadSlot::SetpointVel => {
+                sp.velocities[1] =
+                    CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(bad));
+            }
+            BadSlot::SetpointAcc => {
+                sp.accelerations[0] = CuJointAcceleration::Revolute(AngularAcceleration::new::<
+                    radian_per_second_squared,
+                >(bad));
+            }
+        }
+        (sp, st)
+    }
+
+    #[test]
+    fn test_non_finite_inputs_fault_recover_and_freeze_thaw() {
+        let modes = [
+            ModeCase::Position,
+            ModeCase::Velocity,
+            ModeCase::EffortNoModel,
+            ModeCase::EffortWithModel,
+        ];
+        let slots = [
+            BadSlot::MeasuredPos,
+            BadSlot::MeasuredVel,
+            BadSlot::SetpointPos,
+            BadSlot::SetpointVel,
+            BadSlot::SetpointAcc,
+        ];
+        let bad_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+        for mode in modes {
+            for slot in slots {
+                for bad in bad_values {
+                    let (bad_sp, bad_st) = inject_non_finite(slot, bad);
+                    let (ctx, clock) = CuContext::new_mock_clock();
+                    let mut task = build_mode_task(mode, None);
+
+                    let out = run_at(&mut task, &ctx, Some(bad_sp), Some(bad_st));
+                    assert_eq!(out.status, CuControllerStatus::Fault);
+                    assert_command_finite(&out);
+                    match slot {
+                        BadSlot::MeasuredPos | BadSlot::MeasuredVel => {
+                            assert_eq!(out.positions, [CuJointPosition::default(); 2]);
+                            assert_efforts(&out, [0.0; 2]);
+                        }
+                        BadSlot::SetpointPos | BadSlot::SetpointVel | BadSlot::SetpointAcc => {
+                            assert_eq!(out.positions, arm_state().positions);
+                        }
+                    }
+
+                    let mut restored = freeze_and_thaw(&task, build_mode_task(mode, None));
+                    let mut reference = build_mode_task(mode, None);
+
+                    clock.increment(CuDuration::from_nanos(10_000_000));
+                    let rec_task = run_at(&mut task, &ctx, Some(arm_setpoint()), Some(arm_state()));
+                    let rec_restored =
+                        run_at(&mut restored, &ctx, Some(arm_setpoint()), Some(arm_state()));
+                    let rec_ref = run_at(
+                        &mut reference,
+                        &ctx,
+                        Some(arm_setpoint()),
+                        Some(arm_state()),
+                    );
+
+                    assert_eq!(rec_task.status, CuControllerStatus::Running);
+                    assert_command_finite(&rec_task);
+                    assert_eq!(rec_task, rec_restored);
+                    assert_eq!(rec_task, rec_ref);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_non_finite_inputs_with_rate_limiter_fault_recover_and_freeze_thaw() {
+        let rate = Some(CuRateLimit {
+            max_speed: 1.5,
+            max_acceleration: 6.0,
+        });
+        let slots = [
+            BadSlot::MeasuredPos,
+            BadSlot::MeasuredVel,
+            BadSlot::SetpointPos,
+            BadSlot::SetpointVel,
+            BadSlot::SetpointAcc,
+        ];
+        let bad_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+
+        for slot in slots {
+            for bad in bad_values {
+                for preseed in [false, true] {
+                    let (ctx, clock) = CuContext::new_mock_clock();
+                    let mut task = build_mode_task(ModeCase::Position, rate);
+                    let mut prior_positions = [CuJointPosition::default(); 2];
+                    if preseed {
+                        let first =
+                            run_at(&mut task, &ctx, Some(arm_setpoint()), Some(arm_state()));
+                        prior_positions = first.positions;
+                        clock.increment(CuDuration::from_nanos(10_000_000));
+                    }
+
+                    let (bad_sp, bad_st) = inject_non_finite(slot, bad);
+                    let out = run_at(&mut task, &ctx, Some(bad_sp), Some(bad_st));
+                    assert_eq!(out.status, CuControllerStatus::Fault);
+                    assert_command_finite(&out);
+                    match slot {
+                        BadSlot::MeasuredPos | BadSlot::MeasuredVel => {
+                            assert_eq!(out.positions, prior_positions);
+                        }
+                        BadSlot::SetpointPos | BadSlot::SetpointVel | BadSlot::SetpointAcc => {
+                            assert_eq!(out.positions, arm_state().positions);
+                        }
+                    }
+
+                    let mut restored =
+                        freeze_and_thaw(&task, build_mode_task(ModeCase::Position, rate));
+                    let mut reference = build_mode_task(ModeCase::Position, rate);
+
+                    // Recovery cycle 1 (re-seeds rate limiter) and cycle 2 (dt > 0).
+                    for _ in 0..2 {
+                        clock.increment(CuDuration::from_nanos(10_000_000));
+                        let rec_task =
+                            run_at(&mut task, &ctx, Some(arm_setpoint()), Some(arm_state()));
+                        let rec_restored =
+                            run_at(&mut restored, &ctx, Some(arm_setpoint()), Some(arm_state()));
+                        let rec_ref = run_at(
+                            &mut reference,
+                            &ctx,
+                            Some(arm_setpoint()),
+                            Some(arm_state()),
+                        );
+                        assert_eq!(rec_task.status, CuControllerStatus::Running);
+                        assert_command_finite(&rec_task);
+                        assert_eq!(rec_task, rec_restored);
+                        assert_eq!(rec_task, rec_ref);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_does_not_latch_non_finite_on_running_transition() {
+        let rate = Some(CuRateLimit {
+            max_speed: 1.5,
+            max_acceleration: 6.0,
+        });
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for after_idle in [false, true] {
+                let (ctx, clock) = CuContext::new_mock_clock();
+                let mut task = build_mode_task(ModeCase::Position, rate);
+                let mut expected_held = [CuJointPosition::default(); 2];
+                if after_idle {
+                    let idle_out = run_at(&mut task, &ctx, None, Some(state(0.2)));
+                    assert_eq!(idle_out.status, CuControllerStatus::Idle);
+                    expected_held = state(0.2).positions;
+                    clock.increment(CuDuration::from_nanos(10_000_000));
+                }
+
+                // Mechanism 3: transition toward Running with a non-finite
+                // measured position while the rate limiter is enabled.
+                let mut bad_state = state(0.2);
+                bad_state.positions[0] = CuJointPosition::Revolute(Angle::new::<radian>(bad));
+                let fault_out = run_at(
+                    &mut task,
+                    &ctx,
+                    Some(follow(0.4, CuFollowStatus::Running)),
+                    Some(bad_state),
+                );
+                assert_eq!(fault_out.status, CuControllerStatus::Fault);
+                assert_command_finite(&fault_out);
+                assert_eq!(fault_out.positions, expected_held);
+
+                // Subsequent good cycles must transition into Running cleanly
+                // and step toward 0.4 without latching NaN/Inf.
+                clock.increment(CuDuration::from_nanos(10_000_000));
+                let seed_out = run_at(
+                    &mut task,
+                    &ctx,
+                    Some(follow(0.4, CuFollowStatus::Running)),
+                    Some(state(0.2)),
+                );
+                assert_eq!(seed_out.status, CuControllerStatus::Running);
+                assert_command_finite(&seed_out);
+                assert_eq!(seed_out.positions, state(0.2).positions);
+
+                clock.increment(CuDuration::from_nanos(10_000_000));
+                let step_out = run_at(
+                    &mut task,
+                    &ctx,
+                    Some(follow(0.4, CuFollowStatus::Running)),
+                    Some(state(0.2)),
+                );
+                assert_eq!(step_out.status, CuControllerStatus::Running);
+                assert_command_finite(&step_out);
+                assert!(step_out.positions[0].si_value() > 0.2);
+                assert!(step_out.velocities[0].si_value() > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_non_finite_state_with_idle_or_not_ready_faults_without_echo() {
+        for mode in [
+            ModeCase::Position,
+            ModeCase::Velocity,
+            ModeCase::EffortNoModel,
+            ModeCase::EffortWithModel,
+        ] {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                for in_vel in [false, true] {
+                    let mut task = build_mode_task(mode, None);
+                    // Establish a prior finite command first.
+                    let good = run(&mut task, Some(arm_setpoint()), Some(arm_state()));
+                    assert_eq!(good.status, CuControllerStatus::Running);
+
+                    let mut bad_state = arm_state();
+                    if in_vel {
+                        bad_state.velocities[0] = CuJointVelocity::Revolute(
+                            AngularVelocity::new::<radian_per_second>(bad),
+                        );
+                    } else {
+                        bad_state.positions[1] =
+                            CuJointPosition::Revolute(Angle::new::<radian>(bad));
+                    }
+
+                    // No setpoint, Idle setpoint, and NotReady state must all
+                    // fault, hold the last finite command, and emit zero effort.
+                    for (sp, status) in [
+                        (None, CuRobotStatus::Ready),
+                        (
+                            Some(follow(0.0, CuFollowStatus::Idle)),
+                            CuRobotStatus::Ready,
+                        ),
+                        (Some(arm_setpoint()), CuRobotStatus::NotReady),
+                    ] {
+                        let st = CuJointStatePayload {
+                            status,
+                            ..bad_state.clone()
+                        };
+                        let out = run(&mut task, sp, Some(st));
+                        assert_eq!(out.status, CuControllerStatus::Fault);
+                        assert_command_finite(&out);
+                        assert_eq!(out.positions, good.positions);
+                        assert_efforts(&out, [0.0; 2]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_finite_overflow_keeps_command_finite() {
+        for mode in [
+            ModeCase::Position,
+            ModeCase::Velocity,
+            ModeCase::EffortNoModel,
+            ModeCase::EffortWithModel,
+        ] {
+            let mut task = build_mode_task(mode, None);
+            let huge_sp = CuTrajectoryFollowOutput {
+                positions: rad([1e308, 0.0]),
+                velocities: rad_s([1e308, 0.0]),
+                accelerations: rad_s2([0.0; 2]),
+                status: CuFollowStatus::Running,
+            };
+            let huge_st = CuJointStatePayload {
+                status: CuRobotStatus::Ready,
+                positions: rad([-1e308, 0.0]),
+                velocities: rad_s([-1e308, 0.0]),
+            };
+            let out = run(&mut task, Some(huge_sp), Some(huge_st));
+            assert_eq!(out.status, CuControllerStatus::Fault);
+            assert_command_finite(&out);
         }
     }
 }

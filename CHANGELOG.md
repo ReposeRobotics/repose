@@ -110,6 +110,18 @@ may be breaking.
 
 ### Fixed
 
+- `repose-controller`: `CuControllerTask::process` never emits a non-finite
+  field (`positions`, `velocities`, `efforts`, `max_tracking_error`) in
+  `CuJointCommandPayload` or stores non-finite state across cycles (`last_command`,
+  rate-limiter state, or frozen state). Measured states with any non-finite
+  position or velocity are treated as unusable (`Fault`, holding the last finite
+  command with zero effort without echoing the bad state); active setpoints
+  with any non-finite position, velocity, or acceleration fault across all
+  modes (holding the finite measured state with the effort brake, or the last
+  finite command otherwise); tracking-error and effort arithmetic guards against
+  overflow; and subsequent good cycles resume normal operation without latching
+  `NaN` or `±∞` in the rate limiter.
+
 - `repose-trajectory` / `repose-controller`: cancelling a trajectory no longer
   commands joint zero. After an empty trajectory the follower used to emit
   `Idle` with zero positions, and the controller chased them whenever zero was

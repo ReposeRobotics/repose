@@ -1,0 +1,15 @@
+# Ferrocene toolchain manifest for the `ferrocene` CI lane in
+# .github/workflows/ci.yml. The toolchain is qualified for IEC 61508 and
+# ISO 26262; commercial use needs a CriticalUp subscription (see
+# docs/regulatory-positioning.md).
+manifest-version = 1
+
+[products.ferrocene]
+release = "stable-26.05.0"
+packages = [
+    "rustc-${rustc-host}",
+    "cargo-${rustc-host}",
+    "rust-std-${rustc-host}",
+    "rust-std-aarch64-unknown-none",
+    "rust-std-thumbv7em-none-eabihf",
+]

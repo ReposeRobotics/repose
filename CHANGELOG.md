@@ -228,6 +228,13 @@ may be breaking.
 - Benchmark data pipeline: the wall-clock workflow now runs weekly, converts
   Divan output to per-system JSON (`bench_to_json.py`), and publishes a merged
   `benchmarks.json` to the `benchmark-data` branch for the website graph.
+- Ferrocene CI lane: a `ferrocene` CI job builds every library crate except
+  the simulator for `aarch64-unknown-none` and `thumbv7em-none-eabihf` with
+  the Ferrocene compiler via `criticalup`, using the `CRITICALUP_TOKEN`
+  repository secret; it skips when the secret is not set.
+- Requirements-traceability stub for the safety-related slice:
+  `docs/safety/requirements.md` maps requirements S-1 to S-7 to design units
+  and verification artifacts.
 
 ### Changed
 

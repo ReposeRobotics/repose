@@ -1,5 +1,8 @@
-//! Crate-level tests of [`CuPolicyTask`] against the committed ONNX fixtures.
+//! Crate-level tests of [`CuPolicyTask`] against the committed ONNX fixtures,
+//! of [`CuJointReachObservationTask`], and of the two chained.
 
+use crate::CuJointReachObservationParams;
+use crate::CuJointReachObservationTask;
 use crate::CuObservationTerm;
 use crate::CuPolicyAction;
 use crate::CuPolicyObservation;
@@ -29,14 +32,43 @@ fn vel(rad_s: f64) -> CuJointVelocity {
     CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(rad_s))
 }
 
-/// `N = 2`, `OBS = 4`, `ACT = 4` params over `joint_positions + goal_error`.
-fn identity_params() -> CuPolicyParams<2, 4, 4> {
+/// `IN = OBS = ACT = 4` params over the identity model, no previous action.
+fn identity_params() -> CuPolicyParams<4, 4, 4> {
     CuPolicyParams {
         model: fixture("identity_4.onnx"),
+        ..CuPolicyParams::default()
+    }
+}
+
+/// `N = 2`, `IN = 4` params over `joint_positions + goal_error`.
+fn reach_params() -> CuJointReachObservationParams<2, 4> {
+    CuJointReachObservationParams {
         observation: vec![
             CuObservationTerm::JointPositions { scale: 1.0 },
             CuObservationTerm::GoalError { scale: 1.0 },
         ],
+        ..CuJointReachObservationParams::default()
+    }
+}
+
+/// `N = 6`, `IN = 18` params over positions, velocities (scale `velocity`),
+/// and goal error.
+fn reach6_params(velocity: f64) -> CuJointReachObservationParams<6, 18> {
+    CuJointReachObservationParams {
+        observation: vec![
+            CuObservationTerm::JointPositions { scale: 1.0 },
+            CuObservationTerm::JointVelocities { scale: velocity },
+            CuObservationTerm::GoalError { scale: 1.0 },
+        ],
+        ..CuJointReachObservationParams::default()
+    }
+}
+
+/// `IN = 18`, `OBS = 24`, `ACT = 6` over `linear_24_6`, previous action on.
+fn linear_params() -> CuPolicyParams<18, 24, 6> {
+    CuPolicyParams {
+        model: fixture("linear_24_6.onnx"),
+        previous_action: true,
         ..CuPolicyParams::default()
     }
 }
@@ -55,25 +87,46 @@ fn goal2(positions: [f64; 2]) -> CuJointPositionsPayload<2> {
     }
 }
 
-fn run2<const OBS: usize, const ACT: usize>(
-    task: &mut CuPolicyTask<2, OBS, ACT>,
-    state: Option<CuJointStatePayload<2>>,
-    goal: Option<CuJointPositionsPayload<2>>,
+fn features<const IN: usize>(values: [f32; IN]) -> Option<CuPolicyObservation<IN>> {
+    Some(CuPolicyObservation { values })
+}
+
+/// One policy cycle on `input`; returns `(model input, action)`.
+fn run<const IN: usize, const OBS: usize, const ACT: usize>(
+    task: &mut CuPolicyTask<IN, OBS, ACT>,
+    input: Option<CuPolicyObservation<IN>>,
 ) -> (CuPolicyObservation<OBS>, CuPolicyAction<ACT>) {
-    let state_msg = CuMsg::new(state);
-    let goal_msg = CuMsg::new(goal);
-    let input = (&state_msg, &goal_msg);
+    let input_msg = CuMsg::new(input);
     let mut output = (
         CuMsg::<CuPolicyObservation<OBS>>::default(),
         CuMsg::<CuPolicyAction<ACT>>::default(),
     );
     let (ctx, _clock) = CuContext::new_mock_clock();
-    task.process(&ctx, &input, &mut output).unwrap();
+    task.process(&ctx, &input_msg, &mut output).unwrap();
     (
         output.0.payload().unwrap().clone(),
         output.1.payload().unwrap().clone(),
     )
 }
+
+/// One observation cycle; returns the payload, if any.
+fn observe<const N: usize, const IN: usize>(
+    task: &mut CuJointReachObservationTask<N, IN>,
+    state: Option<CuJointStatePayload<N>>,
+    goal: Option<CuJointPositionsPayload<N>>,
+) -> Option<CuPolicyObservation<IN>> {
+    let state_msg = CuMsg::new(state);
+    let goal_msg = CuMsg::new(goal);
+    let mut output = CuMsg::<CuPolicyObservation<IN>>::default();
+    // A stale payload must not survive a cycle without usable inputs.
+    output.set_payload(CuPolicyObservation { values: [7.0; IN] });
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    task.process(&ctx, &(&state_msg, &goal_msg), &mut output)
+        .unwrap();
+    output.payload().cloned()
+}
+
+// --- Policy task: params and model loading ---------------------------------
 
 #[test]
 fn params_round_trip_and_typo_rejection() {
@@ -82,23 +135,22 @@ fn params_round_trip_and_typo_rejection() {
 {{
     "model": "{}",
     "decimation": 2,
-    "default_positions": [{{"revolute": 0.1}}, {{"revolute": -0.2}}],
-    "observation": [
-        {{"joint_positions": {{"scale": 1.0}}}},
-        {{"goal_error": {{"scale": 2.0}}}},
-    ],
+    "previous_action": true,
 }}"#,
         fixture("identity_4.onnx")
     );
     let cfg: ComponentConfig = ron::from_str(&ron).unwrap();
-    let task = CuPolicyTask::<2, 4, 4>::new(Some(&cfg), ()).unwrap();
-    assert_eq!(task.params().decimation, 2);
-    assert_eq!(task.params().default_positions[0].si_value(), 0.1);
-    assert_eq!(task.params().default_positions[1].si_value(), -0.2);
+    // identity_4 is [1, 4] -> [1, 4], so with the previous action appended
+    // the input carries no features: IN = 0, OBS = IN + ACT = 4.
+    let params: CuPolicyParams<0, 4, 4> = cfg.deserialize_into().unwrap();
+    assert_eq!(params.decimation, 2);
+    assert!(params.previous_action);
+    let task = CuPolicyTask::<0, 4, 4>::new(Some(&cfg), ()).unwrap();
+    assert_eq!(task.params(), &params);
 
     // Serializing the params and reading them back is an identity.
     let text = ron::to_string(task.params()).unwrap();
-    let back: CuPolicyParams<2, 4, 4> = ron::from_str(&text).unwrap();
+    let back: CuPolicyParams<0, 4, 4> = ron::from_str(&text).unwrap();
     assert_eq!(&back, task.params());
 
     let typo = format!(
@@ -107,28 +159,14 @@ fn params_round_trip_and_typo_rejection() {
         fixture("identity_4.onnx")
     );
     let cfg: ComponentConfig = ron::from_str(&typo).unwrap();
-    let err = CuPolicyTask::<2, 4, 4>::new(Some(&cfg), ()).err().unwrap();
+    let err = CuPolicyTask::<4, 4, 4>::new(Some(&cfg), ()).err().unwrap();
     assert!(format!("{err}").contains("decimaton"), "{err}");
-}
-
-#[test]
-fn layout_width_mismatch_is_rejected() {
-    let params = CuPolicyParams::<2, 5, 4> {
-        model: fixture("identity_4.onnx"),
-        observation: vec![
-            CuObservationTerm::JointPositions { scale: 1.0 },
-            CuObservationTerm::GoalError { scale: 1.0 },
-        ],
-        ..CuPolicyParams::default()
-    };
-    assert!(params.validate().is_err());
-    assert!(CuPolicyTask::from_params(params).is_err());
 }
 
 #[test]
 fn invalid_params_are_rejected() {
     let base = identity_params();
-    assert!(CuPolicyParams::<2, 4, 4>::default().validate().is_err());
+    assert!(CuPolicyParams::<4, 4, 4>::default().validate().is_err());
     assert!(
         CuPolicyParams {
             decimation: 0,
@@ -148,21 +186,40 @@ fn invalid_params_are_rejected() {
 }
 
 #[test]
+fn previous_action_sets_the_required_model_input_width() {
+    let with = |previous_action| CuPolicyParams::<18, 24, 6> {
+        previous_action,
+        ..linear_params()
+    };
+    assert!(with(true).validate().is_ok());
+    let err = with(false).validate().err().unwrap();
+    assert!(format!("{err}").contains("OBS must equal IN"), "{err}");
+
+    let without = |previous_action| CuPolicyParams::<4, 4, 4> {
+        previous_action,
+        ..identity_params()
+    };
+    assert!(without(false).validate().is_ok());
+    let err = without(true).validate().err().unwrap();
+    assert!(
+        format!("{err}").contains("OBS must equal IN + ACT"),
+        "{err}"
+    );
+    assert!(CuPolicyTask::from_params(without(true)).is_err());
+}
+
+#[test]
 fn model_shape_mismatch_is_rejected_at_startup() {
     // bad_shape needs a 5-wide input; pinning OBS = 4 must fail.
-    let params = CuPolicyParams::<2, 4, 4> {
+    let params = CuPolicyParams::<4, 4, 4> {
         model: fixture("bad_shape.onnx"),
         ..identity_params()
     };
     assert!(CuPolicyTask::from_params(params).is_err());
 
     // identity_4 produces 4 outputs; ACT = 6 must fail.
-    let params = CuPolicyParams::<2, 4, 6> {
+    let params = CuPolicyParams::<4, 4, 6> {
         model: fixture("identity_4.onnx"),
-        observation: vec![
-            CuObservationTerm::JointPositions { scale: 1.0 },
-            CuObservationTerm::GoalError { scale: 1.0 },
-        ],
         ..CuPolicyParams::default()
     };
     assert!(CuPolicyTask::from_params(params).is_err());
@@ -172,12 +229,12 @@ fn model_shape_mismatch_is_rejected_at_startup() {
 fn hash_mismatch_is_rejected_and_correct_hash_accepted() {
     let bytes = std::fs::read(fixture("identity_4.onnx")).unwrap();
     let hash = crate::backend::hash_model_bytes(&bytes);
-    let wrong = CuPolicyParams::<2, 4, 4> {
+    let wrong = CuPolicyParams::<4, 4, 4> {
         model_hash: Some(hash ^ 1),
         ..identity_params()
     };
     assert!(CuPolicyTask::from_params(wrong).is_err());
-    let right = CuPolicyParams::<2, 4, 4> {
+    let right = CuPolicyParams::<4, 4, 4> {
         model_hash: Some(hash),
         ..identity_params()
     };
@@ -185,143 +242,148 @@ fn hash_mismatch_is_rejected_and_correct_hash_accepted() {
 }
 
 #[test]
+fn double_model_is_rejected_at_startup() {
+    let params = CuPolicyParams::<4, 4, 4> {
+        model: fixture("double_4.onnx"),
+        ..identity_params()
+    };
+    let err = CuPolicyTask::from_params(params).err().unwrap();
+    assert!(format!("{err}").contains("must be f32"), "{err}");
+}
+
+#[test]
+fn declared_input_width_mismatch_is_rejected_at_startup() {
+    // The graph (an Identity) would run at any width; the declared [1, 5]
+    // input must still be rejected for OBS = 4.
+    let params = CuPolicyParams::<4, 4, 4> {
+        model: fixture("identity_5.onnx"),
+        ..identity_params()
+    };
+    let err = CuPolicyTask::from_params(params).err().unwrap();
+    assert!(format!("{err}").contains("shape [1, OBS]"), "{err}");
+}
+
+#[test]
+fn dynamic_batch_model_loads_and_runs() {
+    let params = CuPolicyParams::<4, 4, 4> {
+        model: fixture("batch_4.onnx"),
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let (_, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+    assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
+}
+
+#[test]
+fn wrong_width_behind_an_unknown_batch_dimension_is_rejected() {
+    let params = CuPolicyParams::<4, 4, 4> {
+        model: fixture("open_batch_5.onnx"),
+        ..identity_params()
+    };
+    let err = CuPolicyTask::from_params(params).err().unwrap();
+    assert!(format!("{err}").contains("shape [1, OBS]"), "{err}");
+}
+
+// --- Policy task: cycles ----------------------------------------------------
+
+#[test]
 fn identity_model_gives_exact_output() {
     let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
-    let (observation, action) = run2(
-        &mut task,
-        Some(state2([0.5, -0.25])),
-        Some(goal2([1.5, 0.75])),
-    );
+    let (observation, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
     assert_eq!(observation.values, [0.5, -0.25, 1.0, 1.0]);
     assert_eq!(action.values, observation.values);
     assert_eq!(action.status, CuPolicyStatus::Fresh);
 }
 
 #[test]
-fn linear_model_selects_goal_error_slice() {
-    let params = CuPolicyParams::<6, 24, 6> {
-        model: fixture("linear_24_6.onnx"),
-        observation: vec![
-            CuObservationTerm::JointPositions { scale: 1.0 },
-            CuObservationTerm::JointVelocities { scale: 0.1 },
-            CuObservationTerm::GoalError { scale: 1.0 },
-            CuObservationTerm::PreviousAction,
-        ],
-        ..CuPolicyParams::default()
-    };
-    let mut task = CuPolicyTask::from_params(params).unwrap();
-    let state = CuJointStatePayload::<6> {
-        status: CuRobotStatus::Ready,
-        positions: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0].map(pos),
-        velocities: [vel(10.0); 6],
-    };
-    let goal = CuJointPositionsPayload::<6> {
-        positions: [2.0; 6].map(pos),
-    };
-    let state_msg = CuMsg::new(Some(state));
-    let goal_msg = CuMsg::new(Some(goal));
-    let input = (&state_msg, &goal_msg);
-    let mut output = (
-        CuMsg::<CuPolicyObservation<24>>::default(),
-        CuMsg::<CuPolicyAction<6>>::default(),
-    );
-    let (ctx, _clock) = CuContext::new_mock_clock();
-    task.process(&ctx, &input, &mut output).unwrap();
-    let observation = output.0.payload().unwrap();
-    assert_eq!(&observation.values[0..6], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
-    assert_eq!(&observation.values[6..12], [1.0; 6]);
-    assert_eq!(
-        &observation.values[12..18],
-        [2.0, 1.0, 0.0, -1.0, -2.0, -3.0]
-    );
-    assert_eq!(&observation.values[18..24], [0.0; 6]);
-    let action = output.1.payload().unwrap();
-    // The fixture gain is 0.5 (see make_fixtures.py).
+fn previous_action_is_appended_after_the_features() {
+    let mut task = CuPolicyTask::from_params(linear_params()).unwrap();
+    let mut input = [0.0f32; 18];
+    input[12..18].copy_from_slice(&[2.0, 1.0, 0.0, -1.0, -2.0, -3.0]);
+    let (observation, action) = run(&mut task, features(input));
+    assert_eq!(observation.values[..18], input);
+    assert_eq!(observation.values[18..24], [0.0; 6]);
+    // The fixture gain is 0.5 on the goal-error slice (see make_fixtures.py).
     assert_eq!(action.values, [1.0, 0.5, 0.0, -0.5, -1.0, -1.5]);
-    assert_eq!(action.status, CuPolicyStatus::Fresh);
 
-    // The next cycle's previous_action term carries this raw action.
-    let state_msg = CuMsg::new(Some(CuJointStatePayload::<6> {
-        status: CuRobotStatus::Ready,
-        positions: [pos(0.0); 6],
-        velocities: [vel(0.0); 6],
-    }));
-    let input = (&state_msg, &goal_msg);
-    task.process(&ctx, &input, &mut output).unwrap();
-    let observation = output.0.payload().unwrap();
+    let (observation, _) = run(&mut task, features([0.25; 18]));
+    assert_eq!(observation.values[..18], [0.25; 18]);
     assert_eq!(
-        &observation.values[18..24],
+        observation.values[18..24],
         [1.0, 0.5, 0.0, -0.5, -1.0, -1.5]
     );
 }
 
 #[test]
 fn decimation_holds_between_inferences() {
-    let params = CuPolicyParams::<2, 4, 4> {
+    let params = CuPolicyParams::<4, 4, 4> {
         decimation: 3,
         ..identity_params()
     };
     let mut task = CuPolicyTask::from_params(params).unwrap();
-    let goal = goal2([1.5, 0.75]);
 
-    let (_, action) = run2(&mut task, Some(state2([0.5, -0.25])), Some(goal.clone()));
+    let (_, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
     assert_eq!(action.status, CuPolicyStatus::Fresh);
     assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
 
-    // The state moved, but cycles 1 and 2 repeat the inferred action while
-    // the observation still shows the new state.
+    // The input moved, but cycles 1 and 2 repeat the inferred action while
+    // the observation still shows the new input.
     for _ in 0..2 {
-        let (observation, action) = run2(&mut task, Some(state2([0.25, 0.0])), Some(goal.clone()));
+        let (observation, action) = run(&mut task, features([0.25, 0.0, 1.25, 0.75]));
         assert_eq!(observation.values, [0.25, 0.0, 1.25, 0.75]);
         assert_eq!(action.status, CuPolicyStatus::Held);
         assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
     }
 
-    let (_, action) = run2(&mut task, Some(state2([0.25, 0.0])), Some(goal));
+    let (_, action) = run(&mut task, features([0.25, 0.0, 1.25, 0.75]));
     assert_eq!(action.status, CuPolicyStatus::Fresh);
     assert_eq!(action.values, [0.25, 0.0, 1.25, 0.75]);
 }
 
 #[test]
 fn nan_model_output_is_fault_with_zero_values() {
-    let params = CuPolicyParams::<2, 4, 4> {
+    let params = CuPolicyParams::<4, 4, 4> {
         model: fixture("nan.onnx"),
         ..identity_params()
     };
     let mut task = CuPolicyTask::from_params(params).unwrap();
-    let (observation, action) = run2(
-        &mut task,
-        Some(state2([0.5, -0.25])),
-        Some(goal2([1.5, 0.75])),
-    );
+    let (observation, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
     assert_eq!(observation.values, [0.5, -0.25, 1.0, 1.0]);
     assert_eq!(action.status, CuPolicyStatus::Fault);
     assert_eq!(action.values, [0.0; 4]);
 }
 
 #[test]
-fn missing_or_unready_inputs_are_idle() {
+fn missing_input_is_idle() {
     let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
-    let (observation, action) = run2(&mut task, Some(state2([0.5, -0.25])), None);
+    let (observation, action) = run(&mut task, None);
     assert_eq!(observation.values, [0.0; 4]);
     assert_eq!(action.status, CuPolicyStatus::Idle);
     assert_eq!(action.values, [0.0; 4]);
+}
 
-    let mut not_ready = state2([0.5, -0.25]);
-    not_ready.status = CuRobotStatus::NotReady;
-    let (_, action) = run2(&mut task, Some(not_ready), Some(goal2([1.5, 0.75])));
+#[test]
+fn missing_input_resets_the_previous_action() {
+    let mut task = CuPolicyTask::from_params(linear_params()).unwrap();
+    let mut input = [0.0f32; 18];
+    input[12..18].copy_from_slice(&[1.0; 6]);
+    let (_, action) = run(&mut task, features(input));
+    assert_eq!(action.values, [0.5; 6]);
+    let (_, action) = run(&mut task, None);
     assert_eq!(action.status, CuPolicyStatus::Idle);
+    let (observation, _) = run(&mut task, features(input));
+    assert_eq!(observation.values[18..24], [0.0; 6]);
 }
 
 #[test]
 fn freeze_thaw_resumes_identically() {
-    let params = CuPolicyParams::<2, 4, 4> {
+    let params = CuPolicyParams::<4, 4, 4> {
         decimation: 2,
         ..identity_params()
     };
     let mut task = CuPolicyTask::from_params(params.clone()).unwrap();
-    let goal = goal2([1.5, 0.75]);
-    let (_, action) = run2(&mut task, Some(state2([0.5, -0.25])), Some(goal.clone()));
+    let (_, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
     assert_eq!(action.status, CuPolicyStatus::Fresh);
 
     let mut bytes = [0u8; 256];
@@ -344,8 +406,8 @@ fn freeze_thaw_resumes_identically() {
     // Both tasks are mid-decimation: the next cycle holds, the one after
     // infers, and the outputs agree exactly.
     for expected in [CuPolicyStatus::Held, CuPolicyStatus::Fresh] {
-        let (obs_a, act_a) = run2(&mut task, Some(state2([0.25, 0.0])), Some(goal.clone()));
-        let (obs_b, act_b) = run2(&mut restored, Some(state2([0.25, 0.0])), Some(goal.clone()));
+        let (obs_a, act_a) = run(&mut task, features([0.25, 0.0, 1.25, 0.75]));
+        let (obs_b, act_b) = run(&mut restored, features([0.25, 0.0, 1.25, 0.75]));
         assert_eq!(act_a.status, expected);
         assert_eq!(obs_a, obs_b);
         assert_eq!(act_a, act_b);
@@ -353,29 +415,15 @@ fn freeze_thaw_resumes_identically() {
 }
 
 #[test]
-fn double_model_is_rejected_at_startup() {
-    let params = CuPolicyParams::<2, 4, 4> {
-        model: fixture("double_4.onnx"),
-        ..identity_params()
-    };
-    let err = CuPolicyTask::from_params(params).err().unwrap();
-    assert!(format!("{err}").contains("must be f32"), "{err}");
-}
-
-#[test]
 fn fault_lasts_until_the_next_inference() {
-    let params = CuPolicyParams::<2, 4, 4> {
+    let params = CuPolicyParams::<4, 4, 4> {
         model: fixture("nan.onnx"),
         decimation: 2,
         ..identity_params()
     };
     let mut task = CuPolicyTask::from_params(params).unwrap();
     for _ in 0..4 {
-        let (_, action) = run2(
-            &mut task,
-            Some(state2([0.5, -0.25])),
-            Some(goal2([1.5, 0.75])),
-        );
+        let (_, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
         assert_eq!(action.status, CuPolicyStatus::Fault);
         assert_eq!(action.values, [0.0; 4]);
     }
@@ -383,19 +431,14 @@ fn fault_lasts_until_the_next_inference() {
 
 #[test]
 fn idle_restarts_the_decimation_count() {
-    let params = CuPolicyParams::<2, 4, 4> {
+    let params = CuPolicyParams::<4, 4, 4> {
         decimation: 3,
         ..identity_params()
     };
     let mut task = CuPolicyTask::from_params(params).unwrap();
-    let goal = goal2([1.5, 0.75]);
-    let statuses = [
-        Some(state2([0.5, -0.25])),
-        None,
-        Some(state2([0.5, -0.25])),
-        Some(state2([0.5, -0.25])),
-    ]
-    .map(|state| run2(&mut task, state, Some(goal.clone())).1.status);
+    let input = features([0.5, -0.25, 1.0, 1.0]);
+    let statuses =
+        [input.clone(), None, input.clone(), input].map(|input| run(&mut task, input).1.status);
     assert_eq!(
         statuses,
         [
@@ -408,179 +451,278 @@ fn idle_restarts_the_decimation_count() {
 }
 
 #[test]
-fn non_finite_observation_is_fault_and_recovers() {
+fn nan_input_is_fault_and_recovers() {
     let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
-    let (_, action) = run2(
-        &mut task,
-        Some(state2([f64::NAN, -0.25])),
-        Some(goal2([1.5, 0.75])),
-    );
+    let (_, action) = run(&mut task, features([f32::NAN, -0.25, 1.0, 1.0]));
     assert_eq!(action.status, CuPolicyStatus::Fault);
     assert_eq!(action.values, [0.0; 4]);
-    let (_, action) = run2(
-        &mut task,
-        Some(state2([0.5, -0.25])),
-        Some(goal2([1.5, 0.75])),
-    );
+    let (_, action) = run(&mut task, features([0.5, -0.25, 1.0, 1.0]));
     assert_eq!(action.status, CuPolicyStatus::Fresh);
 }
 
 #[test]
-fn mismatched_joint_kinds_are_fault() {
-    use cu29::units::si::f64::Length;
-    use cu29::units::si::length::meter;
-    let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
-    // A prismatic goal against a revolute state: meters minus radians.
-    let mut goal = goal2([1.5, 0.75]);
-    goal.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.75));
-    let (_, action) = run2(&mut task, Some(state2([0.5, -0.25])), Some(goal));
-    assert_eq!(action.status, CuPolicyStatus::Fault);
-    assert_eq!(action.values, [0.0; 4]);
+fn bad_inputs_fault_a_held_cycle() {
+    let params = CuPolicyParams::<4, 4, 4> {
+        decimation: 3,
+        ..identity_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let good = [0.5, -0.25, 1.0, 1.0];
+    let actions = [good, [f32::NAN, -0.25, 1.0, 1.0], good, good]
+        .map(|input| run(&mut task, features(input)).1);
+    assert_eq!(actions[0].status, CuPolicyStatus::Fresh);
+    // A non-finite input on a held cycle faults, and the fault lasts until
+    // the next inference.
+    assert_eq!(actions[1].status, CuPolicyStatus::Fault);
+    assert_eq!(actions[1].values, [0.0; 4]);
+    assert_eq!(actions[2].status, CuPolicyStatus::Fault);
+    assert_eq!(actions[3].status, CuPolicyStatus::Fresh);
 }
 
 #[test]
-fn tov_is_propagated_from_the_joint_state() {
+fn held_cycle_fault_clears_the_previous_action() {
+    let params = CuPolicyParams::<18, 24, 6> {
+        decimation: 3,
+        ..linear_params()
+    };
+    let mut task = CuPolicyTask::from_params(params).unwrap();
+    let mut good = [0.0f32; 18];
+    good[12..18].copy_from_slice(&[1.0; 6]);
+    // Inference: a nonzero action (0.5 * goal error).
+    let (_, action) = run(&mut task, features(good));
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+    assert_eq!(action.values, [0.5; 6]);
+    // A held cycle with a non-finite input faults and publishes zeros.
+    let (_, action) = run(&mut task, features([f32::NAN; 18]));
+    assert_eq!(action.status, CuPolicyStatus::Fault);
+    // The next model input's previous action is what was published (zeros),
+    // not the action from before the fault.
+    let (observation, _) = run(&mut task, features(good));
+    assert_eq!(observation.values[18..24], [0.0; 6]);
+}
+
+#[test]
+fn policy_tov_is_propagated_from_the_input() {
     let mut task = CuPolicyTask::from_params(identity_params()).unwrap();
-    let mut state_msg = CuMsg::new(Some(state2([0.5, -0.25])));
-    state_msg.tov = Tov::Time(CuTime::from_nanos(424_242));
-    let goal_msg = CuMsg::new(Some(goal2([1.5, 0.75])));
+    let mut input = CuMsg::new(features([0.5, -0.25, 1.0, 1.0]));
+    input.tov = Tov::Time(CuTime::from_nanos(424_242));
     let mut output = (
         CuMsg::<CuPolicyObservation<4>>::default(),
         CuMsg::<CuPolicyAction<4>>::default(),
     );
     let (ctx, _clock) = CuContext::new_mock_clock();
-    task.process(&ctx, &(&state_msg, &goal_msg), &mut output)
+    task.process(&ctx, &input, &mut output).unwrap();
+    assert_eq!(output.0.tov, input.tov);
+    assert_eq!(output.1.tov, input.tov);
+}
+
+// --- Observation task -------------------------------------------------------
+
+#[test]
+fn observation_params_round_trip_and_typo_rejection() {
+    let ron = r#"#![enable(unwrap_newtypes)]
+{
+    "default_positions": [{"revolute": 0.1}, {"revolute": -0.2}],
+    "observation": [
+        {"joint_positions": {"scale": 1.0}},
+        {"goal_error": {"scale": 2.0}},
+    ],
+}"#;
+    let cfg: ComponentConfig = ron::from_str(ron).unwrap();
+    let task = CuJointReachObservationTask::<2, 4>::new(Some(&cfg), ()).unwrap();
+    assert_eq!(task.params().default_positions[0].si_value(), 0.1);
+    assert_eq!(task.params().default_positions[1].si_value(), -0.2);
+    assert_eq!(
+        task.params().observation[1],
+        CuObservationTerm::GoalError { scale: 2.0 }
+    );
+
+    let text = ron::to_string(task.params()).unwrap();
+    let back: CuJointReachObservationParams<2, 4> = ron::from_str(&text).unwrap();
+    assert_eq!(&back, task.params());
+
+    let typo = r#"#![enable(unwrap_newtypes)]
+{"observaton": []}"#;
+    let cfg: ComponentConfig = ron::from_str(typo).unwrap();
+    let err = CuJointReachObservationTask::<2, 4>::new(Some(&cfg), ())
+        .err()
         .unwrap();
-    assert_eq!(output.0.tov, state_msg.tov);
-    assert_eq!(output.1.tov, state_msg.tov);
+    assert!(format!("{err}").contains("observaton"), "{err}");
 }
 
 #[test]
-fn declared_input_width_mismatch_is_rejected_at_startup() {
-    // The graph (an Identity) would run at any width; the declared [1, 5]
-    // input must still be rejected for OBS = 4.
-    let params = CuPolicyParams::<2, 4, 4> {
-        model: fixture("identity_5.onnx"),
-        ..identity_params()
+fn layout_width_mismatch_is_rejected() {
+    let params = CuJointReachObservationParams::<2, 5> {
+        observation: reach_params().observation,
+        ..CuJointReachObservationParams::default()
     };
-    let err = CuPolicyTask::from_params(params).err().unwrap();
-    assert!(format!("{err}").contains("shape [1, OBS]"), "{err}");
+    assert!(params.validate().is_err());
+    assert!(CuJointReachObservationTask::from_params(params).is_err());
 }
 
 #[test]
-fn bad_inputs_fault_a_held_cycle() {
-    let params = CuPolicyParams::<2, 4, 4> {
-        decimation: 3,
-        ..identity_params()
-    };
-    let mut task = CuPolicyTask::from_params(params).unwrap();
-    let goal = goal2([1.5, 0.75]);
-    let statuses = [
-        state2([0.5, -0.25]),
-        state2([f64::NAN, -0.25]),
-        state2([0.5, -0.25]),
-        state2([0.5, -0.25]),
-    ]
-    .map(|state| run2(&mut task, Some(state), Some(goal.clone())).1);
-    assert_eq!(statuses[0].status, CuPolicyStatus::Fresh);
-    // A non-finite state on a held cycle faults, and the fault lasts until
-    // the next inference.
-    assert_eq!(statuses[1].status, CuPolicyStatus::Fault);
-    assert_eq!(statuses[1].values, [0.0; 4]);
-    assert_eq!(statuses[2].status, CuPolicyStatus::Fault);
-    assert_eq!(statuses[3].status, CuPolicyStatus::Fresh);
+fn non_finite_default_positions_are_rejected() {
+    let mut params = reach_params();
+    params.default_positions[1] = pos(f64::NAN);
+    assert!(params.validate().is_err());
 }
 
 #[test]
-fn held_cycle_fault_clears_the_previous_action_term() {
-    let params = CuPolicyParams::<6, 24, 6> {
-        model: fixture("linear_24_6.onnx"),
-        decimation: 3,
-        observation: vec![
-            CuObservationTerm::JointPositions { scale: 1.0 },
-            CuObservationTerm::JointVelocities { scale: 1.0 },
-            CuObservationTerm::GoalError { scale: 1.0 },
-            CuObservationTerm::PreviousAction,
-        ],
-        ..CuPolicyParams::default()
-    };
-    let mut task = CuPolicyTask::from_params(params).unwrap();
-    let goal = CuJointPositionsPayload::<6> {
-        positions: [pos(1.0); 6],
-    };
-    let state = |q: f64| CuJointStatePayload::<6> {
-        status: CuRobotStatus::Ready,
-        positions: [pos(q); 6],
-        velocities: [vel(0.0); 6],
-    };
-    let mut run = |state: CuJointStatePayload<6>| {
-        let state_msg = CuMsg::new(Some(state));
-        let goal_msg = CuMsg::new(Some(goal.clone()));
-        let mut output = (
-            CuMsg::<CuPolicyObservation<24>>::default(),
-            CuMsg::<CuPolicyAction<6>>::default(),
-        );
-        let (ctx, _clock) = CuContext::new_mock_clock();
-        task.process(&ctx, &(&state_msg, &goal_msg), &mut output)
-            .unwrap();
-        (
-            output.0.payload().unwrap().clone(),
-            output.1.payload().unwrap().clone(),
-        )
-    };
-    // Inference: a nonzero action (0.5 * goal error).
-    let (_, action) = run(state(0.0));
-    assert_eq!(action.status, CuPolicyStatus::Fresh);
-    assert_eq!(action.values, [0.5; 6]);
-    // A held cycle with a non-finite state faults and publishes zeros.
-    let (_, action) = run(state(f64::NAN));
-    assert_eq!(action.status, CuPolicyStatus::Fault);
-    // The next observation's previous_action term is what was published
-    // (zeros), not the action from before the fault.
-    let (observation, _) = run(state(0.0));
-    assert_eq!(observation.values[18..24], [0.0; 6]);
-}
-
-#[test]
-fn velocity_kind_mismatch_is_fault() {
-    use cu29::units::si::f64::Velocity;
-    use cu29::units::si::velocity::meter_per_second;
-    let params = CuPolicyParams::<2, 4, 4> {
-        observation: vec![
-            CuObservationTerm::JointPositions { scale: 1.0 },
-            CuObservationTerm::JointVelocities { scale: 1.0 },
-        ],
-        ..identity_params()
-    };
-    let mut task = CuPolicyTask::from_params(params).unwrap();
-    let mut state = state2([0.5, -0.25]);
-    state.velocities[1] = CuJointVelocity::Prismatic(Velocity::new::<meter_per_second>(0.1));
-    let (_, action) = run2(&mut task, Some(state), Some(goal2([1.5, 0.75])));
-    assert_eq!(action.status, CuPolicyStatus::Fault);
-}
-
-#[test]
-fn dynamic_batch_model_loads_and_runs() {
-    let params = CuPolicyParams::<2, 4, 4> {
-        model: fixture("batch_4.onnx"),
-        ..identity_params()
-    };
-    let mut task = CuPolicyTask::from_params(params).unwrap();
-    let (_, action) = run2(
+fn observation_builds_the_layout() {
+    let mut params = reach_params();
+    params.default_positions = [pos(0.25), pos(-0.25)];
+    let mut task = CuJointReachObservationTask::from_params(params).unwrap();
+    let observation = observe(
         &mut task,
         Some(state2([0.5, -0.25])),
         Some(goal2([1.5, 0.75])),
-    );
-    assert_eq!(action.status, CuPolicyStatus::Fresh);
-    assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
+    )
+    .unwrap();
+    assert_eq!(observation.values, [0.25, 0.0, 1.0, 1.0]);
 }
 
 #[test]
-fn wrong_width_behind_an_unknown_batch_dimension_is_rejected() {
-    let params = CuPolicyParams::<2, 4, 4> {
-        model: fixture("open_batch_5.onnx"),
-        ..identity_params()
+fn missing_or_unready_inputs_emit_no_payload() {
+    let mut task = CuJointReachObservationTask::from_params(reach_params()).unwrap();
+    assert!(observe(&mut task, Some(state2([0.5, -0.25])), None).is_none());
+    assert!(observe(&mut task, None, Some(goal2([1.5, 0.75]))).is_none());
+
+    let mut not_ready = state2([0.5, -0.25]);
+    not_ready.status = CuRobotStatus::NotReady;
+    assert!(observe(&mut task, Some(not_ready), Some(goal2([1.5, 0.75]))).is_none());
+}
+
+#[test]
+fn mismatched_joint_kinds_emit_nan() {
+    use cu29::units::si::f64::Length;
+    use cu29::units::si::length::meter;
+    let mut task = CuJointReachObservationTask::from_params(reach_params()).unwrap();
+    // A prismatic goal against a revolute state: meters minus radians.
+    let mut goal = goal2([1.5, 0.75]);
+    goal.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.75));
+    let observation = observe(&mut task, Some(state2([0.5, -0.25])), Some(goal)).unwrap();
+    assert!(observation.values.iter().all(|value| value.is_nan()));
+}
+
+#[test]
+fn velocity_kind_mismatch_emits_nan() {
+    use cu29::units::si::f64::Velocity;
+    use cu29::units::si::velocity::meter_per_second;
+    let params = CuJointReachObservationParams::<2, 4> {
+        observation: vec![
+            CuObservationTerm::JointPositions { scale: 1.0 },
+            CuObservationTerm::JointVelocities { scale: 1.0 },
+        ],
+        ..CuJointReachObservationParams::default()
     };
-    let err = CuPolicyTask::from_params(params).err().unwrap();
-    assert!(format!("{err}").contains("shape [1, OBS]"), "{err}");
+    let mut task = CuJointReachObservationTask::from_params(params).unwrap();
+    let mut state = state2([0.5, -0.25]);
+    state.velocities[1] = CuJointVelocity::Prismatic(Velocity::new::<meter_per_second>(0.1));
+    let observation = observe(&mut task, Some(state), Some(goal2([1.5, 0.75]))).unwrap();
+    assert!(observation.values.iter().all(|value| value.is_nan()));
+}
+
+#[test]
+fn observation_tov_is_propagated_from_the_joint_state() {
+    let mut task = CuJointReachObservationTask::from_params(reach_params()).unwrap();
+    let mut state_msg = CuMsg::new(Some(state2([0.5, -0.25])));
+    state_msg.tov = Tov::Time(CuTime::from_nanos(424_242));
+    let goal_msg = CuMsg::new(Some(goal2([1.5, 0.75])));
+    let mut output = CuMsg::<CuPolicyObservation<4>>::default();
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    task.process(&ctx, &(&state_msg, &goal_msg), &mut output)
+        .unwrap();
+    assert_eq!(output.tov, state_msg.tov);
+}
+
+// --- Observation task feeding the policy task -------------------------------
+
+/// One cycle of `observation -> policy`, wired as a Copper graph would.
+fn chain<const N: usize, const IN: usize, const OBS: usize, const ACT: usize>(
+    observation: &mut CuJointReachObservationTask<N, IN>,
+    policy: &mut CuPolicyTask<IN, OBS, ACT>,
+    state: CuJointStatePayload<N>,
+    goal: CuJointPositionsPayload<N>,
+) -> (CuPolicyObservation<OBS>, CuPolicyAction<ACT>) {
+    let state_msg = CuMsg::new(Some(state));
+    let goal_msg = CuMsg::new(Some(goal));
+    let mut features = CuMsg::<CuPolicyObservation<IN>>::default();
+    let mut output = (
+        CuMsg::<CuPolicyObservation<OBS>>::default(),
+        CuMsg::<CuPolicyAction<ACT>>::default(),
+    );
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    observation
+        .process(&ctx, &(&state_msg, &goal_msg), &mut features)
+        .unwrap();
+    policy.process(&ctx, &features, &mut output).unwrap();
+    (
+        output.0.payload().unwrap().clone(),
+        output.1.payload().unwrap().clone(),
+    )
+}
+
+#[test]
+fn chained_linear_model_selects_goal_error_slice() {
+    let mut observation = CuJointReachObservationTask::from_params(reach6_params(0.1)).unwrap();
+    let mut policy = CuPolicyTask::from_params(linear_params()).unwrap();
+    let state = CuJointStatePayload::<6> {
+        status: CuRobotStatus::Ready,
+        positions: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0].map(pos),
+        velocities: [vel(10.0); 6],
+    };
+    let goal = CuJointPositionsPayload::<6> {
+        positions: [2.0; 6].map(pos),
+    };
+    let (model_input, action) = chain(&mut observation, &mut policy, state, goal.clone());
+    assert_eq!(&model_input.values[0..6], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(&model_input.values[6..12], [1.0; 6]);
+    assert_eq!(
+        &model_input.values[12..18],
+        [2.0, 1.0, 0.0, -1.0, -2.0, -3.0]
+    );
+    assert_eq!(&model_input.values[18..24], [0.0; 6]);
+    // The fixture gain is 0.5 (see make_fixtures.py).
+    assert_eq!(action.values, [1.0, 0.5, 0.0, -0.5, -1.0, -1.5]);
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+
+    // The next cycle's appended previous action carries this raw action.
+    let state = CuJointStatePayload::<6> {
+        status: CuRobotStatus::Ready,
+        positions: [pos(0.0); 6],
+        velocities: [vel(0.0); 6],
+    };
+    let (model_input, _) = chain(&mut observation, &mut policy, state, goal);
+    assert_eq!(
+        &model_input.values[18..24],
+        [1.0, 0.5, 0.0, -0.5, -1.0, -1.5]
+    );
+}
+
+#[test]
+fn chained_unready_robot_is_idle_and_kind_mismatch_is_fault() {
+    use cu29::units::si::f64::Length;
+    use cu29::units::si::length::meter;
+    let mut observation = CuJointReachObservationTask::from_params(reach_params()).unwrap();
+    let mut policy = CuPolicyTask::from_params(identity_params()).unwrap();
+
+    let mut not_ready = state2([0.5, -0.25]);
+    not_ready.status = CuRobotStatus::NotReady;
+    let (_, action) = chain(&mut observation, &mut policy, not_ready, goal2([1.5, 0.75]));
+    assert_eq!(action.status, CuPolicyStatus::Idle);
+
+    let mut goal = goal2([1.5, 0.75]);
+    goal.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.75));
+    let (_, action) = chain(&mut observation, &mut policy, state2([0.5, -0.25]), goal);
+    assert_eq!(action.status, CuPolicyStatus::Fault);
+    assert_eq!(action.values, [0.0; 4]);
+
+    let (_, action) = chain(
+        &mut observation,
+        &mut policy,
+        state2([0.5, -0.25]),
+        goal2([1.5, 0.75]),
+    );
+    assert_eq!(action.status, CuPolicyStatus::Fresh);
+    assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
 }

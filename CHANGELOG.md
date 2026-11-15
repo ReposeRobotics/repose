@@ -61,21 +61,35 @@ may be breaking.
 ### Added
 
 - `repose-policy-rl`: new `std`-only crate running a stateless feed-forward
-  ONNX policy in the graph. `CuPolicyTask<N, OBS, ACT>` consumes the measured
-  joint state and a joint goal, builds the RON-configured observation
-  (`joint_positions`, `joint_velocities`, `goal_error`, `previous_action`),
-  infers with `tract-onnx`, and publishes the `CuPolicyObservation<OBS>`
-  built this cycle plus the raw `CuPolicyAction<ACT>` with a
-  `CuPolicyStatus` (`Idle`/`Fresh`/`Held`/`Fault`), so every observation and
-  raw action is in the log. On a `Fresh` cycle the observation is exactly
-  what the model was fed; `Held` and `Idle` cycles run no inference. Cycle-exact decimation, an optional pinned
+  ONNX policy in the graph. `CuPolicyTask<IN, OBS, ACT>` is pure inference:
+  it consumes one flat `CuPolicyObservation<IN>` feature vector from an
+  upstream observation task, so the observation is defined by the RL task and
+  not by the runtime. It infers with `tract-onnx` and publishes the
+  `CuPolicyObservation<OBS>` model input of the cycle plus the raw
+  `CuPolicyAction<ACT>` with a `CuPolicyStatus`
+  (`Idle`/`Fresh`/`Held`/`Fault`), so every observation and raw action is in
+  the log. With `previous_action: true` the task appends its own last raw
+  action after the features (`OBS == IN + ACT`); otherwise `OBS == IN`. No
+  input payload is `Idle`; a non-finite input, a failed inference, or a
+  non-finite output is `Fault`. Cycle-exact decimation, an optional pinned
   `model_hash`, and real `Freezable` state keep replay deterministic.
   Inference is the workspace's one documented hot-path allocation exception:
-  14 allocations per `process` call with the `linear_24_6` fixture, measured
-  by `tests/alloc.rs`, which asserts at most 32 on every call. Other models
+  14 allocations per cycle with the `linear_24_6` fixture, measured by
+  `tests/alloc.rs`, which asserts at most 32 on every cycle. Other models
   allocate differently; measure yours the same way.
-- `repose-policy-rl`: `CuJointActionTask<N>` turns a raw `CuPolicyAction<N>` into the `CuTrajectoryFollowOutput<N>` the
-  controller already consumes. It applies `position_delta` (an offset from
+- `repose-policy-rl`: `CuJointReachObservationTask<N, IN>` builds the
+  joint-reach features from the measured joint state and a joint goal, with a
+  RON-configured layout of `joint_positions`, `joint_velocities`, and
+  `goal_error` terms whose widths sum to `IN`. It emits no payload without a
+  state, a goal, or a `Ready` robot (the policy reports `Idle`) and a
+  `NaN`-filled payload on a joint unit-kind mismatch (the policy reports
+  `Fault`). Other RL tasks supply their own observation task emitting a
+  `CuPolicyObservation<IN>`.
+- `repose-policy-rl`: `CuJointActionTask<N, ACT>` turns `N` elements of a raw
+  `CuPolicyAction<ACT>`, starting at the configured `offset` (default 0), into
+  the `CuTrajectoryFollowOutput<N>` the controller already consumes, so
+  several action tasks can share one action vector (`offset + N > ACT` is a
+  startup error). It applies `position_delta` (an offset from
   the measured position) or `position_absolute` (from typed default positions)
   actions with a dimensionless scalar or per-joint `scale`, an optional
   per-cycle `max_step`, and clamping to the configured chain's joint limits.

@@ -116,6 +116,7 @@ pub enum CuJointActionKind {
 /// ```ron
 /// config: {
 ///     "chain": "igus_rebel",
+///     "offset": 0,                       // optional; first action element this task reads
 ///     "kind": "position_delta",          // position_delta | position_absolute
 ///     "scale": 0.05,                     // dimensionless, or one value per joint
 ///     "default_positions": [{"revolute": 0.0}], // used by position_absolute
@@ -128,6 +129,14 @@ pub enum CuJointActionKind {
 /// revolute, meters for prismatic): the action is dimensionless, the scaled
 /// step carries the joint's unit via [`CuJointPosition::with_si_value`], so
 /// revolute and prismatic joints in one chain are both handled.
+///
+/// `offset` selects which part of the policy action this task consumes:
+/// joint `j` reads action element `offset + j`, so the task reads elements
+/// `[offset, offset + N)` of a `CuPolicyAction<ACT>`. Several action tasks
+/// can share one action message by reading disjoint slices (for example an
+/// arm in elements `0..6` and a gripper in element `6`). The bound
+/// `offset + N <= ACT` depends on the task's `ACT` and is checked by
+/// [`CuJointActionTask::from_params`], not by [`Self::validate`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
 // Field-level defaults: serde does not support container `default` on const-generic structs.
@@ -138,6 +147,9 @@ pub struct CuJointActionParams<const N: usize> {
     #[serde(default)]
     #[reflect(ignore)]
     pub chain: Option<CuChainSpec<N>>,
+    /// Index of the first action element this task reads; defaults to `0`.
+    #[serde(default)]
+    pub offset: usize,
     /// Action kind; defaults to `position_delta`.
     #[serde(default)]
     pub kind: CuJointActionKind,
@@ -163,11 +175,12 @@ pub struct CuJointActionParams<const N: usize> {
 }
 
 impl<const N: usize> Default for CuJointActionParams<N> {
-    /// No chain (rejected by [`Self::validate`]), `position_delta`, scale
+    /// No chain (rejected by [`Self::validate`]), offset `0`, `position_delta`, scale
     /// `1.0` on every joint, zero default positions, no step limit.
     fn default() -> Self {
         Self {
             chain: None,
+            offset: 0,
             kind: CuJointActionKind::default(),
             scale: default_scale(),
             default_positions: [CuJointPosition::default(); N],
@@ -233,8 +246,11 @@ impl<const N: usize> CuJointActionParams<N> {
 
 /// Turns a raw policy action into a limited joint setpoint.
 ///
-/// Inputs are `(action, state)`: a [`CuPolicyAction<N>`] and a
-/// [`CuJointStatePayload<N>`]. Output is a
+/// Inputs are `(action, state)`: a [`CuPolicyAction<ACT>`] and a
+/// [`CuJointStatePayload<N>`]. The task reads action elements
+/// `[offset, offset + N)` (see [`CuJointActionParams::offset`]), so one flat
+/// policy action can feed several action tasks, each owning its own slice;
+/// `offset + N <= ACT` is checked at construction. Output is a
 /// [`CuTrajectoryFollowOutput<N>`] for `repose_controller::CuControllerTask`,
 /// with zero velocity and acceleration; its `Tov` is propagated from the
 /// joint-state input.
@@ -278,7 +294,7 @@ impl<const N: usize> CuJointActionParams<N> {
 /// | Situation | Status emitted |
 /// |---|---|
 /// | No action yet, action status `Idle`, or robot not `Ready` | `Idle` |
-/// | Action status `Fault`, a non-finite action value or setpoint velocity, or a joint state that is not finite or whose units do not match the chain | `ErrorEmptyTrajectory` |
+/// | Action status `Fault`, a non-finite value in this task's action slice or a non-finite setpoint velocity, or a joint state that is not finite or whose units do not match the chain | `ErrorEmptyTrajectory` |
 ///
 /// The controller holds the measured position during a hold, and a robot
 /// that is not `Ready` (fault, emergency stop) may be moved while it is
@@ -287,6 +303,12 @@ impl<const N: usize> CuJointActionParams<N> {
 /// measured from the measured position, not from a target the arm never
 /// reached. With no joint state at all the previous target is kept and
 /// emitted (zeros before the first state) with `Idle`.
+///
+/// Only the slice this task reads is checked for finiteness: a non-finite
+/// value outside it belongs to another consumer and does not fault this
+/// task (the policy task already faults the whole action on any non-finite
+/// output). The action status is shared, so a `Fault` or `Idle` action
+/// holds every task reading it.
 ///
 /// `ErrorEmptyTrajectory` is the plan's naming compromise so the unchanged
 /// controller maps it to its `Fault` status.
@@ -297,7 +319,7 @@ impl<const N: usize> CuJointActionParams<N> {
 /// time.
 #[derive(Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
-pub struct CuJointActionTask<const N: usize> {
+pub struct CuJointActionTask<const N: usize, const ACT: usize> {
     #[reflect(ignore)]
     params: CuJointActionParams<N>,
     #[reflect(ignore)]
@@ -307,10 +329,20 @@ pub struct CuJointActionTask<const N: usize> {
     has_target: bool,
 }
 
-impl<const N: usize> CuJointActionTask<N> {
-    /// Creates an action task from validated params.
+impl<const N: usize, const ACT: usize> CuJointActionTask<N, ACT> {
+    /// Creates an action task from validated params. Also rejects an
+    /// `offset` whose slice `[offset, offset + N)` does not fit in the
+    /// `ACT`-wide action.
     pub fn from_params(params: CuJointActionParams<N>) -> CuResult<Self> {
         params.validate()?;
+        match params.offset.checked_add(N) {
+            Some(end) if end <= ACT => {}
+            _ => {
+                return Err(CuError::from(
+                    "repose-policy-rl: 'offset' + joint count N exceeds the policy action width ACT",
+                ));
+            }
+        }
         let chain = params.resolve_chain()?;
         Ok(Self {
             params,
@@ -350,7 +382,7 @@ impl<const N: usize> CuJointActionTask<N> {
     }
 }
 
-impl<const N: usize> Freezable for CuJointActionTask<N> {
+impl<const N: usize, const ACT: usize> Freezable for CuJointActionTask<N, ACT> {
     fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         Encode::encode(&self.previous_target, encoder)?;
         Encode::encode(&self.has_target, encoder)
@@ -363,9 +395,9 @@ impl<const N: usize> Freezable for CuJointActionTask<N> {
     }
 }
 
-impl<const N: usize> CuTask for CuJointActionTask<N> {
+impl<const N: usize, const ACT: usize> CuTask for CuJointActionTask<N, ACT> {
     type Resources<'r> = ();
-    type Input<'m> = input_msg!('m, CuPolicyAction<N>, CuJointStatePayload<N>);
+    type Input<'m> = input_msg!('m, CuPolicyAction<ACT>, CuJointStatePayload<N>);
     type Output<'m> = output_msg!(CuTrajectoryFollowOutput<N>);
 
     fn new(cfg: Option<&ComponentConfig>, _res: Self::Resources<'_>) -> CuResult<Self>
@@ -422,8 +454,16 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
             output.set_payload(hold(self, CuFollowStatus::Idle));
             return Ok(());
         };
-        // A faulted action, or any non-finite value.
-        if action.status == CuPolicyStatus::Fault || !action.values.iter().all(|v| v.is_finite()) {
+        // This task's slice; the bound was checked at construction, so
+        // `None` is unreachable but still holds rather than panicking.
+        let offset = self.params.offset;
+        let Some(values) = action.values.get(offset..offset.saturating_add(N)) else {
+            self.has_target = false;
+            output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
+            return Ok(());
+        };
+        // A faulted action, or a non-finite value in this task's slice.
+        if action.status == CuPolicyStatus::Fault || !values.iter().all(|v| v.is_finite()) {
             self.has_target = false;
             output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
             return Ok(());
@@ -455,7 +495,7 @@ impl<const N: usize> CuTask for CuJointActionTask<N> {
         };
         let mut target = [CuJointPosition::default(); N];
         for j in 0..N {
-            let raw = base[j].si_value() + self.params.scale[j] * f64::from(action.values[j]);
+            let raw = base[j].si_value() + self.params.scale[j] * f64::from(values[j]);
             if !raw.is_finite() {
                 self.has_target = false;
                 output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
@@ -539,6 +579,7 @@ mod tests {
     ) -> CuJointActionParams<N> {
         CuJointActionParams {
             chain: Some(chain.into()),
+            offset: 0,
             kind,
             scale: [1.0; N],
             default_positions: [CuJointPosition::default(); N],
@@ -562,9 +603,9 @@ mod tests {
         }
     }
 
-    fn run<const N: usize>(
-        task: &mut CuJointActionTask<N>,
-        act: Option<CuPolicyAction<N>>,
+    fn run<const N: usize, const ACT: usize>(
+        task: &mut CuJointActionTask<N, ACT>,
+        act: Option<CuPolicyAction<ACT>>,
         st: Option<CuJointStatePayload<N>>,
     ) -> CuTrajectoryFollowOutput<N> {
         let (ctx, _clock) = CuContext::new_mock_clock();
@@ -592,7 +633,7 @@ mod tests {
     fn delta_is_an_offset_from_the_measured_position() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         // Measured start is 0.10 even though no target exists yet.
         let out = run(
             &mut task,
@@ -647,7 +688,7 @@ mod tests {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
         p.scale = [0.05; 2];
         p.default_positions = [rev(0.30); 2];
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(2.0, CuPolicyStatus::Fresh)),
@@ -676,7 +717,7 @@ mod tests {
     fn max_step_limits_a_large_action() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.max_step = Some(0.03);
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(10.0, CuPolicyStatus::Fresh)),
@@ -698,7 +739,7 @@ mod tests {
     #[test]
     fn joint_limits_clamp_the_target() {
         let p = params(chain2(-0.5, 0.5), CuJointActionKind::PositionDelta);
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(10.0, CuPolicyStatus::Fresh)),
@@ -725,7 +766,7 @@ mod tests {
     fn hold_cases_emit_the_previous_target_with_documented_status() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(1.0, CuPolicyStatus::Fresh)),
@@ -787,7 +828,7 @@ mod tests {
     fn recovery_after_not_ready_starts_from_the_measured_position() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(1.0, CuPolicyStatus::Fresh)),
@@ -819,7 +860,7 @@ mod tests {
     #[test]
     fn hold_before_any_target_uses_the_measured_position() {
         let p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(&mut task, None, Some(state(0.30)));
         assert_eq!(out.status, CuFollowStatus::Idle);
         assert_si(&out, 0.30);
@@ -832,7 +873,7 @@ mod tests {
     fn non_finite_action_value_holds_and_faults() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         run(
             &mut task,
             Some(action(1.0, CuPolicyStatus::Fresh)),
@@ -858,7 +899,7 @@ mod tests {
     #[test]
     fn tov_is_propagated_from_the_joint_state() {
         let p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let (ctx, _clock) = CuContext::new_mock_clock();
         let mut action_msg = CuMsg::new(Some(action::<2>(0.0, CuPolicyStatus::Fresh)));
         action_msg.tov = Tov::Time(CuTime::from_secs(10));
@@ -875,7 +916,7 @@ mod tests {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
         p.max_step = Some(0.04);
-        let mut original = CuJointActionTask::from_params(p).unwrap();
+        let mut original = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         run(
             &mut original,
             Some(action(1.0, CuPolicyStatus::Fresh)),
@@ -899,7 +940,7 @@ mod tests {
             bincode::config::standard(),
             (),
         );
-        let mut restored = CuJointActionTask::from_params(p).unwrap();
+        let mut restored = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         restored.thaw(&mut decoder).unwrap();
 
         for value in [1.0f32, -0.5, 0.25] {
@@ -939,7 +980,7 @@ mod tests {
             rev(0.10),
             CuJointPosition::Prismatic(Length::new::<meter>(0.20)),
         ];
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let mut st = state::<2>(0.0);
         st.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.20));
         let mut act = action::<2>(0.05, CuPolicyStatus::Fresh);
@@ -971,7 +1012,7 @@ mod tests {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
         p.default_positions = [rev(1.0); 2];
         p.max_step = Some(0.25);
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         // Target 1.0 from a measured 0.0: one step per cycle, and a held
         // action keeps approaching.
         let out = run(
@@ -1006,7 +1047,7 @@ mod tests {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.scale = [0.05; 2];
         p.period = Some(Time::new::<second>(0.02));
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         // 0.05 rad in one 0.02 s cycle is 2.5 rad/s.
         let out = run(
             &mut task,
@@ -1049,7 +1090,7 @@ mod tests {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
         p.default_positions = [rev(0.5); 2];
         p.period = Some(Time::new::<second>(0.02));
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(0.0, CuPolicyStatus::Fresh)),
@@ -1078,7 +1119,7 @@ mod tests {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         // The smallest positive (subnormal) period: any target change overflows.
         p.period = Some(Time::new::<second>(f64::from_bits(1)));
-        let mut task = CuJointActionTask::from_params(p).unwrap();
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
         let out = run(
             &mut task,
             Some(action(1.0, CuPolicyStatus::Fresh)),
@@ -1094,7 +1135,8 @@ mod tests {
             CuJointActionKind::PositionDelta,
             CuJointActionKind::PositionAbsolute,
         ] {
-            let mut task = CuJointActionTask::from_params(params(chain2(-2.0, 2.0), kind)).unwrap();
+            let mut task =
+                CuJointActionTask::<2, 2>::from_params(params(chain2(-2.0, 2.0), kind)).unwrap();
             let mut st = state::<2>(0.0);
             st.positions[1] = CuJointPosition::Prismatic(Length::new::<meter>(0.0));
             let out = run(
@@ -1111,7 +1153,7 @@ mod tests {
         for bad in [0.0, -0.02, f64::NAN] {
             let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
             p.period = Some(Time::new::<second>(bad));
-            assert!(CuJointActionTask::from_params(p).is_err(), "{bad}");
+            assert!(CuJointActionTask::<2, 2>::from_params(p).is_err(), "{bad}");
         }
     }
 
@@ -1119,11 +1161,11 @@ mod tests {
     fn default_positions_outside_the_limits_are_rejected() {
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
         p.default_positions = [rev(3.0); 2];
-        assert!(CuJointActionTask::from_params(p).is_err());
+        assert!(CuJointActionTask::<2, 2>::from_params(p).is_err());
         // Unused in delta mode, so not checked there.
         let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
         p.default_positions = [rev(3.0); 2];
-        assert!(CuJointActionTask::from_params(p).is_ok());
+        assert!(CuJointActionTask::<2, 2>::from_params(p).is_ok());
     }
 
     #[cfg(feature = "std")]
@@ -1137,7 +1179,7 @@ mod tests {
             "max_step": 0.03}"#,
         )
         .unwrap();
-        let task = CuJointActionTask::<6>::new(Some(&cfg), ()).unwrap();
+        let task = CuJointActionTask::<6, 6>::new(Some(&cfg), ()).unwrap();
         let p = task.params();
         assert_eq!(p.kind, CuJointActionKind::PositionAbsolute);
         assert_eq!(p.scale, [0.05; 6]);
@@ -1152,10 +1194,20 @@ mod tests {
             r#"#![enable(unwrap_newtypes)] {"chain": "igus_rebel", "kind": "position_delta", "scale": 0.05}"#,
         )
         .unwrap();
-        let task = CuJointActionTask::<6>::new(Some(&cfg), ()).unwrap();
+        let task = CuJointActionTask::<6, 6>::new(Some(&cfg), ()).unwrap();
         assert_eq!(task.params().kind, CuJointActionKind::PositionDelta);
         assert_eq!(task.params().scale, [0.05; 6]);
         assert_eq!(task.params().max_step, None);
+        assert_eq!(task.params().offset, 0, "offset defaults to 0");
+
+        // An explicit offset is read, and checked against ACT.
+        let cfg: ComponentConfig = ron::from_str(
+            r#"#![enable(unwrap_newtypes)] {"chain": "igus_rebel", "offset": 1, "scale": 0.05}"#,
+        )
+        .unwrap();
+        let task = CuJointActionTask::<6, 7>::new(Some(&cfg), ()).unwrap();
+        assert_eq!(task.params().offset, 1);
+        assert!(CuJointActionTask::<6, 6>::new(Some(&cfg), ()).is_err());
 
         // Serializing params with an inline chain and reading them back
         // gives the same params (a preset serializes as a bare name, which
@@ -1164,6 +1216,7 @@ mod tests {
         inline.scale = [0.05, 0.25];
         inline.default_positions = [rev(0.1), rev(-0.2)];
         inline.max_step = Some(0.03);
+        inline.offset = 4;
         let text = ron::to_string(&inline).unwrap();
         let back: CuJointActionParams<2> = ron::from_str(&text).unwrap();
         assert_eq!(back, inline);
@@ -1180,11 +1233,103 @@ mod tests {
             let cfg: ComponentConfig =
                 ron::from_str(&format!("#![enable(unwrap_newtypes)] {bad}")).unwrap();
             assert!(
-                CuJointActionTask::<6>::new(Some(&cfg), ()).is_err(),
+                CuJointActionTask::<6, 6>::new(Some(&cfg), ()).is_err(),
                 "{bad}"
             );
         }
-        assert!(CuJointActionTask::<6>::new(None, ()).is_err());
+        assert!(CuJointActionTask::<6, 6>::new(None, ()).is_err());
+    }
+
+    fn run_values<const N: usize, const ACT: usize>(
+        task: &mut CuJointActionTask<N, ACT>,
+        values: [f32; ACT],
+        st: CuJointStatePayload<N>,
+    ) -> CuTrajectoryFollowOutput<N> {
+        run(
+            task,
+            Some(CuPolicyAction {
+                values,
+                status: CuPolicyStatus::Fresh,
+            }),
+            Some(st),
+        )
+    }
+
+    #[test]
+    fn offset_selects_its_slice_of_a_wider_action() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
+        p.offset = 3;
+        let mut task = CuJointActionTask::<2, 6>::from_params(p).unwrap();
+        let out = run_values(&mut task, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], state(0.0));
+        assert_eq!(out.status, CuFollowStatus::Running);
+        let got = si(&out);
+        assert!(
+            (got[0] - 0.4).abs() < 1e-6 && (got[1] - 0.5).abs() < 1e-6,
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn two_tasks_share_one_action_through_disjoint_slices() {
+        let arm = params(chain2(-2.0, 2.0), CuJointActionKind::PositionAbsolute);
+        let mut gripper = params(
+            CuKinematicChain::new([rev_spec(-2.0, 2.0)]),
+            CuJointActionKind::PositionAbsolute,
+        );
+        gripper.offset = 2;
+        let mut arm_task = CuJointActionTask::<2, 3>::from_params(arm).unwrap();
+        let mut gripper_task = CuJointActionTask::<1, 3>::from_params(gripper).unwrap();
+        let (ctx, _clock) = CuContext::new_mock_clock();
+        let action_msg = CuMsg::new(Some(CuPolicyAction::<3> {
+            values: [0.1, -0.2, 0.7],
+            status: CuPolicyStatus::Fresh,
+        }));
+        let arm_state = CuMsg::new(Some(state::<2>(0.0)));
+        let gripper_state = CuMsg::new(Some(state::<1>(0.0)));
+        let mut arm_out = CuMsg::<CuTrajectoryFollowOutput<2>>::default();
+        let mut gripper_out = CuMsg::<CuTrajectoryFollowOutput<1>>::default();
+        arm_task
+            .process(&ctx, &(&action_msg, &arm_state), &mut arm_out)
+            .unwrap();
+        gripper_task
+            .process(&ctx, &(&action_msg, &gripper_state), &mut gripper_out)
+            .unwrap();
+        let arm_si = si(arm_out.payload().unwrap());
+        let gripper_si = si(gripper_out.payload().unwrap());
+        assert!((arm_si[0] - 0.1).abs() < 1e-6 && (arm_si[1] + 0.2).abs() < 1e-6);
+        assert!((gripper_si[0] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn offset_past_the_action_width_is_rejected() {
+        for (offset, ok) in [(0, true), (4, true), (5, false), (usize::MAX, false)] {
+            let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+            p.offset = offset;
+            assert_eq!(
+                CuJointActionTask::<2, 6>::from_params(p).is_ok(),
+                ok,
+                "offset {offset}"
+            );
+        }
+        // ACT smaller than N cannot fit any slice.
+        let p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+        assert!(CuJointActionTask::<2, 1>::from_params(p).is_err());
+    }
+
+    #[test]
+    fn non_finite_value_outside_the_slice_does_not_fault() {
+        let mut p = params(chain2(-2.0, 2.0), CuJointActionKind::PositionDelta);
+        p.offset = 1;
+        let mut task = CuJointActionTask::<2, 4>::from_params(p).unwrap();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let out = run_values(&mut task, [bad, 0.5, 0.5, bad], state(0.0));
+            assert_eq!(out.status, CuFollowStatus::Running, "{bad}");
+            assert_si(&out, 0.5);
+            // Inside the slice it still faults.
+            let out = run_values(&mut task, [0.0, 0.5, bad, 0.0], state(0.0));
+            assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory, "{bad}");
+            assert_si(&out, 0.0);
+        }
     }
 
     #[test]
@@ -1196,7 +1341,7 @@ mod tests {
             CuJointActionKind::PositionAbsolute,
         );
         p.default_positions = [rev(0.0)];
-        let mut action_task = CuJointActionTask::from_params(p).unwrap();
+        let mut action_task = CuJointActionTask::<1, 1>::from_params(p).unwrap();
         let mut controller =
             CuControllerTask::<1>::from_params(repose_controller::CuControllerParams::default())
                 .unwrap();

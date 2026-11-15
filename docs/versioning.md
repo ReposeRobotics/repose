@@ -52,10 +52,6 @@ changes require a major bump.
 
 ## Applications
 
-Studio lives in its own repository (`ReposeRobotics/studio`, a submodule here)
-and has its own SemVer and `studio-vX.Y.Z` tags. Its release notes state which
-Repose version it targets.
-
 Examples and the local playground are not versioned (`version = "0.0.0"`,
 `publish = false`); they always track the workspace they live in.
 

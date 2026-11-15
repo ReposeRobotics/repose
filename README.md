@@ -215,13 +215,6 @@ goal → plan → time → follow → control loop, configured entirely in RON.
 | [API conventions](docs/api-conventions.md) | Params structs, constructors, units, visibility |
 | [Versioning](docs/versioning.md) · [Migration 0.8](docs/migration-0.8.md) | Release policy and upgrade notes |
 
-## Studio
-
-Studio is the private `studio` submodule. Clone with
-`git clone --recurse-submodules`, or run `git submodule update --init` in an
-existing checkout. You need access to the Studio repository; see
-[Studio's README](studio/README.md) for setup.
-
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short, work on a branch, run

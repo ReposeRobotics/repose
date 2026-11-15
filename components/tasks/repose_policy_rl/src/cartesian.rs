@@ -246,6 +246,11 @@ pub struct CuCartesianActionReport {
 ///    limits, is emitted with [`CuFollowStatus::Running`] and a setpoint
 ///    velocity of `(target - measured) / period`.
 ///
+/// A measured position beyond a joint limit is clamped to the limit before
+/// the solve, as in [`crate::CuJointActionTask`]: the target then moves to
+/// the limit in one cycle, and the setpoint velocity, taken from the actual
+/// measurement, shows that jump.
+///
 /// The delta is applied to the measured pose, as VLA datasets record it, so
 /// a target cannot run ahead of an arm that lags behind it, and the
 /// linearization error of one small step does not accumulate. Near a
@@ -278,6 +283,9 @@ pub struct CuCartesianActionTask<const N: usize, const ACT: usize> {
     #[reflect(ignore)]
     previous_target: [CuJointPosition; N],
     has_target: bool,
+    /// The current action's delta produced `previous_target`, so a `Held`
+    /// repeat of it must not be applied again.
+    applied: bool,
 }
 
 impl<const N: usize, const ACT: usize> CuCartesianActionTask<N, ACT> {
@@ -302,6 +310,7 @@ impl<const N: usize, const ACT: usize> CuCartesianActionTask<N, ACT> {
             period_s,
             previous_target: [CuJointPosition::default(); N],
             has_target: false,
+            applied: false,
         })
     }
 
@@ -373,7 +382,8 @@ impl<const N: usize, const ACT: usize> CuCartesianActionTask<N, ACT> {
 
 /// Shortens `v` to `max` along its direction; returns whether it did.
 fn limit_norm(v: &mut [f64; 3], max: f64) -> bool {
-    let norm = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    // `hypot` does not overflow for large finite components.
+    let norm = v[0].hypot(v[1]).hypot(v[2]);
     if norm > max {
         let s = max / norm;
         for x in v.iter_mut() {
@@ -426,19 +436,29 @@ fn rotation_vector_of(r: &[[f64; 3]; 3]) -> [f64; 3] {
             (r[i][j] + r[j][i]) / (4.0 * a_i)
         };
     }
-    let norm = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
-    axis.map(|a| a / norm * angle)
+    let norm = axis[0].hypot(axis[1]).hypot(axis[2]);
+    // Just short of a half turn `w` still carries the sense of rotation
+    // (`w = 2 sin(angle) axis`); orient the axis with it so a rotation of
+    // almost -pi is not turned into one of almost +pi.
+    let sense = if axis[0] * w[0] + axis[1] * w[1] + axis[2] * w[2] < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    axis.map(|a| sense * a / norm * angle)
 }
 
 impl<const N: usize, const ACT: usize> Freezable for CuCartesianActionTask<N, ACT> {
     fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         Encode::encode(&self.previous_target, encoder)?;
-        Encode::encode(&self.has_target, encoder)
+        Encode::encode(&self.has_target, encoder)?;
+        Encode::encode(&self.applied, encoder)
     }
 
     fn thaw<D: Decoder>(&mut self, decoder: &mut D) -> Result<(), DecodeError> {
         self.previous_target = Decode::decode(decoder)?;
         self.has_target = Decode::decode(decoder)?;
+        self.applied = Decode::decode(decoder)?;
         Ok(())
     }
 }
@@ -473,6 +493,11 @@ impl<const N: usize, const ACT: usize> CuTask for CuCartesianActionTask<N, ACT> 
         // No state at all: keep the previous target, whatever the action.
         let Some(state) = input.1.payload() else {
             let held = self.held_positions();
+            // Any action other than a `Held` repeat is a new request: when the
+            // state returns, its `Held` repeat must still be applied once.
+            if !action.is_some_and(|a| a.status == CuPolicyStatus::Held) {
+                self.applied = false;
+            }
             setpoint_out.set_payload(Self::setpoint(held, CuFollowStatus::Idle));
             report_out.set_payload(CuCartesianActionReport::default());
             return Ok(());
@@ -486,6 +511,7 @@ impl<const N: usize, const ACT: usize> CuTask for CuCartesianActionTask<N, ACT> 
                         report: CuCartesianActionReport| {
             if status != CuFollowStatus::Running {
                 task.has_target = false;
+                task.applied = false;
             }
             setpoint_out.set_payload(Self::setpoint(positions, status));
             report_out.set_payload(report);
@@ -545,7 +571,7 @@ impl<const N: usize, const ACT: usize> CuTask for CuCartesianActionTask<N, ACT> 
         }
 
         // A held delta was already applied on the cycle it was inferred.
-        if action.status == CuPolicyStatus::Held && self.has_target {
+        if action.status == CuPolicyStatus::Held && self.has_target && self.applied {
             emit(
                 self,
                 self.previous_target,
@@ -590,7 +616,9 @@ impl<const N: usize, const ACT: usize> CuTask for CuCartesianActionTask<N, ACT> 
         let clamped = self.chain.clamp_to_limits(&mut target);
         let mut finite = clamped.is_ok();
         for j in 0..N {
-            let velocity = (target[j].si_value() - measured[j].si_value()) / period;
+            // From the actual measurement, not the clamped one, so a target
+            // pulled back inside the limits shows the jump it commands.
+            let velocity = (target[j].si_value() - measured_hold[j].si_value()) / period;
             finite &= velocity.is_finite() && target[j].si_value().is_finite();
             setpoint.velocities[j] = CuJointVelocity::from_coordinate(target[j], velocity);
         }
@@ -606,6 +634,7 @@ impl<const N: usize, const ACT: usize> CuTask for CuCartesianActionTask<N, ACT> 
         setpoint.positions = target;
         self.previous_target = target;
         self.has_target = true;
+        self.applied = true;
         setpoint_out.set_payload(setpoint);
         report_out.set_payload(CuCartesianActionReport {
             ik_status: Some(ik_status),
@@ -1090,6 +1119,83 @@ mod tests {
             "{half:?}"
         );
         assert!(half[0].abs() < 1e-9 && half[2].abs() < 1e-9, "{half:?}");
+    }
+
+    #[test]
+    fn rotation_vector_of_keeps_the_sense_just_short_of_a_half_turn() {
+        let almost = core::f64::consts::PI - 5e-7;
+        let v = rotation_vector_of(&rpy_matrix(0.0, 0.0, -almost));
+        assert_close(v, [0.0, 0.0, -almost], 1e-6);
+        let v = rotation_vector_of(&rpy_matrix(0.0, 0.0, almost));
+        assert_close(v, [0.0, 0.0, almost], 1e-6);
+    }
+
+    #[test]
+    fn a_limited_negative_near_half_turn_keeps_its_direction() {
+        let mut p = params();
+        p.rotation = CuRotationEncoding::Rpy;
+        p.rotation_scale = Angle::new::<radian>(core::f64::consts::PI - 5e-7);
+        p.max_rotation = Some(Angle::new::<radian>(0.05));
+        let task = CuCartesianActionTask::<6, 6>::from_params(p).unwrap();
+        let (twist, _, rotation_limited) = task.twist(&[0.0, 0.0, 0.0, 0.0, 0.0, -1.0]).unwrap();
+        assert!(rotation_limited);
+        let wz = twist.angular[2].get::<radian_per_second>() * PERIOD;
+        assert!((wz + 0.05).abs() < 1e-9, "{wz}");
+    }
+
+    #[test]
+    fn huge_finite_translation_is_shortened_not_zeroed() {
+        let mut p = params();
+        p.translation_scale = Length::new::<meter>(1e200);
+        p.max_translation = Some(Length::new::<meter>(0.005));
+        let task = CuCartesianActionTask::<6, 6>::from_params(p).unwrap();
+        let (twist, limited, _) = task.twist(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        assert!(limited);
+        let dx = twist.linear[0].get::<meter_per_second>() * PERIOD;
+        assert!((dx - 0.005).abs() < 1e-12, "{dx}");
+    }
+
+    #[test]
+    fn a_new_action_during_a_state_gap_is_applied_when_held() {
+        let mut task = CuCartesianActionTask::<6, 6>::from_params(params()).unwrap();
+        let a = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [0.0, 0.5, 0.0, 0.0, 0.0, 0.0];
+        let (first, _) = run(
+            &mut task,
+            Some(action(a, CuPolicyStatus::Fresh)),
+            Some(state(NOMINAL)),
+        );
+        // B arrives while there is no joint state: the old target is held.
+        let (gap, _) = run(&mut task, Some(action(b, CuPolicyStatus::Fresh)), None);
+        assert_eq!(gap.status, CuFollowStatus::Idle);
+        assert_eq!(gap.positions, first.positions);
+        // State is back and B is held: B is applied once, not A's target kept.
+        let (out, report) = run(
+            &mut task,
+            Some(action(b, CuPolicyStatus::Held)),
+            Some(state(NOMINAL)),
+        );
+        assert!(report.ik_status.is_some());
+        let moved = sub(
+            translation(&pose(&out.positions)),
+            translation(&pose(&state(NOMINAL).positions)),
+        );
+        assert_close(moved, [0.0, 0.005, 0.0], 0.0005);
+    }
+
+    #[test]
+    fn velocity_shows_the_jump_from_an_out_of_limit_measurement() {
+        let mut task = CuCartesianActionTask::<6, 6>::from_params(params()).unwrap();
+        let mut q = NOMINAL;
+        q[4] = 1.65806 + 0.1;
+        let (out, _) = run(
+            &mut task,
+            Some(action([0.0; 6], CuPolicyStatus::Fresh)),
+            Some(state(q)),
+        );
+        assert_eq!(out.status, CuFollowStatus::Running);
+        assert!((out.positions[4].si_value() - 1.65806).abs() < 1e-9);
+        assert!((out.velocities[4].si_value() + 0.1 / PERIOD).abs() < 1e-6);
     }
 
     #[test]

@@ -36,7 +36,8 @@
 //!
 //! Action tasks read disjoint slices of one action through their `offset`,
 //! so a typical VLA action `[dx, dy, dz, droll, dpitch, dyaw, gripper]` is a
-//! Cartesian task at offset 0 and a gripper task at offset 6.
+//! Cartesian task at offset 0 with `"rotation": "rpy"` and a gripper task
+//! at offset 6.
 //!
 //! This crate is `std`-only: a policy runtime is a host component. There is
 //! no `no_std` surface and no `#![no_std]` attribute; the `std` feature

@@ -1,7 +1,7 @@
 //! Allocation gate: `tract` is the one documented exception to the
 //! zero-allocation hot-path rule in this workspace, so the number of heap
-//! allocations per `process` call is measured and bounded here instead of
-//! assumed. The measured count is recorded in the crate docs.
+//! allocations per cycle of the joint-reach observation task feeding the
+//! policy task is measured and bounded here instead of assumed. The measured count is recorded in the crate docs.
 //!
 //! This is the only test in its binary: the counting allocator is global.
 
@@ -15,6 +15,8 @@ use repose_kinematics::CuJointPositionsPayload;
 use repose_kinematics::CuJointStatePayload;
 use repose_kinematics::CuJointVelocity;
 use repose_kinematics::CuRobotStatus;
+use repose_policy_rl::CuJointReachObservationParams;
+use repose_policy_rl::CuJointReachObservationTask;
 use repose_policy_rl::CuObservationTerm;
 use repose_policy_rl::CuPolicyAction;
 use repose_policy_rl::CuPolicyObservation;
@@ -55,8 +57,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-/// Upper bound on heap allocations per `process` call (see crate docs).
-/// Measured: 14 per call with `linear_24_6` (debug and release); the bound
+/// Upper bound on heap allocations per cycle (see crate docs).
+/// Measured: 14 per cycle with `linear_24_6` (debug and release); the bound
 /// leaves headroom for platform variance while catching regressions.
 const MAX_ALLOCATIONS_PER_CALL: usize = 32;
 
@@ -70,17 +72,21 @@ fn vel(rad_s: f64) -> CuJointVelocity {
 
 #[test]
 fn allocations_per_process_are_bounded() {
-    let params = CuPolicyParams::<6, 24, 6> {
-        model: format!(
-            "{}/tests/fixtures/linear_24_6.onnx",
-            env!("CARGO_MANIFEST_DIR")
-        ),
+    let observation = CuJointReachObservationParams::<6, 18> {
         observation: vec![
             CuObservationTerm::JointPositions { scale: 1.0 },
             CuObservationTerm::JointVelocities { scale: 0.1 },
             CuObservationTerm::GoalError { scale: 1.0 },
-            CuObservationTerm::PreviousAction,
         ],
+        ..CuJointReachObservationParams::default()
+    };
+    let mut observation_task = CuJointReachObservationTask::from_params(observation).unwrap();
+    let params = CuPolicyParams::<18, 24, 6> {
+        model: format!(
+            "{}/tests/fixtures/linear_24_6.onnx",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+        previous_action: true,
         ..CuPolicyParams::default()
     };
     let mut task = CuPolicyTask::from_params(params).unwrap();
@@ -95,6 +101,7 @@ fn allocations_per_process_are_bounded() {
         positions: [pos(1.0); 6],
     }));
     let input = (&state_msg, &goal_msg);
+    let mut features = CuMsg::<CuPolicyObservation<18>>::default();
     let mut output = (
         CuMsg::<CuPolicyObservation<24>>::default(),
         CuMsg::<CuPolicyAction<6>>::default(),
@@ -102,7 +109,10 @@ fn allocations_per_process_are_bounded() {
 
     // Warm up: model caches and lazy allocations settle here, not in the count.
     for _ in 0..100 {
-        task.process(&ctx, &input, &mut output).unwrap();
+        observation_task
+            .process(&ctx, &input, &mut features)
+            .unwrap();
+        task.process(&ctx, &features, &mut output).unwrap();
     }
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
@@ -110,7 +120,10 @@ fn allocations_per_process_are_bounded() {
     let mut worst = 0;
     for _ in 0..CALLS {
         let before = ALLOCATIONS.load(Ordering::Relaxed);
-        task.process(&ctx, &input, &mut output).unwrap();
+        observation_task
+            .process(&ctx, &input, &mut features)
+            .unwrap();
+        task.process(&ctx, &features, &mut output).unwrap();
         worst = worst.max(ALLOCATIONS.load(Ordering::Relaxed) - before);
     }
     let total = ALLOCATIONS.load(Ordering::Relaxed);

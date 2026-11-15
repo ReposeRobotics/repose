@@ -1,9 +1,11 @@
-//! Wire payloads of the policy task: the observation built each cycle, and
-//! the raw model output before any scaling or limiting.
+//! Wire payloads of the policy task: the observation (the feature vector an
+//! observation task feeds the policy, and the model input the policy
+//! publishes each cycle), and the raw model output before any scaling or
+//! limiting.
 //!
 //! Both vectors are dimensionless `f32`: they are model-space numbers, not
 //! physical quantities. `Tov` stays on the `CuMsg` envelope and is propagated
-//! from the joint state input by [`crate::CuPolicyTask`].
+//! from input to output by the observation and policy tasks.
 
 use bincode::Decode;
 use bincode::Encode;
@@ -17,20 +19,25 @@ use serde::Serialize;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum CuPolicyStatus {
-    /// No usable joint state or goal yet; `values` are zero.
+    /// No input observation (for example no usable joint state or goal
+    /// upstream); `values` are zero.
     #[default]
     Idle,
     /// Inferred this cycle.
     Fresh,
     /// Decimation: repeats the last inferred action.
     Held,
-    /// Inference failed or produced a non-finite value; `values` are zero.
+    /// Non-finite model input, failed inference, or a non-finite model
+    /// output; `values` are zero.
     Fault,
 }
 
-/// Observation vector built this cycle (dimensionless). It is what the model
-/// was fed when the action of the same cycle is [`CuPolicyStatus::Fresh`];
-/// `Held` and `Idle` cycles run no inference on it, and it is zero on `Idle`.
+/// Observation vector (dimensionless). As the input of
+/// [`crate::CuPolicyTask`] it is the flat feature vector an observation task
+/// built; a non-finite value there signals a fault. As its output it is the
+/// model input built this cycle: what the model was fed when the action of
+/// the same cycle is [`CuPolicyStatus::Fresh`]; `Held` and `Idle` cycles run
+/// no inference on it, and it is zero on `Idle`.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Serialize, Deserialize, Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
 pub struct CuPolicyObservation<const OBS: usize> {

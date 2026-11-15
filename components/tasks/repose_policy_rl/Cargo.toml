@@ -1,6 +1,6 @@
 [package]
 name = "repose-policy-rl"
-description = "ONNX reinforcement-learning policy execution task for copper-rs: joint state and goal in, logged observation and raw action out"
+description = "ONNX reinforcement-learning policy execution task for copper-rs: task-specific observation in, logged model input and raw action out, plus a joint-reach observation task"
 version.workspace = true
 publish.workspace = true
 authors.workspace = true

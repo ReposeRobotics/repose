@@ -101,6 +101,28 @@ may be breaking.
   cycle period) the setpoint velocity is the target change per cycle, which
   a controller in `velocity` mode executes; without it the setpoint velocity
   is zero and the controller must run in `position` or `effort` mode.
+- `repose-policy-rl`: `CuCartesianActionTask<N, ACT>` runs end-effector
+  actions, the output of most vision-language-action models. It reads a pose
+  delta `[dx, dy, dz, r0, r1, r2]` from `CuPolicyAction<ACT>` at `offset`, in
+  the `base` or `body` frame, with the rotation as a rotation vector or as
+  roll/pitch/yaw. Translation and rotation scales are typed (`Length`,
+  `Angle`), and optional `max_translation` and `max_rotation` limit each
+  cycle's delta. The delta becomes a twist over the required `period`, which
+  `CuKinematicChain::differential_ik` solves at the measured joint positions:
+  damped least squares with adaptive singularity damping, joint-limit margin
+  damping, and scaling to the chain's joint velocity limits. The task emits
+  the `CuTrajectoryFollowOutput<N>` the controller consumes, clamped to the
+  joint limits, plus a `CuCartesianActionReport` that logs the IK status and
+  whether a Cartesian limit shortened the delta. Hold and fault behavior,
+  `Held` actions, and `Freezable` state match `CuJointActionTask`. Nothing on
+  the hot path allocates.
+- `repose-policy-rl`: `CuGripperActionTask<ACT>` turns one action element into
+  the `CuGripperCommandPayload` that `repose_io::CuGripperTask` consumes. It
+  takes a `threshold`, `close_when: above | below` (RT-1 closedness or
+  Bridge/Open X-Embodiment openness), and an optional `hysteresis` dead band.
+  An idle, faulted, non-finite, or dead-band value publishes no command, so
+  the gripper keeps its last action and a faulted policy never drops what it
+  holds. `repose-policy-rl` now depends on `repose-io`.
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

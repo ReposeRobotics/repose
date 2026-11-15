@@ -23,8 +23,20 @@
 //! execution layer caused a given motion. An observation task signals "no
 //! input" by publishing no payload (the policy reports `Idle`) and a fault
 //! by publishing `NaN` features (the policy reports `Fault`).
-//! [`CuJointActionTask`] turns the raw action into the limited joint
-//! setpoint that `repose_controller::CuControllerTask` consumes.
+//! An action task turns the raw action into the limited joint setpoint that
+//! `repose_controller::CuControllerTask` consumes:
+//!
+//! - [`CuJointActionTask`] for joint-space actions (most RL policies),
+//! - [`CuCartesianActionTask`] for end-effector pose deltas (most
+//!   vision-language-action models): the delta is solved with
+//!   singularity- and joint-limit-aware differential IK on the configured
+//!   chain, so the model never commands joints directly,
+//! - [`CuGripperActionTask`] for an open/close element, feeding
+//!   `repose_io::CuGripperTask`.
+//!
+//! Action tasks read disjoint slices of one action through their `offset`,
+//! so a typical VLA action `[dx, dy, dz, droll, dpitch, dyaw, gripper]` is a
+//! Cartesian task at offset 0 and a gripper task at offset 6.
 //!
 //! This crate is `std`-only: a policy runtime is a host component. There is
 //! no `no_std` surface and no `#![no_std]` attribute; the `std` feature
@@ -80,6 +92,8 @@
 
 mod action;
 mod backend;
+mod cartesian;
+mod gripper;
 mod observation;
 mod payload;
 mod policy;
@@ -87,6 +101,14 @@ mod policy;
 pub use action::CuJointActionKind;
 pub use action::CuJointActionParams;
 pub use action::CuJointActionTask;
+pub use cartesian::CARTESIAN_ACTION_WIDTH;
+pub use cartesian::CuCartesianActionParams;
+pub use cartesian::CuCartesianActionReport;
+pub use cartesian::CuCartesianActionTask;
+pub use cartesian::CuRotationEncoding;
+pub use gripper::CuGripperActionParams;
+pub use gripper::CuGripperActionTask;
+pub use gripper::CuGripperCloseWhen;
 pub use observation::CuJointReachObservationParams;
 pub use observation::CuJointReachObservationTask;
 pub use observation::CuObservationTerm;

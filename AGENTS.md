@@ -16,6 +16,8 @@ Before writing or reviewing code, read the applicable `SKILL.md` under `.agents/
 | RON config | `.agents/skills/copper-ron-config/SKILL.md` |
 | Build, checks, justfiles, releases | `.agents/skills/copper-workflow/SKILL.md` |
 
+The user-facing skills in `skills/` (for agents that use Repose, not develop it) document the public API: a change to a public name, config key, default, or behavior they describe updates the affected `skills/*/SKILL.md` in the same PR.
+
 Public API shape (params structs, constructors, units, visibility) follows `docs/api-conventions.md`.
 Versioning, breaking-change rules, and releases follow `docs/versioning.md`; record user-visible changes under `Unreleased` in `CHANGELOG.md`.
 

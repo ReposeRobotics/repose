@@ -215,6 +215,9 @@ goal → plan → time → follow → control loop, configured entirely in RON.
 | [API conventions](docs/api-conventions.md) | Params structs, constructors, units, visibility |
 | [Versioning](docs/versioning.md) · [Migration 0.8](docs/migration-0.8.md) | Release policy and upgrade notes |
 
+Using a coding agent? [`skills/`](skills/README.md) has Agent Skills that teach
+it the Repose API, conventions, and RON config shapes.
+
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short, work on a branch, run

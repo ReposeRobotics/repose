@@ -60,6 +60,11 @@ may be breaking.
 
 ### Added
 
+- Agent Skills for Repose users in `skills/`: getting started and shared
+  conventions, robot configuration, kinematics, collision, motion planning,
+  trajectories and control, Copper apps, and RL policies. Copy them into your
+  agent's skills folder; see [skills/README.md](skills/README.md).
+
 - `repose-policy-rl`: new `std`-only crate running a stateless feed-forward
   ONNX policy in the graph. `CuPolicyTask<IN, OBS, ACT>` is pure inference:
   it consumes one flat `CuPolicyObservation<IN>` feature vector from an

@@ -19,6 +19,15 @@ path = "src/logreader.rs"
 name = "setpoint_mux_resim"
 path = "src/resim.rs"
 
+[[bin]]
+name = "setpoint_mux_to_rrd"
+path = "src/to_rrd.rs"
+required-features = ["rrd"]
+
+[features]
+# Builds src/to_rrd.rs (Copper log -> Rerun); off by default to keep the demo's build small.
+rrd = ["dep:rerun", "dep:cu-spatial-payloads"]
+
 [dependencies]
 cu29 = { version = "1.3.1", default-features = false, features = ["std", "units"] }
 cu29-export = "1.3.0"
@@ -30,6 +39,9 @@ repose-trajectory = { path = "../../components/libs/repose_trajectory" }
 repose-joint-rrt-star = { path = "../../components/tasks/repose_joint_rrt_star" }
 repose-motion-planning = { path = "../../components/tasks/repose_motion_planning" }
 repose-policy-rl = { path = "../../components/tasks/repose_policy_rl" }
+# Only for `cargo run --features rrd --bin setpoint_mux_to_rrd`.
+cu-spatial-payloads = { version = "1.3.0", optional = true }
+rerun = { version = "0.43.2", default-features = false, features = ["sdk"], optional = true }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 
 [build-dependencies]

@@ -21,8 +21,11 @@
 pub mod tasks;
 
 use cu_spatial_payloads::Transform3D;
+use cu29::bincode::config::standard;
+use cu29::bincode::decode_from_std_read;
+use cu29::bincode::error::DecodeError;
+use cu29::copperlist::CopperList;
 use cu29::prelude::*;
-use cu29_export::copperlists_reader;
 use repose_controller::CuJointCommandPayload;
 use repose_kinematics::CuChainSpec;
 use repose_kinematics::CuJointPosition;
@@ -37,6 +40,7 @@ use rerun::blueprint::TextLogView;
 use rerun::blueprint::TimeSeriesView;
 use rerun::blueprint::Vertical;
 use serde::Deserialize;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -87,6 +91,75 @@ impl ToolPath {
         )
         .map_err(rerun_error)
     }
+}
+
+/// Counts the bytes read, to tell a clean end of log from a truncated record.
+struct CountingReader<R> {
+    inner: R,
+    bytes: u64,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes += n as u64;
+        Ok(n)
+    }
+}
+
+/// Next copperlist, `None` at a clean end of the log. A malformed or
+/// truncated record, or a read error, is an error (`copperlists_reader`
+/// would end silently and hide a damaged log).
+fn next_copperlist<R: Read>(src: &mut CountingReader<R>) -> CuResult<Option<CopperList<CuMsgs>>> {
+    let start = src.bytes;
+    match decode_from_std_read::<CopperList<CuMsgs>, _, _>(src, standard()) {
+        Ok(list) => Ok(Some(list)),
+        Err(e) => {
+            let at_end = match &e {
+                DecodeError::UnexpectedEnd { .. } => true,
+                DecodeError::Io { inner, .. } => inner.kind() == std::io::ErrorKind::UnexpectedEof,
+                _ => false,
+            };
+            if at_end && src.bytes == start {
+                Ok(None)
+            } else {
+                Err(CuError::from(format!(
+                    "cannot decode the copperlist at byte {start} of the log: {e}"
+                )))
+            }
+        }
+    }
+}
+
+/// Rejects an output that is the input log or one of its slabs
+/// (`<stem>_<k>.<ext>`), compared by canonical path so symlinks and other
+/// aliases count: saving would truncate the log being read.
+fn ensure_distinct_output(input: &Path, output: &Path) -> CuResult<()> {
+    let Ok(out) = std::fs::canonicalize(output) else {
+        // The output does not exist yet, so it cannot be an input file.
+        return Ok(());
+    };
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = input.extension().map(|e| e.to_string_lossy());
+    let slab = |k: usize| {
+        let name = match &ext {
+            Some(ext) => format!("{stem}_{k}.{ext}"),
+            None => format!("{stem}_{k}"),
+        };
+        input.with_file_name(name)
+    };
+    let candidates =
+        std::iter::once(input.to_path_buf()).chain((0..).map(slab).take_while(|p| p.exists()));
+    for candidate in candidates {
+        if std::fs::canonicalize(&candidate).is_ok_and(|c| c == out) {
+            return Err(CuError::from(format!(
+                "output {} is the Copper log {} itself; choose a different output",
+                output.display(),
+                candidate.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The `planner` task config; only the chain is needed here.
@@ -261,6 +334,7 @@ struct Statuses {
 }
 
 fn convert(input: &Path, output: &Path) -> CuResult<u64> {
+    ensure_distinct_output(input, output)?;
     let chain = load_chain()?;
     let UnifiedLogger::Read(log) = UnifiedLoggerBuilder::new()
         .file_base_name(input)
@@ -269,7 +343,10 @@ fn convert(input: &Path, output: &Path) -> CuResult<u64> {
     else {
         return Err(CuError::from("expected a readable Copper log"));
     };
-    let mut reader = UnifiedLoggerIOReader::new(log, UnifiedLogType::CopperList);
+    let mut reader = CountingReader {
+        inner: UnifiedLoggerIOReader::new(log, UnifiedLogType::CopperList),
+        bytes: 0,
+    };
 
     let rec = rerun::RecordingStreamBuilder::new("setpoint_mux")
         .with_blueprint(blueprint())
@@ -282,7 +359,16 @@ fn convert(input: &Path, output: &Path) -> CuResult<u64> {
     let mut tcp_path = ToolPath::default();
     let mut statuses = Statuses::default();
     let mut cycles = 0u64;
-    for list in copperlists_reader::<CuMsgs>(&mut reader) {
+    let mut failure = None;
+    loop {
+        let list = match next_copperlist(&mut reader) {
+            Ok(Some(list)) => list,
+            Ok(None) => break,
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        };
         let msgs = &list.msgs;
         let state = msgs.get_plant_rx_joint_state();
         rec.set_time_sequence("copperlist", list.id as i64);
@@ -352,8 +438,18 @@ fn convert(input: &Path, output: &Path) -> CuResult<u64> {
         )?;
         cycles += 1;
     }
+    // Keep what was converted, but do not report a cut-short log as success.
     rec.flush_blocking().map_err(rerun_error)?;
-    Ok(cycles)
+    match failure {
+        Some(e) => {
+            eprintln!(
+                "setpoint-mux-to-rrd: the log ended early after {cycles} copperlists; {} holds only those",
+                output.display()
+            );
+            Err(e)
+        }
+        None => Ok(cycles),
+    }
 }
 
 fn run() -> CuResult<()> {

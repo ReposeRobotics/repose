@@ -25,6 +25,11 @@ Fixtures:
                     batch dimension most trainers export. It must load.
   open_batch_5.onnx output = input, [?, 5] -> [?, 5] with an unnamed batch
                     dimension; loading it for OBS = 4 must fail at startup.
+  chunk_4_3_2.onnx  Gemm [1, 4] -> [1, 6] then Reshape -> [1, 3, 2]: step s
+                    is [(s + 1) * (obs[0] + obs[2]), (s + 1) * (obs[1] + obs[3])].
+  chunk_batch_4_3_2.onnx
+                    Same chunked network with dynamic batch dimension
+                    ["batch", 4] -> ["batch", 3, 2] (using shape [0, 3, 2]).
 """
 
 import numpy as np
@@ -119,6 +124,32 @@ def double_4():
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
 
 
+def chunk_4_3_2(batch=1):
+    # [batch, 4] @ [4, 6] -> Reshape([0, 3, 2]) -> [batch, 3, 2]
+    # Step s in {0, 1, 2} has scale = 0.25 * (s + 1) on (obs[0..2] + obs[2..4]).
+    weights = np.zeros((4, 6), dtype=np.float32)
+    for s in range(3):
+        scale = 0.25 * float(s + 1)
+        weights[0, 2 * s + 0] = scale
+        weights[2, 2 * s + 0] = scale
+        weights[1, 2 * s + 1] = scale
+        weights[3, 2 * s + 1] = scale
+    shape = np.array([0, 3, 2], dtype=np.int64)
+    mm = helper.make_node("MatMul", ["observation", "weights"], ["flat"])
+    reshape = helper.make_node("Reshape", ["flat", "shape"], ["chunk"])
+    graph = helper.make_graph(
+        [mm, reshape],
+        "chunk_4_3_2",
+        [value_info("observation", [batch, 4])],
+        [value_info("chunk", [batch, 3, 2])],
+        [
+            numpy_helper.from_array(weights, "weights"),
+            numpy_helper.from_array(shape, "shape"),
+        ],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", OPSET)])
+
+
 if __name__ == "__main__":
     save(identity(4), "identity_4.onnx")
     save(identity(5), "identity_5.onnx")
@@ -128,3 +159,5 @@ if __name__ == "__main__":
     save(bad_shape(), "bad_shape.onnx")
     save(nan_model(), "nan.onnx")
     save(double_4(), "double_4.onnx")
+    save(chunk_4_3_2(batch=1), "chunk_4_3_2.onnx")
+    save(chunk_4_3_2(batch="batch"), "chunk_batch_4_3_2.onnx")

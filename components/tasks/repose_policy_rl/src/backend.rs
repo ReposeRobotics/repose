@@ -39,27 +39,55 @@ pub(crate) struct CuPolicyBackend {
     model: Arc<TypedRunnableModel>,
 }
 
-fn check_fact(fact: &TypedFact, width: usize, message: &'static str) -> CuResult<()> {
-    if fact.datum_type != f32::datum_type()
-        || fact.shape.as_concrete() != Some([1, width].as_slice())
-    {
+fn check_fact(fact: &TypedFact, expected_shape: &[usize], message: &'static str) -> CuResult<()> {
+    if fact.datum_type != f32::datum_type() || fact.shape.as_concrete() != Some(expected_shape) {
         return Err(CuError::from(message));
     }
     Ok(())
 }
 
 impl CuPolicyBackend {
-    /// Reads, hash-checks, and optimizes the model at `path`.
-    ///
-    /// The model must have exactly one `f32` input of shape `[1, obs]` and
-    /// one `f32` output of shape `[1, act]`. `path` resolves relative to the
-    /// process working directory. When `expected_hash` is set, the FNV-1a
-    /// hash of the file bytes must match it.
+    /// Reads, hash-checks, and optimizes a single-step `[1, obs] -> [1, act]`
+    /// `f32` model at `path`.
     pub(crate) fn load(
         path: &Path,
         obs: usize,
         act: usize,
         expected_hash: Option<u64>,
+    ) -> CuResult<Self> {
+        Self::load_with_output_shape(
+            path,
+            obs,
+            &[1, act],
+            expected_hash,
+            "repose-policy-rl: model output must be f32 with shape [1, ACT]",
+        )
+    }
+
+    /// Reads, hash-checks, and optimizes a chunked `[1, obs] -> [1, h, act]`
+    /// `f32` model at `path`.
+    pub(crate) fn load_chunk(
+        path: &Path,
+        obs: usize,
+        h: usize,
+        act: usize,
+        expected_hash: Option<u64>,
+    ) -> CuResult<Self> {
+        Self::load_with_output_shape(
+            path,
+            obs,
+            &[1, h, act],
+            expected_hash,
+            "repose-policy-rl: model output must be f32 with shape [1, H, ACT]",
+        )
+    }
+
+    fn load_with_output_shape(
+        path: &Path,
+        obs: usize,
+        expected_output: &[usize],
+        expected_hash: Option<u64>,
+        output_shape_error: &'static str,
     ) -> CuResult<Self> {
         let bytes = std::fs::read(path)
             .map_err(|e| CuError::new_with_cause("repose-policy-rl: cannot read model file", e))?;
@@ -128,7 +156,7 @@ impl CuPolicyBackend {
             .map_err(|e| backend_error("repose-policy-rl: model input fact", e))?;
         check_fact(
             input_fact,
-            obs,
+            &[1, obs],
             "repose-policy-rl: model input must be f32 with shape [1, OBS]",
         )?;
         let output_outlets = model
@@ -137,18 +165,14 @@ impl CuPolicyBackend {
         let output_fact = model
             .outlet_fact(output_outlets[0])
             .map_err(|e| backend_error("repose-policy-rl: model output fact", e))?;
-        check_fact(
-            output_fact,
-            act,
-            "repose-policy-rl: model output must be f32 with shape [1, ACT]",
-        )?;
+        check_fact(output_fact, expected_output, output_shape_error)?;
         let model = model
             .into_runnable()
             .map_err(|e| backend_error("repose-policy-rl: cannot build runnable model", e))?;
         Ok(Self { model })
     }
 
-    /// Runs the model on `observation`, writing the raw output into `out`.
+    /// Runs a single-step model on `observation`, writing `[1, ACT]` into `out`.
     pub(crate) fn infer<const OBS: usize, const ACT: usize>(
         &self,
         observation: &[f32; OBS],
@@ -175,6 +199,38 @@ impl CuPolicyBackend {
             .to_plain_array_view::<f32>()
             .map_err(|e| backend_error("repose-policy-rl: cannot read output tensor", e))?;
         for (dst, src) in out.iter_mut().zip(view.iter()) {
+            *dst = *src;
+        }
+        Ok(())
+    }
+
+    /// Runs a chunked model on `observation`, writing `[1, H, ACT]` into `out`.
+    pub(crate) fn infer_chunk<const OBS: usize, const H: usize, const ACT: usize>(
+        &self,
+        observation: &[f32; OBS],
+        out: &mut [[f32; ACT]; H],
+    ) -> CuResult<()> {
+        let input = Tensor::from_shape(&[1, OBS], observation.as_slice())
+            .map_err(|e| backend_error("repose-policy-rl: cannot build input tensor", e))?;
+        let outputs = self
+            .model
+            .run(tvec!(input.into()))
+            .map_err(|e| backend_error("repose-policy-rl: inference failed", e))?;
+        if outputs.len() != 1 {
+            return Err(CuError::from(
+                "repose-policy-rl: model must produce exactly one output",
+            ));
+        }
+        let output = &outputs[0];
+        if output.datum_type() != f32::datum_type() || output.shape() != [1, H, ACT] {
+            return Err(CuError::from(
+                "repose-policy-rl: model output shape or element type changed at run time",
+            ));
+        }
+        let view = output
+            .to_plain_array_view::<f32>()
+            .map_err(|e| backend_error("repose-policy-rl: cannot read output tensor", e))?;
+        for (dst, src) in out.iter_mut().flatten().zip(view.iter()) {
             *dst = *src;
         }
         Ok(())

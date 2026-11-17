@@ -726,3 +726,127 @@ fn chained_unready_robot_is_idle_and_kind_mismatch_is_fault() {
     assert_eq!(action.status, CuPolicyStatus::Fresh);
     assert_eq!(action.values, [0.5, -0.25, 1.0, 1.0]);
 }
+
+// --- Chunked ONNX policy + temporal ensembling ------------------------------
+
+#[test]
+fn chunk_policy_loads_fixed_and_dynamic_batch_and_rejects_wrong_shapes() {
+    use crate::CuChunkPolicyParams;
+    use crate::CuChunkPolicyTask;
+
+    for model_name in ["chunk_4_3_2.onnx", "chunk_batch_4_3_2.onnx"] {
+        let mut task = CuChunkPolicyTask::<4, 3, 2>::from_params(CuChunkPolicyParams {
+            model: fixture(model_name),
+            ..CuChunkPolicyParams::default()
+        })
+        .unwrap();
+        let (ctx, _clock) = CuContext::new_mock_clock();
+        let obs = CuMsg::new(features([1.0, 2.0, 3.0, 6.0]));
+        let mut out = CuMsg::default();
+        task.process(&ctx, &obs, &mut out).unwrap();
+        let chunk = out.payload().unwrap();
+        assert_eq!(chunk.status, CuPolicyStatus::Fresh);
+        // obs[0]+obs[2] = 4.0, obs[1]+obs[3] = 8.0; scales = [0.25, 0.5, 0.75]
+        assert_eq!(chunk.values, [[1.0, 2.0], [2.0, 4.0], [3.0, 6.0]]);
+    }
+
+    // Wrong H, wrong ACT, wrong OBS, or a rank-2 [1, 4] single-step model must fail at startup.
+    assert!(
+        CuChunkPolicyTask::<4, 4, 2>::from_params(CuChunkPolicyParams {
+            model: fixture("chunk_4_3_2.onnx"),
+            ..CuChunkPolicyParams::default()
+        })
+        .is_err()
+    );
+    assert!(
+        CuChunkPolicyTask::<4, 3, 3>::from_params(CuChunkPolicyParams {
+            model: fixture("chunk_4_3_2.onnx"),
+            ..CuChunkPolicyParams::default()
+        })
+        .is_err()
+    );
+    assert!(
+        CuChunkPolicyTask::<5, 3, 2>::from_params(CuChunkPolicyParams {
+            model: fixture("chunk_4_3_2.onnx"),
+            ..CuChunkPolicyParams::default()
+        })
+        .is_err()
+    );
+    assert!(
+        CuChunkPolicyTask::<4, 1, 4>::from_params(CuChunkPolicyParams {
+            model: fixture("identity_4.onnx"),
+            ..CuChunkPolicyParams::default()
+        })
+        .is_err()
+    );
+    // Wrong hash pin fails at startup.
+    assert!(
+        CuChunkPolicyTask::<4, 3, 2>::from_params(CuChunkPolicyParams {
+            model: fixture("chunk_4_3_2.onnx"),
+            model_hash: Some(42),
+            ..CuChunkPolicyParams::default()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn chained_observation_chunk_policy_and_temporal_ensembler() {
+    use crate::CuActionChunkMode;
+    use crate::CuActionChunkParams;
+    use crate::CuActionChunkTask;
+    use crate::CuChunkPolicyParams;
+    use crate::CuChunkPolicyTask;
+
+    let mut obs_task = CuJointReachObservationTask::from_params(reach_params()).unwrap();
+    let mut chunk_policy = CuChunkPolicyTask::<4, 3, 2>::from_params(CuChunkPolicyParams {
+        model: fixture("chunk_4_3_2.onnx"),
+        decimation: 2,
+        model_hash: None,
+    })
+    .unwrap();
+    let mut ensembler = CuActionChunkTask::<3, 2>::from_params(CuActionChunkParams {
+        mode: CuActionChunkMode::TemporalEnsemble { decay: 0.0 },
+        step_decimation: 1,
+        execution_horizon: None,
+    })
+    .unwrap();
+
+    let (ctx, _clock) = CuContext::new_mock_clock();
+    let mut run_cycle = |state: Option<CuJointStatePayload<2>>| -> CuPolicyAction<2> {
+        let obs = observe(&mut obs_task, state, Some(goal2([3.0, 6.0])));
+        let obs_msg = CuMsg::new(obs);
+        let mut chunk_msg = CuMsg::default();
+        chunk_policy
+            .process(&ctx, &obs_msg, &mut chunk_msg)
+            .unwrap();
+        let mut act_msg = CuMsg::default();
+        ensembler.process(&ctx, &chunk_msg, &mut act_msg).unwrap();
+        act_msg.payload().unwrap().clone()
+    };
+
+    // Cycle 0 (Fresh inference): pos + goal_error = goal = [3.0, 6.0] ->
+    // chunk = [[0.75, 1.5], [1.5, 3.0], [2.25, 4.5]]. Emits step 0.
+    let a0 = run_cycle(Some(state2([1.0, 2.0])));
+    assert_eq!(a0.status, CuPolicyStatus::Fresh);
+    assert_eq!(a0.values, [0.75, 1.5]);
+
+    // Cycle 1 (decimated Held from chunk_policy): ensembler steps to step 1!
+    let a1 = run_cycle(Some(state2([1.2, 2.4])));
+    assert_eq!(a1.status, CuPolicyStatus::Fresh);
+    assert_eq!(a1.values, [1.5, 3.0]);
+
+    // Cycle 2 (Fresh inference): overlaps chunk0[2] = [2.25, 4.5] with
+    // chunk2[0] = [0.75, 1.5] -> uniform average [1.5, 3.0]!
+    let a2 = run_cycle(Some(state2([1.5, 3.0])));
+    assert_eq!(a2.status, CuPolicyStatus::Fresh);
+    assert_eq!(a2.values, [1.5, 3.0]);
+
+    // Robot goes NotReady mid-chunk -> observation emits None -> chunk_policy
+    // emits Idle -> ensembler flushes buffered tail immediately to Idle!
+    let mut unready = state2([1.5, 3.0]);
+    unready.status = CuRobotStatus::NotReady;
+    let stopped = run_cycle(Some(unready));
+    assert_eq!(stopped.status, CuPolicyStatus::Idle);
+    assert_eq!(stopped.values, [0.0, 0.0]);
+}

@@ -195,6 +195,16 @@ may be breaking.
   snapshot is now fixed-size (presence flags, little-endian integers, and the
   full `MAX_POINTS` capacity). See `### Breaking` for keyframe compatibility.
 
+- `repose-trajectory`: the `Cubic` timing profile no longer returns
+  `InvalidInput` for long rest-to-rest segments. Its default segment duration
+  was the trapezoidal minimum, at which a cubic Hermite segment peaks at
+  `1.5 * distance / duration`, above the velocity limit once a joint travels
+  more than `2 * v^2 / a`. This rejected most long two-waypoint plans, such
+  as RRT* shortcuts. Without fixed durations or non-zero waypoint velocities,
+  the duration is now stretched to keep that peak at the limit; shorter
+  segments keep their timing. Fixed durations that are too short are still
+  rejected.
+
 - `repose-controller`: `CuControllerTask::process` never emits a non-finite
   field (`positions`, `velocities`, `efforts`, `max_tracking_error`) in
   `CuJointCommandPayload` or stores non-finite state across cycles (`last_command`,

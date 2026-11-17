@@ -684,6 +684,24 @@ fn joint_profile_duration(distance: f64, max_vel: f64, max_acc: f64) -> f64 {
     }
 }
 
+/// Rest-to-rest cubic traversal time for one joint displacement: the
+/// trapezoidal time, stretched to `1.5 * distance / max_vel` when the cubic
+/// peak would otherwise exceed the velocity limit (`distance > 2 v^2 / a`).
+fn cubic_joint_duration(distance: f64, max_vel: f64, max_acc: f64) -> f64 {
+    if distance <= 0.0 {
+        return 0.0;
+    }
+    let accel_time = max_vel / max_acc;
+    if distance >= max_vel * accel_time {
+        let cruise = distance / max_vel;
+        (cruise + accel_time).max(1.5 * cruise)
+    } else {
+        // Triangular: 2 * sqrt(d / a) <= d / v + v / a, and the cubic peak
+        // 1.5 * d / T stays below v whenever d < 2 v^2 / a.
+        2.0 * libm::sqrt(distance / max_acc)
+    }
+}
+
 /// Jerk-limited S-curve traversal time for one joint displacement.
 ///
 /// With infinite jerk this is exactly the trapezoidal time; with finite jerk
@@ -977,16 +995,14 @@ fn cubic_segment_duration<const N: usize>(
     to: &[CuJointPosition; N],
     limits: &CuJointTrajectoryLimits<N>,
 ) -> f64 {
-    let mut duration = segment_duration(from, to, limits);
+    let mut duration = 0.0;
     let mut j = 0;
     while j < N {
         let distance = (to[j].si_value() - from[j].si_value()).abs();
-        let max_vel = limits.max_velocities[j].si_value();
-        if distance > 0.0 && max_vel > 0.0 {
-            let leg = 1.5 * distance / max_vel;
-            if leg > duration {
-                duration = leg;
-            }
+        let leg =
+            cubic_joint_duration(distance, limits.max_velocities[j].si_value(), limits.acc(j));
+        if leg > duration {
+            duration = leg;
         }
         j += 1;
     }

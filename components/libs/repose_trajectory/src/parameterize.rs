@@ -324,7 +324,10 @@ impl CuTimingStatus {
 ///   (exceeding is `InvalidInput`).
 /// - `Cubic`: cubic Hermite polynomial per segment per joint honoring the
 ///   specified waypoint velocities exactly. Duration: fixed when given,
-///   otherwise the trapezoidal minimum; the exact velocity extrema of every
+///   otherwise the trapezoidal minimum, stretched for rest-to-rest segments
+///   so the cubic peak `1.5 * distance / duration` stays within the velocity
+///   limit (with non-zero waypoint velocities the trapezoidal minimum is
+///   used as is); the exact velocity extrema of every
 ///   segment, waypoint velocities included, are validated against the limits
 ///   (exceeding is `InvalidInput`).
 ///
@@ -934,6 +937,7 @@ fn segment_minimum<const N: usize>(
         CuTrajectoryProfile::MinimumJerk if all_zero_via => {
             minjerk_segment_duration(&from, &to, limits)
         }
+        CuTrajectoryProfile::Cubic if all_zero_via => cubic_segment_duration(&from, &to, limits),
         CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic => {
             segment_duration(&from, &to, limits)
         }
@@ -956,6 +960,33 @@ fn segment_duration<const N: usize>(
             joint_profile_duration(distance, limits.max_velocities[j].si_value(), limits.acc(j));
         if leg > duration {
             duration = leg;
+        }
+        j += 1;
+    }
+    duration
+}
+
+/// Rest-to-rest cubic Hermite segment duration synchronized across joints.
+///
+/// A rest-to-rest cubic peaks at `1.5 * distance / duration` mid-segment, so
+/// the trapezoidal minimum alone exceeds the velocity limit once a joint
+/// travels more than `2 * v^2 / a`. The duration is the trapezoidal minimum,
+/// stretched just enough to keep that peak at the velocity limit.
+fn cubic_segment_duration<const N: usize>(
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
+    limits: &CuJointTrajectoryLimits<N>,
+) -> f64 {
+    let mut duration = segment_duration(from, to, limits);
+    let mut j = 0;
+    while j < N {
+        let distance = (to[j].si_value() - from[j].si_value()).abs();
+        let max_vel = limits.max_velocities[j].si_value();
+        if distance > 0.0 && max_vel > 0.0 {
+            let leg = 1.5 * distance / max_vel;
+            if leg > duration {
+                duration = leg;
+            }
         }
         j += 1;
     }
@@ -1794,17 +1825,46 @@ mod tests {
     }
 
     #[test]
-    fn test_cubic_velocity_violation_rejected() {
+    fn test_cubic_long_segment_stretched_to_velocity_limit() {
         let wps = [[rev(0.0)], [rev(1.0)]];
         let limits = rev_limits(0.5, 5.0);
         let mut out = CuTrajectoryPayload::<1, 512>::new();
-        // Trapezoidal minimum is 2.1 s; cubic rest-to-rest peaks at
-        // 1.5 / 2.1 = 0.71 rad/s, above the 0.5 rad/s limit.
+        // The trapezoidal minimum (2.1 s) would peak at 1.5 / 2.1 = 0.71
+        // rad/s; the cubic duration is stretched to 1.5 * 1.0 / 0.5 = 3 s.
         let status = with_profile(
             &wps,
             &limits,
             CuTrajectoryProfile::Cubic,
             &CuTimingOverrides::default(),
+            Time::new::<second>(0.01),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(status, CuTimingStatus::Success);
+        let last = out.points().last().unwrap();
+        assert!((last.time_from_start.get::<second>() - 3.0).abs() < 1e-12);
+        assert!((last.positions[0].si_value() - 1.0).abs() < 1e-12);
+        for p in out.points() {
+            assert!(p.velocities[0].si_value().abs() <= 0.5 + 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_cubic_velocity_violation_rejected() {
+        let wps = [[rev(0.0)], [rev(1.0)]];
+        let limits = rev_limits(0.5, 5.0);
+        let mut out = CuTrajectoryPayload::<1, 512>::new();
+        // A fixed 2.1 s segment peaks at 1.5 / 2.1 = 0.71 rad/s, above the
+        // 0.5 rad/s limit.
+        let durations = [Time::new::<second>(2.1)];
+        let status = with_profile(
+            &wps,
+            &limits,
+            CuTrajectoryProfile::Cubic,
+            &CuTimingOverrides {
+                segment_durations: Some(&durations),
+                ..Default::default()
+            },
             Time::new::<second>(0.01),
             &mut out,
         )

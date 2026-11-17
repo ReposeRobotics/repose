@@ -77,8 +77,9 @@ may be breaking.
   decay over `blend_time`, default 0.2 s). Adds `CuSetpointMuxParams`,
   `CuSetpointSource`, and `DEFAULT_MUX_BLEND_TIME_S`. The new
   `examples/setpoint_mux` app runs transit → policy → fault hold → retract
-  closed loop on an in-process plant, records a `.copper` log, and replays it
-  bit-exactly (`setpoint_mux_resim`).
+  closed loop on an in-process plant, records a `.copper` log with keyframes,
+  replays it bit-exactly (`setpoint_mux_resim`), and converts it to a Rerun
+  recording (`setpoint_mux_to_rrd`, `rrd` feature).
 
 - Agent Skills for Repose users in `skills/`: getting started and shared
   conventions, robot configuration, kinematics, collision, motion planning,

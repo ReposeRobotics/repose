@@ -15,7 +15,7 @@ plant/joint_state ─► scenario ─► planner ─► timing ─► follower �
 The scenario runs in four phases:
 
 1. **Transit (classical).** RRT* plans a path from home to the pre-grasp
-   pose. `timing` adds timing and `follower` executes it.
+   pose. `timing` adds cubic timing and `follower` executes it.
 2. **Handoff to the policy.** When the transit finishes and the scripted
    policy reports `Running`, the mux blends smoothly into the
    `CuJointActionTask` setpoint. That setpoint is the contact motion.
@@ -30,7 +30,7 @@ The scenario runs in four phases:
 |---|---|---|
 | `scenario` | `tasks::Scenario` (this crate) | Sends the transit request, then the retract request after the policy faults |
 | `planner` | `repose_joint_rrt_star::CuJointRrtStarTask<6>` | Anytime RRT* running in the background |
-| `timing` | `repose_motion_planning::CuPlanToTrajectoryTask<6, 1024>` | Times the path with a trapezoidal profile |
+| `timing` | `repose_motion_planning::CuPlanToTrajectoryTask<6, 1024>` | Times the path with a cubic profile |
 | `follower` | `repose_trajectory::CuFollowTrajectoryTask<6, 1024>` | Classical setpoint |
 | `policy` | `tasks::ScriptedPolicy` (this crate) | Stand-in for an ONNX or VLA policy: `Idle`, then a `Fresh` action, then `Fault` |
 | `joint_action` | `repose_policy_rl::CuJointActionTask<6, 6>` | Policy setpoint (`position_delta`) |
@@ -50,12 +50,13 @@ The app writes `result.json` and exits with a nonzero status if any phase is
 missing. A passing run looks like this:
 
 ```json
-{"success":true,"outcome":"retracted","cycles":432,
- "phase_cycles":{"at_pregrasp":94,"policy_moved":153,"held":283,"retracted":432},
- "max_setpoint_position_step_rad":0.008009,"max_setpoint_velocity_step_rad_s":0.054270}
+{"success":true,"outcome":"retracted","cycles":442,
+ "phase_cycles":{"at_pregrasp":95,"policy_moved":153,"held":284,"retracted":442},
+ "max_setpoint_position_step_rad":0.008000,"max_setpoint_velocity_step_rad_s":0.055995}
 ```
 
-The log is `logs/setpoint_mux.copper`. Always pass this base path to the
+The log is `logs/setpoint_mux.copper`, with keyframes at Copper's default
+interval (about one per second here). Always pass this base path to the
 tools, not `_0`.
 
 ## Replay
@@ -83,15 +84,26 @@ cargo run --bin setpoint_mux_logreader -- logs/setpoint_mux.copper extract-coppe
 cargo run --bin setpoint_mux_logreader -- logs/setpoint_mux.copper fsck
 ```
 
+## View in Rerun
+
+`setpoint_mux_to_rrd` converts the log into a [Rerun](https://rerun.io)
+recording offline; the demo itself never logs to Rerun. It sits behind the
+`rrd` feature so the normal build stays small.
+
+```bash
+cargo run --features rrd --bin setpoint_mux_to_rrd            # logs/setpoint_mux.copper -> logs/setpoint_mux.rrd
+cargo run --features rrd --bin setpoint_mux_to_rrd -- in.copper out.rrd
+rerun logs/setpoint_mux.rrd
+```
+
+The default layout shows the arm in 3D (measured in blue, controller command
+in red, with the tool path) beside one plot per joint. Each joint plot
+overlays the measured position, both mux inputs (follower and policy), the
+mux output and the controller command, so every blend is visible. Below are
+the mux setpoint velocity and a log of follower, policy, mux and controller
+status changes. Timelines are `cu_time` (the Copper clock) and `copperlist`.
+
 ## Known limitations
 
-- **Keyframes are off.** `CuFollowTrajectoryTask` freezes an
-  `Option<trajectory>` whose encoded size grows once it adopts a trajectory.
-  Copper preallocates the keyframe buffer from the frozen sizes at startup,
-  so the first keyframe after the transit would fail. Resim always replays
-  from the first copperlist, so it does not need keyframes.
-- **Trapezoidal, not cubic, timing.** With these limits, the `cubic` profile
-  rejects a 2-waypoint segment longer than about 2·v²/a ≈ 0.64 rad. That
-  affects the retract.
 - Decoding a copperlist with 1024-point trajectories needs a large stack.
   The logreader and the resim run on a thread with a 256 MB stack.

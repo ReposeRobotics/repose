@@ -5,10 +5,7 @@
 // Only `plant`, `policy`, `scenario`, and `observer` are application code.
 (
     runtime: (rate_target_hz: 100),
-    // Keyframes off: CuFollowTrajectoryTask's frozen state grows once it adopts
-    // a trajectory, which Copper's preallocated keyframe buffer rejects. The
-    // resim replays from the first copperlist, so it needs no keyframe.
-    logging: (slab_size_mib: 16, enable_keyframe_logging: false),
+    logging: (slab_size_mib: 16),
     resources: [
         (id: "planner_rng", provider: "cu_rng::CuRngBundle", config: {"seed": 42}),
     ],
@@ -34,7 +31,7 @@
             id: "timing",
             type: "repose_motion_planning::CuPlanToTrajectoryTask<6, 1024>",
             config: {
-                "profile": "trapezoidal",  // cubic rejects 2-point segments > 2 v²/a
+                "profile": "cubic",
                 "sample_period": 0.02,
                 "limits": {
                     "max_velocities": [

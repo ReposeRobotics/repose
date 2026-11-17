@@ -15,6 +15,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 mod cartesian_blend;
+mod mux;
 mod parameterize;
 mod path_timing;
 mod quintic;
@@ -30,6 +31,10 @@ pub use cartesian_blend::CuCartesianPathPoint;
 pub use cartesian_blend::CuCartesianWaypoint;
 pub use cartesian_blend::CuTcpZone;
 pub use cartesian_blend::blend_cartesian_path;
+pub use mux::CuSetpointMuxParams;
+pub use mux::CuSetpointMuxTask;
+pub use mux::CuSetpointSource;
+pub use mux::DEFAULT_MUX_BLEND_TIME_S;
 pub use parameterize::CuJointTrajectoryLimits;
 pub use parameterize::CuTimingOverrides;
 pub use parameterize::CuTimingParams;

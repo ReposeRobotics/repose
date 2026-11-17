@@ -7,6 +7,8 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-17
+
 ### Breaking
 
 - `repose-trajectory`: the frozen state of `CuFollowTrajectoryTask` has a new
@@ -464,7 +466,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ReposeRobotics/repose/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/ReposeRobotics/repose/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/ReposeRobotics/repose/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/ReposeRobotics/repose/compare/v0.8.1...v0.8.2

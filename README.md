@@ -59,7 +59,7 @@ on a git tag:
 
 ```toml
 [dependencies]
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.9.0" }
 ```
 
 The `repose` umbrella crate re-exports every component. You can also depend on
@@ -67,7 +67,7 @@ individual crates.
 
 | Repose | Copper (`cu29`) | Rust (MSRV) |
 |---|---|---|
-| 0.7 – 0.8 (as `repose-*`) | 1.3 | 1.95 |
+| 0.7 – 0.9 (as `repose-*`) | 1.3 | 1.95 |
 | 0.1 – 0.6 (as `cu-*`) | 1.3 | 1.95 |
 
 The workspace is versioned and tagged as a whole (`vX.Y.Z`). Before 1.0, a
@@ -82,7 +82,7 @@ Depend on the umbrella crate (git tag; nothing is on crates.io yet):
 
 ```toml
 [dependencies]
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.9.0" }
 cu29 = { version = "1.3.1", features = ["units"] }
 cu-spatial-payloads = "1.3.0"
 ```

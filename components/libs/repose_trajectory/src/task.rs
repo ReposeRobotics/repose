@@ -14,6 +14,7 @@
 
 use crate::CuTrajectoryInterpolation;
 use crate::CuTrajectoryPayload;
+use crate::CuTrajectoryPoint;
 use crate::MAX_TRAJECTORY_POINTS;
 use bincode::Decode;
 use bincode::Encode;
@@ -159,20 +160,93 @@ impl<const N: usize, const MAX_POINTS: usize> Default for CuFollowTrajectoryTask
     }
 }
 
+/// Fixed-size snapshot: Copper sizes the keyframe buffer from the first frozen
+/// snapshot, so the encoding must never grow. Optional fields are written as
+/// a presence flag plus a value (the default when absent), integers as
+/// little-endian bytes rather than bincode varints, and an absent trajectory
+/// as `MAX_POINTS` default points (the widest joint variant), so adopting a
+/// trajectory, the elapsed clock, or a cancel never enlarges the snapshot.
 impl<const N: usize, const MAX_POINTS: usize> Freezable for CuFollowTrajectoryTask<N, MAX_POINTS> {
     fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        Encode::encode(&self.trajectory, encoder)?;
-        Encode::encode(&self.start, encoder)?;
-        Encode::encode(&self.held, encoder)?;
-        Encode::encode(&self.params.interpolation, encoder)
+        match &self.trajectory {
+            Some(trajectory) => {
+                Encode::encode(&1u8, encoder)?;
+                Encode::encode(&trajectory.points, encoder)?;
+                Encode::encode(&trajectory.len.to_le_bytes(), encoder)?;
+                Encode::encode(&trajectory.interpolation, encoder)?;
+            }
+            None => {
+                Encode::encode(&0u8, encoder)?;
+                let blank = CuTrajectoryPoint::<N>::default();
+                for _ in 0..MAX_POINTS {
+                    Encode::encode(&blank, encoder)?;
+                }
+                Encode::encode(&0u32.to_le_bytes(), encoder)?;
+                Encode::encode(&CuTrajectoryInterpolation::default(), encoder)?;
+            }
+        }
+        Encode::encode(&self.start.as_nanos().to_le_bytes(), encoder)?;
+        Encode::encode(&u8::from(self.held.is_some()), encoder)?;
+        Encode::encode(
+            &self.held.unwrap_or_else(|| [CuJointPosition::default(); N]),
+            encoder,
+        )?;
+        Encode::encode(&interpolation_code(self.params.interpolation), encoder)
     }
 
     fn thaw<D: Decoder>(&mut self, decoder: &mut D) -> Result<(), DecodeError> {
-        self.trajectory = Decode::decode(decoder)?;
-        self.start = Decode::decode(decoder)?;
-        self.held = Decode::decode(decoder)?;
-        self.params.interpolation = Decode::decode(decoder)?;
+        let has_trajectory: u8 = Decode::decode(decoder)?;
+        if has_trajectory != 0 {
+            // Decode in place: a fresh payload is large for big MAX_POINTS.
+            let trajectory = self.trajectory.get_or_insert_with(CuTrajectoryPayload::new);
+            for point in trajectory.points.iter_mut() {
+                *point = Decode::decode(decoder)?;
+            }
+            let len: [u8; 4] = Decode::decode(decoder)?;
+            trajectory.len = u32::from_le_bytes(len);
+            if trajectory.len as usize > MAX_POINTS {
+                return Err(DecodeError::Other(
+                    "frozen trajectory length exceeds capacity",
+                ));
+            }
+            trajectory.interpolation = Decode::decode(decoder)?;
+        } else {
+            for _ in 0..MAX_POINTS {
+                let _: CuTrajectoryPoint<N> = Decode::decode(decoder)?;
+            }
+            let _: [u8; 4] = Decode::decode(decoder)?;
+            let _: CuTrajectoryInterpolation = Decode::decode(decoder)?;
+            self.trajectory = None;
+        }
+        let start: [u8; 8] = Decode::decode(decoder)?;
+        self.start = CuTime::from_nanos(u64::from_le_bytes(start));
+        let has_held: u8 = Decode::decode(decoder)?;
+        let held: [CuJointPosition; N] = Decode::decode(decoder)?;
+        self.held = (has_held != 0).then_some(held);
+        let code: u8 = Decode::decode(decoder)?;
+        self.params.interpolation = interpolation_from_code(code)?;
         Ok(())
+    }
+}
+
+/// One-byte encoding of the interpolation override (`0` = none).
+const fn interpolation_code(interpolation: Option<CuTrajectoryInterpolation>) -> u8 {
+    match interpolation {
+        None => 0,
+        Some(CuTrajectoryInterpolation::Linear) => 1,
+        Some(CuTrajectoryInterpolation::Cubic) => 2,
+        Some(CuTrajectoryInterpolation::Quintic) => 3,
+    }
+}
+
+/// Inverse of [`interpolation_code`].
+fn interpolation_from_code(code: u8) -> Result<Option<CuTrajectoryInterpolation>, DecodeError> {
+    match code {
+        0 => Ok(None),
+        1 => Ok(Some(CuTrajectoryInterpolation::Linear)),
+        2 => Ok(Some(CuTrajectoryInterpolation::Cubic)),
+        3 => Ok(Some(CuTrajectoryInterpolation::Quintic)),
+        _ => Err(DecodeError::Other("invalid frozen interpolation override")),
     }
 }
 
@@ -490,6 +564,66 @@ mod tests {
             assert_eq!(out.velocities[0].si_value(), 0.0);
             assert_eq!(out.accelerations[0].si_value(), 0.0);
         }
+    }
+
+    fn frozen_len<const M: usize>(task: &CuFollowTrajectoryTask<1, M>) -> usize {
+        let mut bytes = [0u8; 16384];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
+        );
+        task.freeze(&mut encoder).unwrap();
+        encoder.into_writer().bytes_written()
+    }
+
+    #[test]
+    fn frozen_size_never_grows() {
+        // Copper sizes the keyframe buffer from the first frozen snapshot;
+        // a larger snapshot later fails the keyframe with `UnexpectedEnd`.
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut task = CuFollowTrajectoryTask::<1, 64>::default();
+        let initial = frozen_len(&task);
+        let mut output = CuMsg::new(None);
+        let mut traj = CuTrajectoryPayload::<1, 64>::new();
+        for i in 0..40 {
+            traj.push(point(i as f64 * 0.1, i as f64 * 0.37, 1.5))
+                .unwrap();
+        }
+        let mut msg = CuMsg::new(Some(traj));
+        msg.tov = Tov::Time(CuTime::from_secs(3_000_000_000));
+        task.process(&ctx, &msg, &mut output).unwrap();
+        assert_eq!(frozen_len(&task), initial);
+        let mut empty = CuMsg::new(Some(CuTrajectoryPayload::<1, 64>::new()));
+        empty.tov = Tov::Time(CuTime::from_secs(3_000_000_001));
+        task.process(&ctx, &empty, &mut output).unwrap();
+        assert_eq!(
+            output.payload().unwrap().status,
+            CuFollowStatus::ErrorEmptyTrajectory
+        );
+        assert_eq!(frozen_len(&task), initial);
+    }
+
+    #[test]
+    fn freeze_thaw_round_trips_idle_follower() {
+        let original = CuFollowTrajectoryTask::<1, 8>::from_params(cubic()).unwrap();
+        let mut bytes = [0u8; 4096];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
+        );
+        original.freeze(&mut encoder).unwrap();
+        let len = encoder.into_writer().bytes_written();
+        let mut decoder = bincode::de::DecoderImpl::new(
+            bincode::de::read::SliceReader::new(&bytes[..len]),
+            bincode::config::standard(),
+            (),
+        );
+        let mut restored = CuFollowTrajectoryTask::<1, 8>::default();
+        restored.thaw(&mut decoder).unwrap();
+        assert!(restored.trajectory.is_none());
+        assert!(restored.held.is_none());
+        assert_eq!(restored.start, CuTime::MIN);
+        assert_eq!(restored.params, cubic());
     }
 
     #[test]

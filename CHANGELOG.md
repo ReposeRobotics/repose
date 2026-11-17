@@ -182,6 +182,15 @@ may be breaking.
 
 ### Fixed
 
+- `repose-trajectory`: `CuFollowTrajectoryTask` keyframes no longer fail with
+  `UnexpectedEnd`. Its frozen state used to grow once it adopted a trajectory,
+  but Copper sizes the keyframe buffer from the first snapshot, so any app
+  with keyframe logging on failed its first keyframe after a plan. The
+  snapshot is now fixed-size (presence flags, little-endian integers, and the
+  full `MAX_POINTS` capacity). Frozen layouts are not versioned: follower
+  keyframes from earlier versions do not thaw, so replay those logs from the
+  start.
+
 - `repose-controller`: `CuControllerTask::process` never emits a non-finite
   field (`positions`, `velocities`, `efforts`, `max_tracking_error`) in
   `CuJointCommandPayload` or stores non-finite state across cycles (`last_command`,

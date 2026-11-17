@@ -128,6 +128,22 @@ may be breaking.
   An idle, faulted, non-finite, or dead-band value publishes no command, so
   the gripper keeps its last action and a faulted policy never drops what it
   holds. `repose-policy-rl` now depends on `repose-io`.
+- `repose-policy-rl`: action chunking and exponential temporal ensembling for
+  ACT, Diffusion Policy, and VLA models. `CuPolicyActionChunk<H, ACT>` carries
+  an `H`-step raw action horizon (round-tripping `serde` and `bincode` at any
+  `H` and `ACT`); `CuChunkPolicyTask<OBS, H, ACT>` runs `[1, OBS] -> [1, H, ACT]`
+  ONNX models on `tract-onnx` with `decimation`, `model_hash` pinning, and
+  `Freezable` state (external VLA bridges can also publish
+  `CuPolicyActionChunk<H, ACT>` directly); and `CuActionChunkTask<H, ACT>`
+  turns incoming chunks into one `CuPolicyAction<ACT>` per control cycle with
+  zero hot-path heap allocations (`tests/chunk_alloc.rs`), so downstream
+  `CuJointActionTask`, `CuCartesianActionTask`, and `CuGripperActionTask`
+  connect unchanged. Supports `CuActionChunkMode::TemporalEnsemble { decay }`
+  (`w_i = exp(-decay * i)` in an `O(H * ACT)` ring buffer, default `0.01`) and
+  `CuActionChunkMode::Replace` receding-horizon execution, multi-rate
+  `step_decimation` (`Fresh` on step entry, `Held` between steps), optional
+  `execution_horizon` starvation to `Idle`, immediate buffer flush on upstream
+  `Idle` or `Fault`, and full `Freezable` keyframe restore.
 - `repose-trajectory`: `CuFollowTrajectoryTask` fills the new setpoint
   accelerations from the active interpolation, analytically and without
   allocation: the derivative of the emitted velocity (constant per segment for

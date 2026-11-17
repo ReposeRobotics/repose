@@ -1,24 +1,33 @@
 ---
 name: repose-policy-rl
 description: >-
-  Running trained ONNX reinforcement-learning or vision-language-action policies on a
-  robot arm with `repose-policy-rl`: observation tasks (`CuJointReachObservationTask`),
-  pure inference (`CuPolicyTask<IN, OBS, ACT>` on tract-onnx), and action tasks that
-  turn raw actions into safe setpoints (`CuJointActionTask`, `CuCartesianActionTask`
-  via differential IK, `CuGripperActionTask`). Use when deploying a policy exported
-  from MuJoCo Playground, Isaac Lab, or similar; sizing IN/OBS/ACT; setting decimation,
-  scales, and per-cycle limits; or pinning `model_hash` for replay.
+  Running trained ONNX reinforcement-learning, imitation, diffusion, or
+  vision-language-action policies on a robot arm with `repose-policy-rl`:
+  observation tasks (`CuJointReachObservationTask`), single-step (`CuPolicyTask<IN, OBS, ACT>`)
+  and `H`-step chunked (`CuChunkPolicyTask<OBS, H, ACT>`) ONNX inference on tract-onnx,
+  zero-allocation action chunking and exponential temporal ensembling (`CuActionChunkTask<H, ACT>`),
+  and action tasks (`CuJointActionTask`, `CuCartesianActionTask`, `CuGripperActionTask`).
+  Use when deploying a policy exported from MuJoCo Playground, Isaac Lab, ACT,
+  Diffusion Policy, or VLAs; sizing IN/OBS/H/ACT; configuring temporal ensembling,
+  receding-horizon replacement, `step_decimation`, or `execution_horizon`; or pinning
+  `model_hash` for replay.
 ---
 
 # Repose: RL and VLA policies
 
 `repose-policy-rl` is a separate, **`std`-only** dependency (not re-exported by
 `repose`); it ships in releases after 0.8.4, so pin a tag that includes it
-(check the CHANGELOG). It splits a policy into three stages:
+(check the CHANGELOG). Single-step and chunked pipelines share the same
+observation and action tasks:
 
 ```text
+Single-step:
 joint state ─► observation task ─► CuPolicyTask ─► action task(s) ─► CuControllerTask ─► bridge
   (+ goal)     CuPolicyObservation<IN>  CuPolicyAction<ACT>   CuTrajectoryFollowOutput<N>
+
+Chunked (ACT / Diffusion / VLA):
+observation / VLA bridge ─► CuChunkPolicyTask (optional) ─► CuActionChunkTask<H, ACT> ─► action task(s)
+                            CuPolicyActionChunk<H, ACT>     CuPolicyAction<ACT>
 ```
 
 The model never commands joints directly: action tasks scale, limit, and
@@ -31,12 +40,13 @@ still applies its watchdog, tracking-error fault, and rate limit.
 |---|---|
 | `N` | Robot joints |
 | `IN` | Features from the observation task |
-| `OBS` | Model input width: `IN + ACT` with `"previous_action": true`, else `IN` |
-| `ACT` | Model output width |
+| `OBS` | Model input width: `IN + ACT` on `CuPolicyTask` with `"previous_action": true`, else `IN` |
+| `H` | Chunk prediction horizon (`[1, H, ACT]`) |
+| `ACT` | Action width per step |
 
-The ONNX model must have exactly one `f32` input of shape `[1, OBS]` and one
-`f32` output of shape `[1, ACT]` (a small stateless MLP); anything else is a
-startup error.
+`CuPolicyTask` requires one `f32` input `[1, OBS]` and one `f32` output
+`[1, ACT]`; `CuChunkPolicyTask` requires `[1, OBS] -> [1, H, ACT]` (concrete or
+dynamic batch dimension). Anything else is a startup error.
 
 ## Graph
 
@@ -79,16 +89,61 @@ Inputs/outputs:
   `CuPolicyObservation<IN>`. Other tasks write their own observation task that
   emits `CuPolicyObservation<IN>`; publish no payload for "no input" and `NaN`
   features for a fault.
-- Policy: `CuPolicyObservation<IN>` → `CuPolicyObservation<OBS>` (exact model
-  input, for the log) + `CuPolicyAction<ACT>` (raw output).
+- Single-step policy: `CuPolicyObservation<IN>` → `CuPolicyObservation<OBS>`
+  (exact model input, for the log) + `CuPolicyAction<ACT>` (raw output).
+- Chunked policy: `CuPolicyObservation<OBS>` → `CuPolicyActionChunk<H, ACT>`
+  (or publish `CuPolicyActionChunk<H, ACT>` directly from a VLA bridge).
+- Action chunker: `CuPolicyActionChunk<H, ACT>` → `CuPolicyAction<ACT>`.
 - Joint/Cartesian action: `CuPolicyAction<ACT>` + `CuJointStatePayload<N>` →
   `CuTrajectoryFollowOutput<N>` (Cartesian also emits `CuCartesianActionReport`).
   Connect it to `CuControllerTask<N>` in place of the trajectory follower.
 - Gripper action: `CuPolicyAction<ACT>` → `CuGripperCommandPayload` for
   `repose_io::CuGripperTask`.
 
-Policy status (`CuPolicyStatus`): `Fresh` (inferred this cycle), `Held`
-(between decimated inferences), `Idle` (no input), `Fault`.
+Policy status (`CuPolicyStatus`): `Fresh` (inferred or stepped this cycle),
+`Held` (between decimated inferences or chunk steps), `Idle` (no input or
+starved horizon), `Fault`.
+
+## Action chunking and temporal ensembling
+
+ACT, Diffusion Policy, π0, and OpenVLA-OFT emit `H`-step chunks `[1, H, ACT]` at
+5–50 Hz while the control loop runs at 50–500 Hz:
+
+```ron
+(
+    id: "chunk_policy",
+    type: "repose_policy_rl::CuChunkPolicyTask<18, 50, 7>",         // OBS, H, ACT
+    config: {
+        "model": "act_policy.onnx",
+        "decimation": 1,                 // 1 = infer every cycle (ACT), >1 = sparse queries
+    },
+),
+(
+    id: "chunker",
+    type: "repose_policy_rl::CuActionChunkTask<50, 7>",             // H, ACT
+    config: {
+        "mode": {"temporal_ensemble": {"decay": 0.01}},             // or "replace"
+        "step_decimation": 2,            // cycles per chunk step (1 = Fresh every cycle)
+        "execution_horizon": 25,         // optional <= H; starve to Idle past T_a steps
+    },
+),
+```
+
+- `mode`:
+  - `{"temporal_ensemble": {"decay": 0.01}}` (default): ACT exponential
+    temporal ensembling `w_i = exp(-decay * i)` normalized across overlapping
+    chunks covering the current step (`i = 0` oldest, `decay > 0` smoother,
+    `decay = 0` uniform, `decay < 0` favors newer chunks).
+  - `"replace"`: receding-horizon replacement for multimodal policies
+    (Diffusion Policy, flow matching) where averaging two distinct modes is
+    undesirable.
+- `step_decimation`: cycle `0` of each chunk step emits `Fresh` and the
+  remaining `step_decimation - 1` cycles emit `Held`, so downstream delta
+  tasks (`CuCartesianActionTask`, `CuJointActionTask` in `position_delta`)
+  apply each step's delta once over `step_decimation / rate_target_hz`.
+- Upstream `None` or `Held` keeps stepping the buffered horizon until
+  `execution_horizon` (default `H`) steps run out, then transitions cleanly to
+  `Idle`. Upstream `Idle` or `Fault` flushes the buffered tail immediately.
 
 ## VLA end-effector actions
 
@@ -100,7 +155,7 @@ A typical VLA action `[dx, dy, dz, droll, dpitch, dyaw, gripper]` (`ACT = 7`):
     type: "repose_policy_rl::CuCartesianActionTask<6, 7>",
     config: {
         "chain": "igus_rebel",
-        "period": 0.02,              // required: delta is executed over one period
+        "period": 0.02,              // required: delta is executed over one step period
         "offset": 0,                 // reads elements [0, 6)
         "frame": "base",             // base | body
         "rotation": "rpy",           // rotation_vector (default) | rpy
@@ -123,19 +178,22 @@ Action tasks read **disjoint** slices of one action via `offset`
 
 ## Getting it right
 
-- **Training period:** policy period = `decimation / rate_target_hz`; it must
-  equal the period the policy was trained at. Set `period` on action tasks to
-  `1 / rate_target_hz`.
+- **Training period:** single-step policy period = `decimation / rate_target_hz`
+  (chunk step period = `step_decimation / rate_target_hz`); it must equal the
+  step period the policy was trained at. Set `period` on action tasks to match
+  one step period (`step_decimation / rate_target_hz` for chunked deltas,
+  `1 / rate_target_hz` when `step_decimation == 1`).
 - **Observation layout and scales** must reproduce the trainer's exactly
   (order of terms, scales, default positions). A silent mismatch produces a
   policy that runs and misbehaves; check the `CuPolicyObservation<OBS>` in the
   log against the trainer.
 - **Start conservative:** small `scale`, `max_step` / `max_translation` set,
-  controller `tracking_error_limit` and `state_timeout` set, simulation first.
-- **Replay:** decimation counts cycles; pin `model_hash` so a replay with a
-  different model file fails instead of diverging.
-- **Allocation:** inference via tract allocates (~14 allocations per cycle,
-  measured). This crate is the documented exception to Repose's zero-allocation
-  rule; keep it on a host target.
+  `execution_horizon` set when running an asynchronous VLA source, controller
+  `tracking_error_limit` and `state_timeout` set, simulation first.
+- **Replay:** decimation and chunk stepping count cycles; pin `model_hash` so a
+  replay with a different model file fails instead of diverging.
+- **Allocation:** ONNX inference via tract allocates (~14 allocations per
+  inference cycle, measured); `CuActionChunkTask` and all action/observation
+  tasks allocate zero bytes on the hot path. Keep ONNX tasks on a host target.
 - A faulted policy publishes nothing to the gripper, so a closed gripper stays
   closed.

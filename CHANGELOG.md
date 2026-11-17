@@ -9,6 +9,12 @@ may be breaking.
 
 ### Breaking
 
+- `repose-trajectory`: the frozen state of `CuFollowTrajectoryTask` has a new
+  fixed-size layout (see `### Fixed`), so follower keyframes written by
+  earlier versions are not supported. Frozen layouts are not versioned, so
+  thawing an old keyframe is not detected and restores wrong state; replay
+  such logs from the start instead of from a keyframe.
+
 - `repose-controller`: effort-mode gains are per joint. `CuEffortGains` is now
   `CuEffortGains<N>` with `kp: [f64; N]` and `kv: [f64; N]`, and
   `CuControllerParams` is now `CuControllerParams<N>` (it also gains the
@@ -181,6 +187,13 @@ may be breaking.
   numbers per gain (`"effort_gains": {"kp": [60.0, 60.0, 40.0, 8.0, 8.0, 4.0], "kv": 0.8}`).
 
 ### Fixed
+
+- `repose-trajectory`: `CuFollowTrajectoryTask` keyframes no longer fail with
+  `UnexpectedEnd`. Its frozen state used to grow once it adopted a trajectory,
+  but Copper sizes the keyframe buffer from the first snapshot, so any app
+  with keyframe logging on failed its first keyframe after a plan. The
+  snapshot is now fixed-size (presence flags, little-endian integers, and the
+  full `MAX_POINTS` capacity). See `### Breaking` for keyframe compatibility.
 
 - `repose-controller`: `CuControllerTask::process` never emits a non-finite
   field (`positions`, `velocities`, `efforts`, `max_tracking_error`) in

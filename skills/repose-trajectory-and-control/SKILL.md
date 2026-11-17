@@ -4,6 +4,7 @@ description: >-
   Turning a path into robot motion with Repose: trajectory timing (`parameterize`,
   `CuTimingParams`, profiles trapezoidal / s_curve / minimum_jerk / cubic), Cartesian
   TCP-zone blending, `CuTrajectoryPayload` sampling, `CuFollowTrajectoryTask`,
+  the bumpless classical/policy `CuSetpointMuxTask`,
   `CuPlanToTrajectoryTask`, and the `CuControllerTask` joint controller (position /
   velocity / effort modes, watchdog, tracking-error fault, rate limit) plus the IO
   gripper. Use when timing waypoints, following a trajectory, configuring the
@@ -65,6 +66,7 @@ zero; zero = exact stop, positive = rounded corner). Time the result with
 |---|---|---|
 | `repose_motion_planning::CuPlanToTrajectoryTask<N, CAP>` | `CuJointPlanPath<N>` → `CuTrajectoryPayload<N, CAP>` | `CuTimingParams<N>`: `limits` (required), `profile`, `sample_period` |
 | `repose_trajectory::CuFollowTrajectoryTask<N, MAX_POINTS>` | `CuTrajectoryPayload<N, MAX_POINTS>` → `CuTrajectoryFollowOutput<N>` | optional `"interpolation"`: `linear` / `cubic` / `quintic` (default: the payload's own) |
+| `repose_trajectory::CuSetpointMuxTask<N>` | `CuTrajectoryFollowOutput<N>` (classical) + `CuTrajectoryFollowOutput<N>` (policy) → `CuTrajectoryFollowOutput<N>` | optional `"blend_time"` (s, default `0.2`, `0` = hard switch) |
 | `repose_controller::CuControllerTask<N>` | `CuTrajectoryFollowOutput<N>` + `CuJointStatePayload<N>` → `CuJointCommandPayload<N>` | see below |
 
 Match `CAP` / `MAX_POINTS` across the timing task, the connection `msg:` type,
@@ -97,6 +99,35 @@ and the follower.
     },
 ),
 ```
+
+## Classical ↔ policy handoff (`CuSetpointMuxTask`)
+
+Run a collision-free classical transit (planner → timing → follower) to a
+pre-grasp pose, then let a learned policy (`repose_policy_rl` action task)
+do the contact-rich part, with one controller downstream:
+
+```ron
+(id: "mux", type: "repose_trajectory::CuSetpointMuxTask<6>", config: {"blend_time": 0.2}),
+// cnx: follower -> mux, joint_action -> mux, mux -> controller
+// (input order: classical first, policy second)
+```
+
+| From | To | When |
+|---|---|---|
+| `classical` | `policy` | classical was `Running` and is now `Finished`, and the policy setpoint is `Running` |
+| `policy` | `classical` | classical is `Running` again (a new plan, e.g. a retract, preempts the policy) |
+| `policy` | `hold` | policy setpoint missing, `Idle`, `ErrorEmptyTrajectory` (policy `Fault`), or non-finite |
+| `hold` | `classical` | classical is `Running` (plan the retract from the measured state) |
+
+- Every switch is **bumpless**: the position/velocity/acceleration offset to
+  the new source decays along a quintic over `blend_time`, so the setpoint
+  stays C2-continuous. Expect a small overshoot when switching at speed.
+- `hold` keeps the position the mux last emitted (where the policy left the
+  arm, not the stale pre-grasp pose) and reports `Finished`, so the
+  controller is `Holding`. It never resumes the policy on its own: a new
+  classical plan has to run first.
+- Read the active source with `CuSetpointMuxTask::source()`
+  (`classical` / `policy` / `hold`); it round-trips through `Freezable`.
 
 ## Follower semantics (`CuFollowStatus`)
 

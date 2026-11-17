@@ -60,6 +60,20 @@ may be breaking.
 
 ### Added
 
+- `repose-trajectory`: `CuSetpointMuxTask<N>` arbitrates between a classical
+  setpoint (e.g. `CuFollowTrajectoryTask` running a collision-free transit)
+  and a policy setpoint (e.g. `repose_policy_rl::CuJointActionTask`), both
+  `CuTrajectoryFollowOutput<N>`. It hands over to the policy when the
+  classical trajectory finishes and the policy is `Running`, lets a new
+  classical plan preempt the policy, and falls back to holding the last
+  emitted position when the policy turns `Idle`, faults, or goes non-finite.
+  Every switch is bumpless (quintic position/velocity/acceleration offset
+  decay over `blend_time`, default 0.2 s). Adds `CuSetpointMuxParams`,
+  `CuSetpointSource`, and `DEFAULT_MUX_BLEND_TIME_S`. The new
+  `examples/setpoint_mux` app runs transit → policy → fault hold → retract
+  closed loop on an in-process plant, records a `.copper` log, and replays it
+  bit-exactly (`setpoint_mux_resim`).
+
 - Agent Skills for Repose users in `skills/`: getting started and shared
   conventions, robot configuration, kinematics, collision, motion planning,
   trajectories and control, Copper apps, and RL policies. Copy them into your

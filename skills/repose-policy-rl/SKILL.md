@@ -197,3 +197,8 @@ Action tasks read **disjoint** slices of one action via `offset`
   tasks allocate zero bytes on the hot path. Keep ONNX tasks on a host target.
 - A faulted policy publishes nothing to the gripper, so a closed gripper stays
   closed.
+- **Classical transit + policy:** to plan a collision-free approach classically
+  and hand over to the policy for the contact phase, feed the follower and the
+  joint action task into `repose_trajectory::CuSetpointMuxTask<N>` (classical
+  input first). It switches bumplessly and falls back to a hold on a policy
+  `Idle` / `Fault`; see the `repose-trajectory-and-control` skill.

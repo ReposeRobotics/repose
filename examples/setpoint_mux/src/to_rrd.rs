@@ -131,14 +131,35 @@ fn next_copperlist<R: Read>(src: &mut CountingReader<R>) -> CuResult<Option<Copp
     }
 }
 
+/// Whether `a` and `b` are the same file. On Unix this compares device and
+/// inode, so hard links and symlinks both count; elsewhere it compares
+/// canonical paths.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// Rejects an output that is the input log or one of its slabs
-/// (`<stem>_<k>.<ext>`), compared by canonical path so symlinks and other
-/// aliases count: saving would truncate the log being read.
+/// (`<stem>_<k>.<ext>`), by file identity so links count: saving would
+/// truncate the log being read.
 fn ensure_distinct_output(input: &Path, output: &Path) -> CuResult<()> {
-    let Ok(out) = std::fs::canonicalize(output) else {
+    if !output.exists() {
         // The output does not exist yet, so it cannot be an input file.
         return Ok(());
-    };
+    }
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let ext = input.extension().map(|e| e.to_string_lossy());
     let slab = |k: usize| {
@@ -151,7 +172,7 @@ fn ensure_distinct_output(input: &Path, output: &Path) -> CuResult<()> {
     let candidates =
         std::iter::once(input.to_path_buf()).chain((0..).map(slab).take_while(|p| p.exists()));
     for candidate in candidates {
-        if std::fs::canonicalize(&candidate).is_ok_and(|c| c == out) {
+        if same_file(&candidate, output) {
             return Err(CuError::from(format!(
                 "output {} is the Copper log {} itself; choose a different output",
                 output.display(),

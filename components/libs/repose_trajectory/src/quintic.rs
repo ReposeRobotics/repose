@@ -140,10 +140,21 @@ pub(crate) struct QuinticBasis {
 }
 
 impl QuinticBasis {
+    /// Precomputes the shared Hermite basis weights, returning `None` if an
+    /// extreme `duration` overflows any scaling factor so callers can fall back
+    /// to [`Quintic::eval`].
     #[inline]
-    pub(crate) fn new(u: f64, duration: f64, with_acceleration: bool) -> Self {
+    pub(crate) fn try_new(u: f64, duration: f64, with_acceleration: bool) -> Option<Self> {
         let inv_t = 1.0 / duration;
         let t2 = duration * duration;
+        let inv_t2 = if with_acceleration {
+            inv_t * inv_t
+        } else {
+            0.0
+        };
+        if !(inv_t.is_finite() & t2.is_finite() & inv_t2.is_finite()) {
+            return None;
+        }
         let w = 1.0 - u;
         let u2 = u * u;
         let u3 = u2 * u;
@@ -163,7 +174,6 @@ impl QuinticBasis {
         let hv_a1 = duration * u2 * w * (1.5 - 2.5 * u);
 
         let (ha_dq, ha_v0, ha_v1, ha_a0, ha_a1) = if with_acceleration {
-            let inv_t2 = inv_t * inv_t;
             let uw = u * w;
             (
                 60.0 * uw * (1.0 - 2.0 * u) * inv_t2,
@@ -176,7 +186,11 @@ impl QuinticBasis {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         };
 
-        Self {
+        if !(hv_dq.is_finite() & ha_dq.is_finite() & ha_v0.is_finite() & ha_v1.is_finite()) {
+            return None;
+        }
+
+        Some(Self {
             h_dq,
             h_v0,
             h_v1,
@@ -192,7 +206,7 @@ impl QuinticBasis {
             ha_v1,
             ha_a0,
             ha_a1,
-        }
+        })
     }
 
     #[inline]

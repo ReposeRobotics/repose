@@ -114,6 +114,115 @@ impl Quintic {
     }
 }
 
+/// Precomputed quintic Hermite basis weights at normalized time `u` over a
+/// segment of duration `duration`, shared across every joint of a sample call.
+///
+/// Expressing the quintic in `(dq = q1 - q0, v0, v1, a0, a1)` hoists the
+/// duration reciprocals and polynomial powers out of the per-joint loop while
+/// remaining algebraically identical to [`Quintic::eval`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QuinticBasis {
+    h_dq: f64,
+    h_v0: f64,
+    h_v1: f64,
+    h_a0: f64,
+    h_a1: f64,
+    hv_dq: f64,
+    hv_v0: f64,
+    hv_v1: f64,
+    hv_a0: f64,
+    hv_a1: f64,
+    ha_dq: f64,
+    ha_v0: f64,
+    ha_v1: f64,
+    ha_a0: f64,
+    ha_a1: f64,
+}
+
+impl QuinticBasis {
+    #[inline]
+    pub(crate) fn new(u: f64, duration: f64, with_acceleration: bool) -> Self {
+        let inv_t = 1.0 / duration;
+        let t2 = duration * duration;
+        let w = 1.0 - u;
+        let u2 = u * u;
+        let u3 = u2 * u;
+        let w2 = w * w;
+        let w3 = w2 * w;
+
+        let h_dq = u3 * (10.0 + u * (-15.0 + 6.0 * u));
+        let h_v0 = duration * u * w3 * (1.0 + 3.0 * u);
+        let h_v1 = -duration * u3 * w * (4.0 - 3.0 * u);
+        let h_a0 = 0.5 * t2 * u2 * w3;
+        let h_a1 = 0.5 * t2 * u3 * w2;
+
+        let hv_dq = 30.0 * u2 * w2 * inv_t;
+        let hv_v0 = w2 * (1.0 + u * (2.0 - 15.0 * u));
+        let hv_v1 = u2 * (-12.0 + u * (28.0 - 15.0 * u));
+        let hv_a0 = duration * u * w2 * (1.0 - 2.5 * u);
+        let hv_a1 = duration * u2 * w * (1.5 - 2.5 * u);
+
+        let (ha_dq, ha_v0, ha_v1, ha_a0, ha_a1) = if with_acceleration {
+            let inv_t2 = inv_t * inv_t;
+            let uw = u * w;
+            (
+                60.0 * uw * (1.0 - 2.0 * u) * inv_t2,
+                -12.0 * uw * (3.0 - 5.0 * u) * inv_t,
+                -12.0 * uw * (2.0 - 5.0 * u) * inv_t,
+                w * (1.0 + u * (-8.0 + 10.0 * u)),
+                u * (3.0 + u * (-12.0 + 10.0 * u)),
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        };
+
+        Self {
+            h_dq,
+            h_v0,
+            h_v1,
+            h_a0,
+            h_a1,
+            hv_dq,
+            hv_v0,
+            hv_v1,
+            hv_a0,
+            hv_a1,
+            ha_dq,
+            ha_v0,
+            ha_v1,
+            ha_a0,
+            ha_a1,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn eval_pv(&self, q: [f64; 2], v: [f64; 2], a: [f64; 2]) -> (f64, f64) {
+        let dq = q[1] - q[0];
+        let position = q[0]
+            + dq * self.h_dq
+            + v[0] * self.h_v0
+            + v[1] * self.h_v1
+            + a[0] * self.h_a0
+            + a[1] * self.h_a1;
+        let velocity = dq * self.hv_dq
+            + v[0] * self.hv_v0
+            + v[1] * self.hv_v1
+            + a[0] * self.hv_a0
+            + a[1] * self.hv_a1;
+        (position, velocity)
+    }
+
+    #[inline]
+    pub(crate) fn eval_acc(&self, q: [f64; 2], v: [f64; 2], a: [f64; 2]) -> f64 {
+        let dq = q[1] - q[0];
+        dq * self.ha_dq
+            + v[0] * self.ha_v0
+            + v[1] * self.ha_v1
+            + a[0] * self.ha_a0
+            + a[1] * self.ha_a1
+    }
+}
+
 /// Roots of `a*u^2 + b*u + c` strictly inside `(0, 1)`.
 pub(crate) fn unit_roots(a: f64, b: f64, c: f64) -> [Option<f64>; 2] {
     let inside = |u: f64| (u > 0.0 && u < 1.0).then_some(u);

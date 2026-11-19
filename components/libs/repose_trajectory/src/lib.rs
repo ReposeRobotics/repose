@@ -51,10 +51,18 @@ pub use task::CuTrajectoryFollowOutput;
 use bincode::Decode;
 use bincode::Encode;
 use cu29::prelude::*;
+use cu29::units::si::acceleration::meter_per_second_squared;
+use cu29::units::si::angle::radian;
+use cu29::units::si::angular_acceleration::radian_per_second_squared;
 use cu29::units::si::angular_velocity::radian_per_second;
+use cu29::units::si::f64::Acceleration;
+use cu29::units::si::f64::Angle;
+use cu29::units::si::f64::AngularAcceleration;
 use cu29::units::si::f64::AngularVelocity;
+use cu29::units::si::f64::Length;
 use cu29::units::si::f64::Time;
 use cu29::units::si::f64::Velocity;
+use cu29::units::si::length::meter;
 use cu29::units::si::time::second;
 use cu29::units::si::velocity::meter_per_second;
 use repose_kinematics::CuJointAcceleration;
@@ -319,6 +327,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         self.sample_linear_impl(t, out_positions, out_velocities, None)
     }
 
+    #[inline]
     fn sample_linear_impl(
         &self,
         t: Time,
@@ -329,14 +338,18 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         if self.is_empty() {
             return Err(CuError::from("Cannot sample an empty trajectory"));
         }
-        if self.len() == 1 {
-            *out_positions = self.points[0].positions;
-            *out_velocities = self.points[0].velocities;
+        if self.len() > MAX_POINTS {
+            return Err(CuError::from("Trajectory length exceeds capacity"));
+        }
+        let pts = self.points();
+        let last = pts.len() - 1;
+        if last == 0 {
+            *out_positions = pts[0].positions;
+            *out_velocities = pts[0].velocities;
             hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
-        let pts = self.points();
-        let duration = self.duration();
+        let duration = pts[last].time_from_start;
         let zero = Time::default();
         let clamped = if t <= zero {
             zero
@@ -346,7 +359,6 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
             t
         };
         let t_s = clamped.get::<second>();
-        let last = pts.len() - 1;
         if t_s <= pts[0].time_from_start.get::<second>() {
             *out_positions = pts[0].positions;
             *out_velocities = pts[0].velocities;
@@ -359,25 +371,25 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
             hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
-        let mut i = 0;
-        while i < last && pts[i + 1].time_from_start.get::<second>() < t_s {
-            i += 1;
-        }
-        let t0 = pts[i].time_from_start.get::<second>();
-        let t1 = pts[i + 1].time_from_start.get::<second>();
-        let fraction = (t_s - t0) / (t1 - t0);
-        let mut j = 0;
-        while j < N {
-            out_positions[j] =
-                pts[i].positions[j].interpolate(pts[i + 1].positions[j], fraction)?;
-            out_velocities[j] =
-                lerp_velocity(pts[i].velocities[j], pts[i + 1].velocities[j], fraction)?;
+        let i = segment_index(pts, t_s);
+        let a = &pts[i];
+        let b = &pts[i + 1];
+        let t0 = a.time_from_start.get::<second>();
+        let dt = b.time_from_start.get::<second>() - t0;
+        let fraction = (t_s - t0) / dt;
+        let inv_dt = if out_accelerations.is_some() {
+            1.0 / dt
+        } else {
+            0.0
+        };
+        for j in 0..N {
+            out_positions[j] = a.positions[j].interpolate(b.positions[j], fraction)?;
+            out_velocities[j] = lerp_velocity(a.velocities[j], b.velocities[j], fraction)?;
             if let Some(acc) = out_accelerations.as_deref_mut() {
                 // Derivative of the linearly interpolated velocity.
-                let dv = pts[i + 1].velocities[j].si_value() - pts[i].velocities[j].si_value();
-                acc[j] = CuJointAcceleration::from_coordinate(pts[i].positions[j], dv / (t1 - t0));
+                let dv = b.velocities[j].si_value() - a.velocities[j].si_value();
+                acc[j] = CuJointAcceleration::from_coordinate(a.positions[j], dv * inv_dt);
             }
-            j += 1;
         }
         Ok(())
     }
@@ -397,6 +409,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         self.sample_cubic_impl(t, out_positions, out_velocities, None)
     }
 
+    #[inline]
     fn sample_cubic_impl(
         &self,
         t: Time,
@@ -409,23 +422,20 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         }
         let pts = self.points();
         let ts = t.get::<second>();
-        if ts <= pts[0].time_from_start.get::<second>() {
+        let last = pts.len() - 1;
+        if last == 0 || ts <= pts[0].time_from_start.get::<second>() {
             *out_positions = pts[0].positions;
             *out_velocities = pts[0].velocities;
             hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
-        let last = pts.len() - 1;
         if ts >= pts[last].time_from_start.get::<second>() {
             *out_positions = pts[last].positions;
             *out_velocities = pts[last].velocities;
             hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
-        let mut i = 0;
-        while i < last && pts[i + 1].time_from_start.get::<second>() < ts {
-            i += 1;
-        }
+        let i = segment_index(pts, ts);
         let a = &pts[i];
         let b = &pts[i + 1];
         let t0 = a.time_from_start.get::<second>();
@@ -434,40 +444,97 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
             return Err(CuError::from("Invalid trajectory segment duration"));
         }
         let u = (ts - t0) / duration;
+        let inv_duration = 1.0 / duration;
+        let w = 1.0 - u;
+        let u2 = u * u;
+        let h_dq = u2 * (3.0 - 2.0 * u);
+        let h_v0 = duration * u * w * w;
+        let h_v1 = -duration * u2 * w;
+        let hv_dq = 6.0 * u * w * inv_duration;
+        let hv_v0 = w * (1.0 - 3.0 * u);
+        let hv_v1 = u * (3.0 * u - 2.0);
+        let (ha_dq, ha_v0, ha_v1) = if out_accelerations.is_some() {
+            let inv_duration2 = inv_duration * inv_duration;
+            (
+                (6.0 - 12.0 * u) * inv_duration2,
+                (6.0 * u - 4.0) * inv_duration,
+                (6.0 * u - 2.0) * inv_duration,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
         for j in 0..N {
-            if core::mem::discriminant(&a.positions[j]) != core::mem::discriminant(&b.positions[j])
-                || core::mem::discriminant(&a.velocities[j])
-                    != core::mem::discriminant(&b.velocities[j])
-                || !matches!(
-                    (a.positions[j], a.velocities[j]),
-                    (CuJointPosition::Revolute(_), CuJointVelocity::Revolute(_))
-                        | (CuJointPosition::Prismatic(_), CuJointVelocity::Prismatic(_))
-                        | (CuJointPosition::Fixed, CuJointVelocity::Fixed)
-                )
-            {
-                return Err(CuError::from("Trajectory joint kinds disagree"));
-            }
-            let q0 = a.positions[j].si_value();
-            let q1 = b.positions[j].si_value();
-            let v0 = a.velocities[j].si_value();
-            let v1 = b.velocities[j].si_value();
-            if !q0.is_finite() || !q1.is_finite() || !v0.is_finite() || !v1.is_finite() {
+            let (q0, q1, v0, v1, is_revolute) = match (
+                a.positions[j],
+                b.positions[j],
+                a.velocities[j],
+                b.velocities[j],
+            ) {
+                (
+                    CuJointPosition::Revolute(q0),
+                    CuJointPosition::Revolute(q1),
+                    CuJointVelocity::Revolute(v0),
+                    CuJointVelocity::Revolute(v1),
+                ) => (
+                    q0.get::<radian>(),
+                    q1.get::<radian>(),
+                    v0.get::<radian_per_second>(),
+                    v1.get::<radian_per_second>(),
+                    true,
+                ),
+                (
+                    CuJointPosition::Prismatic(q0),
+                    CuJointPosition::Prismatic(q1),
+                    CuJointVelocity::Prismatic(v0),
+                    CuJointVelocity::Prismatic(v1),
+                ) => (
+                    q0.get::<meter>(),
+                    q1.get::<meter>(),
+                    v0.get::<meter_per_second>(),
+                    v1.get::<meter_per_second>(),
+                    false,
+                ),
+                (
+                    CuJointPosition::Fixed,
+                    CuJointPosition::Fixed,
+                    CuJointVelocity::Fixed,
+                    CuJointVelocity::Fixed,
+                ) => {
+                    out_positions[j] = CuJointPosition::Fixed;
+                    out_velocities[j] = CuJointVelocity::Fixed;
+                    if let Some(acc) = out_accelerations.as_deref_mut() {
+                        acc[j] = CuJointAcceleration::Fixed;
+                    }
+                    continue;
+                }
+                _ => return Err(CuError::from("Trajectory joint kinds disagree")),
+            };
+            if !(q0.is_finite() & q1.is_finite() & v0.is_finite() & v1.is_finite()) {
                 return Err(CuError::from("Non-finite trajectory knot"));
             }
-            let d = q1 - q0;
-            let aa = v0 * duration;
-            let bb = 3.0 * d - 2.0 * aa - v1 * duration;
-            let cc = -2.0 * d + aa + v1 * duration;
-            out_positions[j] = a.positions[j].with_si_value(q0 + u * (aa + u * (bb + u * cc)));
-            out_velocities[j] = CuJointVelocity::from_coordinate(
-                a.positions[j],
-                (aa + u * (2.0 * bb + 3.0 * cc * u)) / duration,
-            );
+            let dq = q1 - q0;
+            let pos = q0 + dq * h_dq + v0 * h_v0 + v1 * h_v1;
+            let vel = dq * hv_dq + v0 * hv_v0 + v1 * hv_v1;
+            if is_revolute {
+                out_positions[j] = CuJointPosition::Revolute(Angle::new::<radian>(pos));
+                out_velocities[j] =
+                    CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(vel));
+            } else {
+                out_positions[j] = CuJointPosition::Prismatic(Length::new::<meter>(pos));
+                out_velocities[j] =
+                    CuJointVelocity::Prismatic(Velocity::new::<meter_per_second>(vel));
+            }
             if let Some(acc) = out_accelerations.as_deref_mut() {
-                acc[j] = CuJointAcceleration::from_coordinate(
-                    a.positions[j],
-                    (2.0 * bb + 6.0 * cc * u) / (duration * duration),
-                );
+                let a_val = dq * ha_dq + v0 * ha_v0 + v1 * ha_v1;
+                acc[j] = if is_revolute {
+                    CuJointAcceleration::Revolute(AngularAcceleration::new::<
+                        radian_per_second_squared,
+                    >(a_val))
+                } else {
+                    CuJointAcceleration::Prismatic(Acceleration::new::<meter_per_second_squared>(
+                        a_val,
+                    ))
+                };
             }
         }
         Ok(())
@@ -489,6 +556,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         self.sample_quintic_impl(t, out_positions, out_velocities, None)
     }
 
+    #[inline]
     fn sample_quintic_impl(
         &self,
         t: Time,
@@ -502,7 +570,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
         let pts = self.points();
         let ts = t.get::<second>();
         let last = pts.len() - 1;
-        if ts <= pts[0].time_from_start.get::<second>() {
+        if last == 0 || ts <= pts[0].time_from_start.get::<second>() {
             *out_positions = pts[0].positions;
             *out_velocities = pts[0].velocities;
             hold_accelerations(out_positions, out_accelerations.as_deref_mut());
@@ -514,10 +582,7 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
             hold_accelerations(out_positions, out_accelerations.as_deref_mut());
             return Ok(());
         }
-        let mut i = 0;
-        while i < last && pts[i + 1].time_from_start.get::<second>() < ts {
-            i += 1;
-        }
+        let i = segment_index(pts, ts);
         let a = &pts[i];
         let b = &pts[i + 1];
         let t0 = a.time_from_start.get::<second>();
@@ -526,52 +591,113 @@ impl<const N: usize, const MAX_POINTS: usize> CuTrajectoryPayload<N, MAX_POINTS>
             return Err(CuError::from("Invalid trajectory segment duration"));
         }
         let u = (ts - t0) / duration;
+        let basis = quintic::QuinticBasis::new(u, duration, out_accelerations.is_some());
         for j in 0..N {
-            let kinds_agree = matches!(
+            let (q, v, is_revolute) = match (
+                a.positions[j],
+                b.positions[j],
+                a.velocities[j],
+                b.velocities[j],
+            ) {
                 (
-                    a.positions[j],
-                    b.positions[j],
-                    a.velocities[j],
-                    b.velocities[j]
+                    CuJointPosition::Revolute(q0),
+                    CuJointPosition::Revolute(q1),
+                    CuJointVelocity::Revolute(v0),
+                    CuJointVelocity::Revolute(v1),
+                ) => (
+                    [q0.get::<radian>(), q1.get::<radian>()],
+                    [v0.get::<radian_per_second>(), v1.get::<radian_per_second>()],
+                    true,
                 ),
                 (
-                    CuJointPosition::Revolute(_),
-                    CuJointPosition::Revolute(_),
-                    CuJointVelocity::Revolute(_),
-                    CuJointVelocity::Revolute(_)
-                ) | (
-                    CuJointPosition::Prismatic(_),
-                    CuJointPosition::Prismatic(_),
-                    CuJointVelocity::Prismatic(_),
-                    CuJointVelocity::Prismatic(_)
-                ) | (
+                    CuJointPosition::Prismatic(q0),
+                    CuJointPosition::Prismatic(q1),
+                    CuJointVelocity::Prismatic(v0),
+                    CuJointVelocity::Prismatic(v1),
+                ) => (
+                    [q0.get::<meter>(), q1.get::<meter>()],
+                    [v0.get::<meter_per_second>(), v1.get::<meter_per_second>()],
+                    false,
+                ),
+                (
                     CuJointPosition::Fixed,
                     CuJointPosition::Fixed,
                     CuJointVelocity::Fixed,
-                    CuJointVelocity::Fixed
-                )
-            );
-            if !kinds_agree {
-                return Err(CuError::from("Trajectory joint kinds disagree"));
-            }
-            let quintic = quintic::Quintic::new(
-                [a.positions[j].si_value(), b.positions[j].si_value()],
-                [a.velocities[j].si_value(), b.velocities[j].si_value()],
-                [a.accelerations[j].si_value(), b.accelerations[j].si_value()],
-                duration,
-            );
-            let (q, v, acceleration) = quintic.eval(u);
-            if !q.is_finite() || !v.is_finite() || !acceleration.is_finite() {
+                    CuJointVelocity::Fixed,
+                ) => {
+                    let a0 = a.accelerations[j].si_value();
+                    let a1 = b.accelerations[j].si_value();
+                    if !(a0.is_finite() & a1.is_finite()) {
+                        return Err(CuError::from("Non-finite trajectory knot"));
+                    }
+                    out_positions[j] = CuJointPosition::Fixed;
+                    out_velocities[j] = CuJointVelocity::Fixed;
+                    if let Some(acc) = out_accelerations.as_deref_mut() {
+                        acc[j] = CuJointAcceleration::Fixed;
+                    }
+                    continue;
+                }
+                _ => return Err(CuError::from("Trajectory joint kinds disagree")),
+            };
+            let acc_knots = [a.accelerations[j].si_value(), b.accelerations[j].si_value()];
+            if !(q[0].is_finite()
+                & q[1].is_finite()
+                & v[0].is_finite()
+                & v[1].is_finite()
+                & acc_knots[0].is_finite()
+                & acc_knots[1].is_finite())
+            {
                 return Err(CuError::from("Non-finite trajectory knot"));
             }
-            out_positions[j] = a.positions[j].with_si_value(q);
-            out_velocities[j] = CuJointVelocity::from_coordinate(a.positions[j], v);
+            let (pos, vel) = basis.eval_pv(q, v, acc_knots);
+            if !(pos.is_finite() & vel.is_finite()) {
+                return Err(CuError::from("Non-finite trajectory knot"));
+            }
+            if is_revolute {
+                out_positions[j] = CuJointPosition::Revolute(Angle::new::<radian>(pos));
+                out_velocities[j] =
+                    CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(vel));
+            } else {
+                out_positions[j] = CuJointPosition::Prismatic(Length::new::<meter>(pos));
+                out_velocities[j] =
+                    CuJointVelocity::Prismatic(Velocity::new::<meter_per_second>(vel));
+            }
             if let Some(acc) = out_accelerations.as_deref_mut() {
-                acc[j] = CuJointAcceleration::from_coordinate(a.positions[j], acceleration);
+                let acceleration = basis.eval_acc(q, v, acc_knots);
+                if !acceleration.is_finite() {
+                    return Err(CuError::from("Non-finite trajectory knot"));
+                }
+                acc[j] = if is_revolute {
+                    CuJointAcceleration::Revolute(AngularAcceleration::new::<
+                        radian_per_second_squared,
+                    >(acceleration))
+                } else {
+                    CuJointAcceleration::Prismatic(Acceleration::new::<meter_per_second_squared>(
+                        acceleration,
+                    ))
+                };
             }
         }
         Ok(())
     }
+}
+
+/// Returns the starting knot index `i` in `0..pts.len() - 1` of the segment
+/// bracketing `ts`, with left-sided interior-knot selection (`ts == pts[k].t`
+/// for `1 <= k <= last` selects segment `k - 1`).
+///
+/// Requires `pts.len() >= 2`; returns `0` defensively for shorter slices.
+#[inline]
+fn segment_index<const N: usize>(pts: &[CuTrajectoryPoint<N>], ts: f64) -> usize {
+    let Some(last) = pts.len().checked_sub(1) else {
+        return 0;
+    };
+    if last == 0 {
+        return 0;
+    }
+    // Searching `pts[1..last]` (length `last - 1`) yields an index in `0..last`,
+    // guaranteeing `i + 1 <= last` and matching left-sided interior-knot selection.
+    pts[1..last].partition_point(|p| p.time_from_start.get::<second>() < ts)
 }
 
 /// Writes zero acceleration (of each joint's unit kind) for a held setpoint.
@@ -620,7 +746,6 @@ fn lerp_velocity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cu29::units::si::angle::radian;
 
     fn point(t: f64, q: f64, v: f64) -> CuTrajectoryPoint<1> {
         CuTrajectoryPoint {
@@ -953,6 +1078,375 @@ mod tests {
                 assert_eq!(q, q2);
                 assert_eq!(v, v2);
             }
+        }
+    }
+
+    #[test]
+    fn test_segment_index_left_sided_and_bounds() {
+        let empty: [CuTrajectoryPoint<1>; 0] = [];
+        assert_eq!(segment_index(&empty, 0.5), 0);
+
+        let one = [point(0.0, 0.0, 0.0)];
+        assert_eq!(segment_index(&one, 0.5), 0);
+
+        let two = [point(0.0, 0.0, 0.0), point(2.0, 1.0, 0.0)];
+        for ts in [-1.0, 0.0, 1.0, 2.0, 5.0, f64::NAN] {
+            assert_eq!(segment_index(&two, ts), 0, "two-point ts={ts}");
+        }
+
+        let five = [
+            point(0.0, 0.0, 0.0),
+            point(0.5, 1.0, 0.0),
+            point(1.25, 2.0, 0.0),
+            point(3.0, 3.0, 0.0),
+            point(4.0, 4.0, 0.0),
+        ];
+        // Exact interior knots k in 1..=last select segment k - 1 (left-sided).
+        assert_eq!(segment_index(&five, 0.0), 0);
+        assert_eq!(segment_index(&five, 0.25), 0);
+        assert_eq!(segment_index(&five, 0.5), 0);
+        assert_eq!(segment_index(&five, 0.5 + 1e-12), 1);
+        assert_eq!(segment_index(&five, 1.25), 1);
+        assert_eq!(segment_index(&five, 1.25 + 1e-12), 2);
+        assert_eq!(segment_index(&five, 3.0), 2);
+        assert_eq!(segment_index(&five, 3.0 + 1e-12), 3);
+        assert_eq!(segment_index(&five, 4.0), 3);
+        // Out-of-range and NaN remain strictly in-bounds (`i + 1 < len`).
+        assert_eq!(segment_index(&five, 99.0), 3);
+        assert_eq!(segment_index(&five, f64::NAN), 0);
+    }
+
+    #[test]
+    fn test_quintic_basis_matches_quintic_eval() {
+        let cases = [
+            ([0.0, 1.5], [0.0, 0.0], [0.0, 0.0], 1.0),
+            ([-0.7, 2.3], [1.2, -0.8], [3.5, -2.1], 0.01),
+            ([100.0, 100.05], [-0.4, 0.9], [-1.5, 4.2], 2.75),
+            ([0.2, -1.8], [0.5, 0.5], [0.0, 0.0], 0.25),
+        ];
+        for (q, v, a, duration) in cases {
+            let quintic = quintic::Quintic::new(q, v, a, duration);
+            for step in 0..=20 {
+                let u = step as f64 / 20.0;
+                let (eq, ev, ea) = quintic.eval(u);
+                let basis = quintic::QuinticBasis::new(u, duration, true);
+                let (bq, bv) = basis.eval_pv(q, v, a);
+                let ba = basis.eval_acc(q, v, a);
+                let basis_no_acc = quintic::QuinticBasis::new(u, duration, false);
+                let (bq2, bv2) = basis_no_acc.eval_pv(q, v, a);
+                assert_eq!((bq, bv), (bq2, bv2));
+                assert!(
+                    (bq - eq).abs() <= 1e-11 * (1.0 + eq.abs()),
+                    "pos mismatch u={u}: {bq} vs {eq}"
+                );
+                assert!(
+                    (bv - ev).abs() <= 1e-10 * (1.0 + ev.abs()),
+                    "vel mismatch u={u}: {bv} vs {ev}"
+                );
+                assert!(
+                    (ba - ea).abs() <= 1e-9 * (1.0 + ea.abs()),
+                    "acc mismatch u={u}: {ba} vs {ea}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sample_boundary_times_one_and_two_point_all_kinds() {
+        let mut one = CuTrajectoryPayload::<2, 4>::new();
+        one.push(mixed_point(0.5, [0.3, -0.2], [0.7, 0.4], [2.0, -1.0]))
+            .unwrap();
+        let mut q = [CuJointPosition::default(); 2];
+        let mut v = [CuJointVelocity::default(); 2];
+        let mut a = [CuJointAcceleration::default(); 2];
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            for t in [-1.0, 0.0, 0.5, 2.0] {
+                one.sample_with(kind, Time::new::<second>(t), &mut q, &mut v)
+                    .unwrap();
+                assert_eq!(q, one.points()[0].positions, "{kind:?} t={t}");
+                assert_eq!(v, one.points()[0].velocities, "{kind:?} t={t}");
+                one.sample_with_acceleration(kind, Time::new::<second>(t), &mut q, &mut v, &mut a)
+                    .unwrap();
+                assert_eq!(q, one.points()[0].positions, "{kind:?} acc t={t}");
+                assert_eq!(v, one.points()[0].velocities, "{kind:?} acc t={t}");
+                assert_eq!(a[0].si_value(), 0.0);
+                assert_eq!(a[1].si_value(), 0.0);
+            }
+        }
+
+        let mut two = CuTrajectoryPayload::<2, 4>::new();
+        two.push(mixed_point(0.0, [0.0, 0.1], [0.2, -0.1], [1.0, 0.5]))
+            .unwrap();
+        two.push(mixed_point(2.0, [1.0, 0.5], [0.6, 0.3], [-0.5, 0.2]))
+            .unwrap();
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            for (t, expected_idx) in [(-0.5, 0), (0.0, 0), (2.0, 1), (4.0, 1)] {
+                two.sample_with_acceleration(kind, Time::new::<second>(t), &mut q, &mut v, &mut a)
+                    .unwrap();
+                assert_eq!(q, two.points()[expected_idx].positions, "{kind:?} t={t}");
+                assert_eq!(v, two.points()[expected_idx].velocities, "{kind:?} t={t}");
+                assert_eq!(a[0].si_value(), 0.0, "{kind:?} t={t}");
+                assert_eq!(a[1].si_value(), 0.0, "{kind:?} t={t}");
+            }
+            // Mid-segment sample is finite and consistent between sample_with and sample_with_acceleration.
+            let mut q2 = [CuJointPosition::default(); 2];
+            let mut v2 = [CuJointVelocity::default(); 2];
+            two.sample_with(kind, Time::new::<second>(1.0), &mut q2, &mut v2)
+                .unwrap();
+            two.sample_with_acceleration(kind, Time::new::<second>(1.0), &mut q, &mut v, &mut a)
+                .unwrap();
+            assert_eq!((q, v), (q2, v2), "{kind:?}");
+            assert!(a[0].si_value().is_finite() && a[1].si_value().is_finite());
+        }
+    }
+
+    #[test]
+    fn test_sample_interior_knot_left_sided_all_kinds() {
+        let traj = three_knot_traj();
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            let (q_at, v_at, a_at) = sample_all(&traj, kind, 1.0);
+            let (_, _, a_before) = sample_all(&traj, kind, 1.0 - 1e-9);
+            let (_, _, a_after) = sample_all(&traj, kind, 1.0 + 1e-9);
+            for j in 0..2 {
+                assert!(
+                    (q_at[j].si_value() - traj.points()[1].positions[j].si_value()).abs() < 1e-12,
+                    "{kind:?} j={j}"
+                );
+                assert!(
+                    (v_at[j].si_value() - traj.points()[1].velocities[j].si_value()).abs() < 1e-12,
+                    "{kind:?} j={j}"
+                );
+                // Left-sided: matches the segment ending at t=1.0.
+                assert!(
+                    (a_at[j].si_value() - a_before[j].si_value()).abs() < 1e-5,
+                    "{kind:?} j={j}: at={} vs before={}",
+                    a_at[j].si_value(),
+                    a_before[j].si_value()
+                );
+            }
+            // Linear and cubic have an acceleration jump across t=1.0 on joint 0,
+            // confirming the left segment (not the right) was selected.
+            if kind != CuTrajectoryInterpolation::Quintic {
+                assert!(
+                    (a_at[0].si_value() - a_after[0].si_value()).abs() > 0.5,
+                    "{kind:?} expected jump across knot"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sample_large_trajectory_512_knots() {
+        const KNOTS: usize = 512;
+        let mut traj = CuTrajectoryPayload::<1, KNOTS>::new();
+        let mut t = 0.0_f64;
+        for k in 0..KNOTS {
+            let dt = if k == 0 {
+                0.0
+            } else {
+                0.005 + 0.001 * ((k % 7) as f64)
+            };
+            t += dt;
+            // Exact cubic polynomial in t: q(t) = 0.02 t^3 - 0.15 t^2 + 0.4 t + 0.1
+            // so both cubic and quintic Hermite reproduce it identically on every segment.
+            let q = ((0.02 * t - 0.15) * t + 0.4) * t + 0.1;
+            let v = (0.06 * t - 0.30) * t + 0.4;
+            let a = 0.12 * t - 0.30;
+            traj.push(CuTrajectoryPoint {
+                time_from_start: Time::new::<second>(t),
+                positions: [CuJointPosition::Revolute(Angle::new::<radian>(q))],
+                velocities: [CuJointVelocity::Revolute(AngularVelocity::new::<
+                    radian_per_second,
+                >(v))],
+                accelerations: [CuJointAcceleration::Revolute(AngularAcceleration::new::<
+                    radian_per_second_squared,
+                >(a))],
+            })
+            .unwrap();
+        }
+
+        let mut q = [CuJointPosition::default(); 1];
+        let mut v = [CuJointVelocity::default(); 1];
+        let mut a = [CuJointAcceleration::default(); 1];
+        let pts = traj.points();
+        let total = traj.duration().get::<second>();
+
+        // Verify clamped endpoints on large trajectory.
+        for kind in [
+            CuTrajectoryInterpolation::Linear,
+            CuTrajectoryInterpolation::Cubic,
+            CuTrajectoryInterpolation::Quintic,
+        ] {
+            traj.sample_with_acceleration(kind, Time::new::<second>(-1.0), &mut q, &mut v, &mut a)
+                .unwrap();
+            assert_eq!(q[0], pts[0].positions[0]);
+            assert_eq!(a[0].si_value(), 0.0);
+
+            traj.sample_with_acceleration(
+                kind,
+                Time::new::<second>(total + 1.0),
+                &mut q,
+                &mut v,
+                &mut a,
+            )
+            .unwrap();
+            assert_eq!(q[0], pts[KNOTS - 1].positions[0]);
+            assert_eq!(a[0].si_value(), 0.0);
+        }
+
+        // Verify every interior knot and every segment midpoint across all 511 segments.
+        for k in 0..(KNOTS - 1) {
+            let t0 = pts[k].time_from_start.get::<second>();
+            let t1 = pts[k + 1].time_from_start.get::<second>();
+            let t_mid = 0.5 * (t0 + t1);
+            let q_exact = ((0.02 * t_mid - 0.15) * t_mid + 0.4) * t_mid + 0.1;
+            let v_exact = (0.06 * t_mid - 0.30) * t_mid + 0.4;
+            let a_exact = 0.12 * t_mid - 0.30;
+
+            for kind in [
+                CuTrajectoryInterpolation::Cubic,
+                CuTrajectoryInterpolation::Quintic,
+            ] {
+                traj.sample_with_acceleration(
+                    kind,
+                    Time::new::<second>(t_mid),
+                    &mut q,
+                    &mut v,
+                    &mut a,
+                )
+                .unwrap();
+                assert!(
+                    (q[0].si_value() - q_exact).abs() < 1e-10,
+                    "{kind:?} seg {k} pos"
+                );
+                assert!(
+                    (v[0].si_value() - v_exact).abs() < 1e-9,
+                    "{kind:?} seg {k} vel"
+                );
+                assert!(
+                    (a[0].si_value() - a_exact).abs() < 1e-8,
+                    "{kind:?} seg {k} acc"
+                );
+            }
+
+            // Linear midpoint and left-sided interior knot check.
+            traj.sample_with_acceleration(
+                CuTrajectoryInterpolation::Linear,
+                Time::new::<second>(t_mid),
+                &mut q,
+                &mut v,
+                &mut a,
+            )
+            .unwrap();
+            let q_lin = 0.5 * (pts[k].positions[0].si_value() + pts[k + 1].positions[0].si_value());
+            let v_lin =
+                0.5 * (pts[k].velocities[0].si_value() + pts[k + 1].velocities[0].si_value());
+            let a_lin =
+                (pts[k + 1].velocities[0].si_value() - pts[k].velocities[0].si_value()) / (t1 - t0);
+            assert!((q[0].si_value() - q_lin).abs() < 1e-12);
+            assert!((v[0].si_value() - v_lin).abs() < 1e-12);
+            assert!((a[0].si_value() - a_lin).abs() < 1e-11);
+
+            if k + 1 < KNOTS - 1 {
+                // Sampling at interior knot t1 uses left segment [k, k+1].
+                traj.sample_with_acceleration(
+                    CuTrajectoryInterpolation::Linear,
+                    Time::new::<second>(t1),
+                    &mut q,
+                    &mut v,
+                    &mut a,
+                )
+                .unwrap();
+                assert!((a[0].si_value() - a_lin).abs() < 1e-11, "knot {}", k + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sample_rejects_non_finite_knots_and_times() {
+        let mut q = [CuJointPosition::default(); 1];
+        let mut v = [CuJointVelocity::default(); 1];
+        let mut a = [CuJointAcceleration::default(); 1];
+        let mid = Time::new::<second>(0.5);
+
+        // Non-finite sample times.
+        let valid = two_point_traj();
+        for bad_t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let t = Time::new::<second>(bad_t);
+            assert!(valid.sample_cubic(t, &mut q, &mut v).is_err());
+            assert!(valid.sample_quintic(t, &mut q, &mut v).is_err());
+        }
+        assert!(
+            valid
+                .sample_linear(Time::new::<second>(f64::NAN), &mut q, &mut v)
+                .is_err()
+        );
+
+        // Non-finite position and velocity knots in cubic & quintic.
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut bad_pos = two_point_traj();
+            bad_pos.points[1].positions[0] = CuJointPosition::Revolute(Angle::new::<radian>(bad));
+            assert!(bad_pos.sample_cubic(mid, &mut q, &mut v).is_err());
+            assert!(bad_pos.sample_quintic(mid, &mut q, &mut v).is_err());
+
+            let mut bad_vel = two_point_traj();
+            bad_vel.points[0].velocities[0] =
+                CuJointVelocity::Revolute(AngularVelocity::new::<radian_per_second>(bad));
+            assert!(bad_vel.sample_cubic(mid, &mut q, &mut v).is_err());
+            assert!(bad_vel.sample_quintic(mid, &mut q, &mut v).is_err());
+
+            // Non-finite stored acceleration must error in sample_quintic even when
+            // out_accelerations is None.
+            let mut bad_acc = two_point_traj();
+            bad_acc.points[1].accelerations[0] = CuJointAcceleration::Revolute(
+                AngularAcceleration::new::<radian_per_second_squared>(bad),
+            );
+            assert!(bad_acc.sample_quintic(mid, &mut q, &mut v).is_err());
+            assert!(
+                bad_acc
+                    .sample_with_acceleration(
+                        CuTrajectoryInterpolation::Quintic,
+                        mid,
+                        &mut q,
+                        &mut v,
+                        &mut a
+                    )
+                    .is_err()
+            );
+
+            // Same for a Fixed joint carrying a non-finite stored acceleration.
+            let mut bad_fixed = CuTrajectoryPayload::<1, 4>::new();
+            bad_fixed
+                .push(CuTrajectoryPoint {
+                    time_from_start: Time::new::<second>(0.0),
+                    positions: [CuJointPosition::Fixed],
+                    velocities: [CuJointVelocity::Fixed],
+                    accelerations: [CuJointAcceleration::Revolute(AngularAcceleration::new::<
+                        radian_per_second_squared,
+                    >(bad))],
+                })
+                .unwrap();
+            bad_fixed
+                .push(CuTrajectoryPoint {
+                    time_from_start: Time::new::<second>(1.0),
+                    positions: [CuJointPosition::Fixed],
+                    velocities: [CuJointVelocity::Fixed],
+                    accelerations: [CuJointAcceleration::Fixed],
+                })
+                .unwrap();
+            assert!(bad_fixed.sample_quintic(mid, &mut q, &mut v).is_err());
         }
     }
 }

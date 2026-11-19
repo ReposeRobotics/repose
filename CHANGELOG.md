@@ -14,6 +14,11 @@ may be breaking.
   segments and recomputing per-joint shapes on every resampled knot, and folds
   Hermite velocity-limit checks into the initial segment pass. Public API,
   timing, and `no_std` / zero-allocation guarantees are unchanged.
+- `repose-trajectory`: `CuTrajectoryPayload` sampling (`sample_linear`,
+  `sample_cubic`, `sample_quintic`, and `sample_with_acceleration`) now uses
+  binary search (`O(log n)`) for knot lookup and hoists Hermite basis /
+  reciprocal-duration evaluation across joints without changing the public API
+  or boundary semantics.
 
 ## [0.9.0] - 2026-11-17
 

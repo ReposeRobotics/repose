@@ -7,6 +7,14 @@ may be breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- `repose-trajectory`: `parameterize` now advances a monotonic segment cursor
+  with a stack-allocated per-segment parameter cache instead of scanning
+  segments and recomputing per-joint shapes on every resampled knot, and folds
+  Hermite velocity-limit checks into the initial segment pass. Public API,
+  timing, and `no_std` / zero-allocation guarantees are unchanged.
+
 ## [0.9.0] - 2026-11-17
 
 ### Breaking

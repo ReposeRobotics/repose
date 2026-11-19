@@ -438,26 +438,57 @@ pub fn parameterize<const N: usize, const MAX_POINTS: usize>(
         let solo = waypoint_velocity(timing, 0, waypoints[0]);
         return push_single_point(out, Time::default(), waypoints[0], solo);
     }
+    let quintic = profile == CuTrajectoryProfile::MinimumJerk;
+    let check_poly_limits = matches!(
+        profile,
+        CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic
+    );
     let mut total = 0.0;
+    let mut first_duration = 0.0;
     let mut s = 0;
     while s < last {
-        let minimum = segment_minimum(
-            waypoints[s],
-            waypoints[s + 1],
-            limits,
-            profile,
-            all_zero_via,
-        );
         let duration = match timing.segment_durations {
             Some(fixed) => {
                 let exact = fixed[s].get::<second>();
-                if rest_only && exact < minimum && minimum - exact > 1e-9 * minimum.max(1.0) {
-                    return Ok(CuTimingStatus::InvalidInput);
+                if rest_only {
+                    let minimum = segment_minimum(
+                        &waypoints[s],
+                        &waypoints[s + 1],
+                        limits,
+                        profile,
+                        all_zero_via,
+                    );
+                    if exact < minimum && minimum - exact > 1e-9 * minimum.max(1.0) {
+                        return Ok(CuTimingStatus::InvalidInput);
+                    }
                 }
                 exact
             }
-            None => minimum,
+            None => segment_minimum(
+                &waypoints[s],
+                &waypoints[s + 1],
+                limits,
+                profile,
+                all_zero_via,
+            ),
         };
+        if check_poly_limits
+            && duration > 0.0
+            && !segment_within_limits(
+                &waypoints[s],
+                &waypoints[s + 1],
+                s,
+                duration,
+                limits,
+                quintic,
+                timing,
+            )
+        {
+            return Ok(CuTimingStatus::InvalidInput);
+        }
+        if s == 0 {
+            first_duration = duration;
+        }
         total += duration;
         s += 1;
     }
@@ -465,39 +496,40 @@ pub fn parameterize<const N: usize, const MAX_POINTS: usize>(
         let solo = waypoint_velocity(timing, 0, waypoints[0]);
         return push_single_point(out, Time::default(), waypoints[0], solo);
     }
-    if matches!(
-        profile,
-        CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic
-    ) && !segments_within_limits(waypoints, limits, profile, timing, all_zero_via)
-    {
-        return Ok(CuTimingStatus::InvalidInput);
-    }
+    let zero_acc = zero_accelerations(waypoints[0]);
     if !try_push(
         out,
         CuTrajectoryPoint {
             time_from_start: Time::default(),
             positions: waypoints[0],
             velocities: waypoint_velocity(timing, 0, waypoints[0]),
-            accelerations: zero_accelerations(waypoints[0]),
+            accelerations: zero_acc,
         },
     ) {
         return Ok(CuTimingStatus::CapacityExceeded);
     }
+    let mut cursor = SegmentCursor::new(
+        waypoints,
+        limits,
+        profile,
+        timing,
+        all_zero_via,
+        first_duration,
+    );
     let mut k = 1u64;
     loop {
         let t = k as f64 * dt;
         if t >= total {
             break;
         }
-        let at = locate_segment(t, waypoints, limits, profile, timing, all_zero_via);
-        let (positions, velocities) = eval_segment(&at, t, waypoints, limits, profile, timing);
+        let (positions, velocities) = cursor.eval_at(t);
         if !try_push(
             out,
             CuTrajectoryPoint {
                 time_from_start: Time::new::<second>(t),
                 positions,
                 velocities,
-                accelerations: zero_accelerations(waypoints[0]),
+                accelerations: zero_acc,
             },
         ) {
             return Ok(CuTimingStatus::CapacityExceeded);
@@ -510,7 +542,7 @@ pub fn parameterize<const N: usize, const MAX_POINTS: usize>(
             time_from_start: Time::new::<second>(total),
             positions: waypoints[last],
             velocities: waypoint_velocity(timing, last, waypoints[last]),
-            accelerations: zero_accelerations(waypoints[0]),
+            accelerations: zero_acc,
         },
     ) {
         return Ok(CuTimingStatus::CapacityExceeded);
@@ -747,140 +779,6 @@ fn scurve_shape(distance: f64, max_vel: f64, max_acc: f64, max_jerk: f64) -> (f6
     (libm::cbrt(distance / (2.0 * max_jerk)), 0.0, 0.0)
 }
 
-/// Evaluates a single-joint trapezoidal profile at `offset` seconds.
-///
-/// Returns `(position_offset, velocity)` relative to the segment start for a
-/// non-negative `distance`; both are zero-rate bounded by `max_vel`/`max_acc`.
-fn trapezoid_eval(offset: f64, distance: f64, max_vel: f64, max_acc: f64) -> (f64, f64) {
-    if distance <= 0.0 || offset <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let accel_time = max_vel / max_acc;
-    if distance >= max_vel * accel_time {
-        let cruise = distance / max_vel - accel_time;
-        let total = distance / max_vel + accel_time;
-        let accel_distance = 0.5 * max_vel * accel_time;
-        if offset < accel_time {
-            (0.5 * max_acc * offset * offset, max_acc * offset)
-        } else if offset < accel_time + cruise {
-            (accel_distance + max_vel * (offset - accel_time), max_vel)
-        } else if offset < total {
-            let remaining = total - offset;
-            (
-                distance - 0.5 * max_acc * remaining * remaining,
-                max_acc * remaining,
-            )
-        } else {
-            (distance, 0.0)
-        }
-    } else {
-        let half = libm::sqrt(distance / max_acc);
-        let total = 2.0 * half;
-        if offset < half {
-            (0.5 * max_acc * offset * offset, max_acc * offset)
-        } else if offset < total {
-            let remaining = total - offset;
-            (
-                distance - 0.5 * max_acc * remaining * remaining,
-                max_acc * remaining,
-            )
-        } else {
-            (distance, 0.0)
-        }
-    }
-}
-
-/// Evaluates a symmetric jerk-limited S-curve at `offset` seconds.
-///
-/// Integrates the `+J, 0, -J, 0, -J, 0, +J` jerk sequence from [`scurve_shape`]
-/// for a non-negative `distance`. Assumes finite positive limits.
-fn scurve_eval(
-    offset: f64,
-    distance: f64,
-    max_vel: f64,
-    max_acc: f64,
-    max_jerk: f64,
-) -> (f64, f64) {
-    if distance <= 0.0 || offset <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let (jerk_time, accel_time, cruise_time) = scurve_shape(distance, max_vel, max_acc, max_jerk);
-    let total = 4.0 * jerk_time + 2.0 * accel_time + cruise_time;
-    if offset >= total {
-        return (distance, 0.0);
-    }
-    let mut remaining = offset;
-    let mut position = 0.0;
-    let mut velocity = 0.0;
-    let mut acceleration = 0.0;
-    let mut phase = 0;
-    while phase < 7 {
-        let (jerk, duration) = match phase {
-            0 => (max_jerk, jerk_time),
-            1 => (0.0, accel_time),
-            2 => (-max_jerk, jerk_time),
-            3 => (0.0, cruise_time),
-            4 => (-max_jerk, jerk_time),
-            5 => (0.0, accel_time),
-            _ => (max_jerk, jerk_time),
-        };
-        let step = if remaining < duration {
-            remaining
-        } else {
-            duration
-        };
-        position +=
-            velocity * step + 0.5 * acceleration * step * step + jerk * step * step * step / 6.0;
-        velocity += acceleration * step + 0.5 * jerk * step * step;
-        acceleration += jerk * step;
-        remaining -= step;
-        if remaining <= 0.0 {
-            break;
-        }
-        phase += 1;
-    }
-    (position, velocity)
-}
-
-/// Single-joint displacement with its SI limit bounds for profile evaluation.
-struct JointPrimitive {
-    distance: f64,
-    max_vel: f64,
-    max_acc: f64,
-    max_jerk: f64,
-}
-
-/// Evaluates a rest-to-rest primitive stretched onto a longer segment.
-///
-/// `own` is the primitive's natural duration and `effective` the synchronized
-/// (or fixed) segment duration. Time-scaling by `scale = own / effective`
-/// lowers peak velocity by `scale`, acceleration by `scale^2`, and jerk by
-/// `scale^3`, so every bound the primitive satisfies still holds.
-fn stretched_eval(
-    tau: f64,
-    effective: f64,
-    own: f64,
-    prim: &JointPrimitive,
-    jerk_limited: bool,
-) -> (f64, f64) {
-    if effective <= 0.0 || own <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let scale = own / effective;
-    let (offset, vel) = if jerk_limited && prim.max_jerk.is_finite() {
-        scurve_eval(
-            tau * scale,
-            prim.distance,
-            prim.max_vel,
-            prim.max_acc,
-            prim.max_jerk,
-        )
-    } else {
-        trapezoid_eval(tau * scale, prim.distance, prim.max_vel, prim.max_acc)
-    };
-    (offset, vel * scale)
-}
-
 /// Evaluates a quintic minimum-jerk segment at normalized time `u`.
 ///
 /// Boundary conditions are `q(0) = q0`, `q(1) = q1`, `dq(0) = v0`,
@@ -945,22 +843,22 @@ pub(crate) fn cubic_eval(u: f64, q0: f64, q1: f64, v0: f64, v1: f64, duration: f
 /// joint's quintic rest-to-rest time when every waypoint velocity is zero,
 /// and the trapezoidal minimum otherwise.
 fn segment_minimum<const N: usize>(
-    from: [CuJointPosition; N],
-    to: [CuJointPosition; N],
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
     limits: &CuJointTrajectoryLimits<N>,
     profile: CuTrajectoryProfile,
     all_zero_via: bool,
 ) -> f64 {
     match profile {
         CuTrajectoryProfile::MinimumJerk if all_zero_via => {
-            minjerk_segment_duration(&from, &to, limits)
+            minjerk_segment_duration(from, to, limits)
         }
-        CuTrajectoryProfile::Cubic if all_zero_via => cubic_segment_duration(&from, &to, limits),
+        CuTrajectoryProfile::Cubic if all_zero_via => cubic_segment_duration(from, to, limits),
         CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic => {
-            segment_duration(&from, &to, limits)
+            segment_duration(from, to, limits)
         }
-        CuTrajectoryProfile::Trapezoidal => segment_duration(&from, &to, limits),
-        CuTrajectoryProfile::SCurve => scurve_segment_duration(&from, &to, limits),
+        CuTrajectoryProfile::Trapezoidal => segment_duration(from, to, limits),
+        CuTrajectoryProfile::SCurve => scurve_segment_duration(from, to, limits),
     }
 }
 
@@ -1043,6 +941,7 @@ fn minjerk_segment_duration<const N: usize>(
     to: &[CuJointPosition; N],
     limits: &CuJointTrajectoryLimits<N>,
 ) -> f64 {
+    let acc_factor = 10.0 / libm::sqrt(3.0);
     let mut duration = 0.0;
     let mut j = 0;
     while j < N {
@@ -1051,7 +950,7 @@ fn minjerk_segment_duration<const N: usize>(
             let vel = limits.max_velocities[j].si_value();
             let acc = limits.acc(j);
             let vel_time = 1.875 * distance / vel;
-            let acc_time = libm::sqrt((10.0 / libm::sqrt(3.0)) * distance / acc);
+            let acc_time = libm::sqrt(acc_factor * distance / acc);
             if vel_time > duration {
                 duration = vel_time;
             }
@@ -1064,136 +963,752 @@ fn minjerk_segment_duration<const N: usize>(
     duration
 }
 
-/// Effective duration of segment `seg`: fixed timing or synchronized minimum.
-fn effective_duration<const N: usize>(
-    seg: usize,
-    waypoints: &[[CuJointPosition; N]],
-    limits: &CuJointTrajectoryLimits<N>,
-    profile: CuTrajectoryProfile,
-    timing: &CuTimingOverrides<'_, N>,
-    all_zero_via: bool,
-) -> f64 {
-    match timing.segment_durations {
-        Some(fixed) => fixed[seg].get::<second>(),
-        None => segment_minimum(
-            waypoints[seg],
-            waypoints[seg + 1],
-            limits,
-            profile,
-            all_zero_via,
-        ),
-    }
-}
-
-/// Locates the segment containing path time `t` and its start and duration.
-fn locate_segment<const N: usize>(
-    t: f64,
-    waypoints: &[[CuJointPosition; N]],
-    limits: &CuJointTrajectoryLimits<N>,
-    profile: CuTrajectoryProfile,
-    timing: &CuTimingOverrides<'_, N>,
-    all_zero_via: bool,
-) -> SegmentAt {
-    let mut seg = 0;
-    let mut seg_start = 0.0;
-    while seg + 2 < waypoints.len() {
-        let duration = effective_duration(seg, waypoints, limits, profile, timing, all_zero_via);
-        if t < seg_start + duration {
-            break;
-        }
-        seg_start += duration;
-        seg += 1;
-    }
-    let seg_duration = effective_duration(seg, waypoints, limits, profile, timing, all_zero_via);
-    SegmentAt {
-        seg,
-        start: seg_start,
-        duration: seg_duration,
-    }
-}
-
-/// Location of a path time within the trajectory: segment, start, duration.
-struct SegmentAt {
-    seg: usize,
-    start: f64,
-    duration: f64,
-}
-
-/// Evaluates every joint of segment `seg` at path time `t`.
+/// Precomputed per-joint parameters for a trapezoidal (or triangular) segment.
 ///
-/// Rest-to-rest profiles follow their own primitive stretched onto the
-/// segment duration; quintic and Hermite profiles interpolate the specified
-/// waypoint velocities over the exact segment duration.
-fn eval_segment<const N: usize>(
-    at: &SegmentAt,
-    t: f64,
-    waypoints: &[[CuJointPosition; N]],
+/// Triangular profiles set `accel_time = cruise_end = half` so the cruise
+/// branch is never entered while keeping the evaluation branchless between
+/// trapezoidal and triangular shapes.
+#[derive(Clone, Copy)]
+struct TrapezoidJointCache {
+    start: f64,
+    sign: f64,
+    distance: f64,
+    scale: f64,
+    max_vel: f64,
+    max_acc: f64,
+    half_acc: f64,
+    accel_time: f64,
+    cruise_end: f64,
+    total: f64,
+    accel_distance: f64,
+}
+
+impl TrapezoidJointCache {
+    const IDLE: Self = Self {
+        start: 0.0,
+        sign: 1.0,
+        distance: 0.0,
+        scale: 0.0,
+        max_vel: 0.0,
+        max_acc: 0.0,
+        half_acc: 0.0,
+        accel_time: 0.0,
+        cruise_end: 0.0,
+        total: 0.0,
+        accel_distance: 0.0,
+    };
+
+    /// Computes unscaled trapezoidal/triangular parameters (`scale` is set
+    /// once the synchronized or fixed segment duration is known).
+    fn unscaled(start: f64, displacement: f64, max_vel: f64, max_acc: f64) -> Self {
+        let distance = displacement.abs();
+        let sign = if displacement >= 0.0 { 1.0 } else { -1.0 };
+        if distance <= 0.0 {
+            return Self {
+                start,
+                sign,
+                ..Self::IDLE
+            };
+        }
+        let accel_time = max_vel / max_acc;
+        let half_acc = 0.5 * max_acc;
+        if distance >= max_vel * accel_time {
+            let cruise = distance / max_vel - accel_time;
+            let total = distance / max_vel + accel_time;
+            let accel_distance = 0.5 * max_vel * accel_time;
+            Self {
+                start,
+                sign,
+                distance,
+                scale: 0.0,
+                max_vel,
+                max_acc,
+                half_acc,
+                accel_time,
+                cruise_end: accel_time + cruise,
+                total,
+                accel_distance,
+            }
+        } else {
+            let half = libm::sqrt(distance / max_acc);
+            let total = 2.0 * half;
+            Self {
+                start,
+                sign,
+                distance,
+                scale: 0.0,
+                max_vel: 0.0,
+                max_acc,
+                half_acc,
+                accel_time: half,
+                cruise_end: half,
+                total,
+                accel_distance: 0.0,
+            }
+        }
+    }
+
+    #[inline]
+    fn eval(&self, tau: f64) -> (f64, f64) {
+        if self.distance <= 0.0 || self.scale <= 0.0 {
+            return (self.start, 0.0);
+        }
+        let offset = tau * self.scale;
+        let (pos_off, vel) = if offset <= 0.0 {
+            (0.0, 0.0)
+        } else if offset < self.accel_time {
+            (self.half_acc * offset * offset, self.max_acc * offset)
+        } else if offset < self.cruise_end {
+            (
+                self.accel_distance + self.max_vel * (offset - self.accel_time),
+                self.max_vel,
+            )
+        } else if offset < self.total {
+            let remaining = self.total - offset;
+            (
+                self.distance - self.half_acc * remaining * remaining,
+                self.max_acc * remaining,
+            )
+        } else {
+            (self.distance, 0.0)
+        };
+        (
+            self.start + self.sign * pos_off,
+            self.sign * (vel * self.scale),
+        )
+    }
+}
+
+/// Precomputed per-joint parameters for a finite-jerk S-curve segment.
+///
+/// Exploits exact symmetry around `total / 2`: the decelerating phases mirror
+/// the accelerating half (`p(T - r) = D - p(r)`, `v(T - r) = v(r)`), allowing
+/// O(1) division-free evaluation at every sample.
+#[derive(Clone, Copy)]
+struct FiniteSCurveCache {
+    start: f64,
+    sign: f64,
+    distance: f64,
+    scale: f64,
+    max_jerk: f64,
+    jerk_sixth: f64,
+    a_peak: f64,
+    t1: f64,
+    t2: f64,
+    t3: f64,
+    t4: f64,
+    total: f64,
+    p1: f64,
+    v1: f64,
+    p2: f64,
+    v2: f64,
+    p3: f64,
+    v_peak: f64,
+}
+
+impl FiniteSCurveCache {
+    fn unscaled(start: f64, displacement: f64, max_vel: f64, max_acc: f64, max_jerk: f64) -> Self {
+        let distance = displacement.abs();
+        let sign = if displacement >= 0.0 { 1.0 } else { -1.0 };
+        let (jerk_time, accel_time, cruise_time) =
+            scurve_shape(distance, max_vel, max_acc, max_jerk);
+        let jerk_sixth = max_jerk / 6.0;
+        let t1 = jerk_time;
+        let t2 = jerk_time + accel_time;
+        let t3 = 2.0 * jerk_time + accel_time;
+        let t4 = t3 + cruise_time;
+        let total = 4.0 * jerk_time + 2.0 * accel_time + cruise_time;
+        let a_peak = max_jerk * jerk_time;
+        let tj2 = jerk_time * jerk_time;
+        let v1 = 0.5 * max_jerk * tj2;
+        let p1 = jerk_sixth * tj2 * jerk_time;
+        let v2 = v1 + a_peak * accel_time;
+        let p2 = p1 + v1 * accel_time + 0.5 * a_peak * accel_time * accel_time;
+        let v_peak = v2 + a_peak * jerk_time - 0.5 * max_jerk * tj2;
+        let p3 = p2 + v2 * jerk_time + 0.5 * a_peak * tj2 - jerk_sixth * tj2 * jerk_time;
+        Self {
+            start,
+            sign,
+            distance,
+            scale: 0.0,
+            max_jerk,
+            jerk_sixth,
+            a_peak,
+            t1,
+            t2,
+            t3,
+            t4,
+            total,
+            p1,
+            v1,
+            p2,
+            v2,
+            p3,
+            v_peak,
+        }
+    }
+
+    /// Evaluates the accelerating half (`0 <= r <= t3`) from precomputed phase
+    /// boundaries.
+    #[inline]
+    fn eval_half(&self, r: f64) -> (f64, f64) {
+        if r < self.t1 {
+            let r2 = r * r;
+            (self.jerk_sixth * r2 * r, 0.5 * self.max_jerk * r2)
+        } else if r < self.t2 {
+            let s = r - self.t1;
+            (
+                self.p1 + self.v1 * s + 0.5 * self.a_peak * s * s,
+                self.v1 + self.a_peak * s,
+            )
+        } else {
+            let s = r - self.t2;
+            let s2 = s * s;
+            (
+                self.p2 + self.v2 * s + 0.5 * self.a_peak * s2 - self.jerk_sixth * s2 * s,
+                self.v2 + self.a_peak * s - 0.5 * self.max_jerk * s2,
+            )
+        }
+    }
+
+    #[inline]
+    fn eval(&self, tau: f64) -> (f64, f64) {
+        if self.distance <= 0.0 || self.scale <= 0.0 {
+            return (self.start, 0.0);
+        }
+        let offset = tau * self.scale;
+        if offset <= 0.0 {
+            return (self.start, 0.0);
+        }
+        if offset >= self.total {
+            return (self.start + self.sign * self.distance, 0.0);
+        }
+        let (pos_off, vel) = if offset < self.t3 {
+            self.eval_half(offset)
+        } else if offset < self.t4 {
+            (self.p3 + self.v_peak * (offset - self.t3), self.v_peak)
+        } else {
+            let (pos_r, vel_r) = self.eval_half(self.total - offset);
+            (self.distance - pos_r, vel_r)
+        };
+        (
+            self.start + self.sign * pos_off,
+            self.sign * (vel * self.scale),
+        )
+    }
+}
+
+/// Precomputed per-joint parameters for an S-curve segment.
+///
+/// Joints with an infinite jerk limit reuse [`TrapezoidJointCache`] directly.
+#[derive(Clone, Copy)]
+enum SCurveJointCache {
+    Idle { start: f64 },
+    Finite(FiniteSCurveCache),
+    Trapezoid(TrapezoidJointCache),
+}
+
+impl SCurveJointCache {
+    const IDLE: Self = Self::Idle { start: 0.0 };
+
+    #[inline]
+    fn eval(&self, tau: f64) -> (f64, f64) {
+        match *self {
+            Self::Idle { start } => (start, 0.0),
+            Self::Trapezoid(ref trap) => trap.eval(tau),
+            Self::Finite(ref finite) => finite.eval(tau),
+        }
+    }
+}
+
+/// Precomputed per-joint polynomial coefficients for a minimum-jerk segment.
+#[derive(Clone, Copy)]
+struct QuinticJointCache {
+    q0: f64,
+    v0: f64,
+    v0_dur: f64,
+    a3: f64,
+    a4: f64,
+    a5: f64,
+    d3: f64,
+    d4: f64,
+    d5: f64,
+}
+
+impl QuinticJointCache {
+    const ZERO: Self = Self {
+        q0: 0.0,
+        v0: 0.0,
+        v0_dur: 0.0,
+        a3: 0.0,
+        a4: 0.0,
+        a5: 0.0,
+        d3: 0.0,
+        d4: 0.0,
+        d5: 0.0,
+    };
+
+    fn from_joint(q0: f64, q1: f64, v0: f64, v1: f64, duration: f64, inv_duration: f64) -> Self {
+        if duration <= 0.0 {
+            return Self {
+                q0,
+                v0,
+                ..Self::ZERO
+            };
+        }
+        let distance = q1 - q0;
+        let v0_dur = v0 * duration;
+        let start_term = distance - v0_dur;
+        let end_term = (v1 - v0) * duration;
+        let a3 = 10.0 * start_term - 4.0 * end_term;
+        let a4 = -15.0 * start_term + 7.0 * end_term;
+        let a5 = 6.0 * start_term - 3.0 * end_term;
+        Self {
+            q0,
+            v0,
+            v0_dur,
+            a3,
+            a4,
+            a5,
+            d3: 3.0 * a3 * inv_duration,
+            d4: 4.0 * a4 * inv_duration,
+            d5: 5.0 * a5 * inv_duration,
+        }
+    }
+
+    #[inline]
+    fn eval(&self, u: f64, u2: f64, u3: f64, u4: f64, u5: f64) -> (f64, f64) {
+        let position = self.q0 + self.v0_dur * u + self.a3 * u3 + self.a4 * u4 + self.a5 * u5;
+        let velocity = self.v0 + (self.d3 * u2 + self.d4 * u3 + self.d5 * u4);
+        (position, velocity)
+    }
+}
+
+/// Precomputed per-joint polynomial coefficients for a cubic Hermite segment.
+#[derive(Clone, Copy)]
+struct CubicJointCache {
+    q0: f64,
+    v0: f64,
+    v0_dur: f64,
+    a2: f64,
+    a3: f64,
+    d2: f64,
+    d3: f64,
+}
+
+impl CubicJointCache {
+    const ZERO: Self = Self {
+        q0: 0.0,
+        v0: 0.0,
+        v0_dur: 0.0,
+        a2: 0.0,
+        a3: 0.0,
+        d2: 0.0,
+        d3: 0.0,
+    };
+
+    fn from_joint(q0: f64, q1: f64, v0: f64, v1: f64, duration: f64, inv_duration: f64) -> Self {
+        if duration <= 0.0 {
+            return Self {
+                q0,
+                v0,
+                ..Self::ZERO
+            };
+        }
+        let distance = q1 - q0;
+        let v0_dur = v0 * duration;
+        let v1_dur = v1 * duration;
+        let a2 = 3.0 * distance - 2.0 * v0_dur - v1_dur;
+        let a3 = -2.0 * distance + v0_dur + v1_dur;
+        Self {
+            q0,
+            v0,
+            v0_dur,
+            a2,
+            a3,
+            d2: 2.0 * a2 * inv_duration,
+            d3: 3.0 * a3 * inv_duration,
+        }
+    }
+
+    #[inline]
+    fn eval(&self, u: f64, u2: f64, u3: f64) -> (f64, f64) {
+        let position = self.q0 + self.v0_dur * u + self.a2 * u2 + self.a3 * u3;
+        let velocity = self.v0 + (self.d2 * u + self.d3 * u2);
+        (position, velocity)
+    }
+}
+
+/// Stack-allocated per-segment parameter cache for all `N` joints.
+enum SegmentCache<const N: usize> {
+    Trapezoidal([TrapezoidJointCache; N]),
+    SCurve([SCurveJointCache; N]),
+    MinimumJerk([QuinticJointCache; N]),
+    Cubic([CubicJointCache; N]),
+}
+
+impl<const N: usize> SegmentCache<N> {
+    fn empty(profile: CuTrajectoryProfile) -> Self {
+        match profile {
+            CuTrajectoryProfile::Trapezoidal => Self::Trapezoidal([TrapezoidJointCache::IDLE; N]),
+            CuTrajectoryProfile::SCurve => Self::SCurve([SCurveJointCache::IDLE; N]),
+            CuTrajectoryProfile::MinimumJerk => Self::MinimumJerk([QuinticJointCache::ZERO; N]),
+            CuTrajectoryProfile::Cubic => Self::Cubic([CubicJointCache::ZERO; N]),
+        }
+    }
+}
+
+/// Builds the trapezoidal per-joint cache and returns `(effective_duration, cache)`.
+///
+/// When `fixed_duration` is `None`, the synchronized segment duration is
+/// derived from the same pass without recomputing per-joint shapes.
+fn build_trapezoidal_cache<const N: usize>(
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
     limits: &CuJointTrajectoryLimits<N>,
-    profile: CuTrajectoryProfile,
-    timing: &CuTimingOverrides<'_, N>,
-) -> ([CuJointPosition; N], [CuJointVelocity; N]) {
-    let from = waypoints[at.seg];
-    let to = waypoints[at.seg + 1];
-    let start_vel = waypoint_velocity(timing, at.seg, from);
-    let end_vel = waypoint_velocity(timing, at.seg + 1, to);
-    let tau = (t - at.start).clamp(0.0, at.duration);
-    let mut positions = [CuJointPosition::Fixed; N];
-    let mut velocities = [CuJointVelocity::Fixed; N];
+    fixed_duration: Option<f64>,
+) -> (f64, [TrapezoidJointCache; N]) {
+    let mut cache = [TrapezoidJointCache::IDLE; N];
+    let mut derived = 0.0;
     let mut j = 0;
     while j < N {
         let start = from[j].si_value();
         let displacement = to[j].si_value() - start;
-        let prim = JointPrimitive {
-            distance: displacement.abs(),
-            max_vel: limits.max_velocities[j].si_value(),
-            max_acc: limits.acc(j),
-            max_jerk: limits.jerk(j),
+        let entry = TrapezoidJointCache::unscaled(
+            start,
+            displacement,
+            limits.max_velocities[j].si_value(),
+            limits.acc(j),
+        );
+        if entry.total > derived {
+            derived = entry.total;
+        }
+        cache[j] = entry;
+        j += 1;
+    }
+    let effective = fixed_duration.unwrap_or(derived);
+    if effective > 0.0 {
+        let mut j = 0;
+        while j < N {
+            cache[j].scale = cache[j].total / effective;
+            j += 1;
+        }
+    }
+    (effective, cache)
+}
+
+/// Builds the S-curve per-joint cache and returns `(effective_duration, cache)`.
+///
+/// When `fixed_duration` is `None`, the synchronized segment duration is
+/// derived from the same pass without recomputing `scurve_shape`.
+fn build_scurve_cache<const N: usize>(
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
+    limits: &CuJointTrajectoryLimits<N>,
+    fixed_duration: Option<f64>,
+) -> (f64, [SCurveJointCache; N]) {
+    let mut cache = [SCurveJointCache::IDLE; N];
+    let mut derived = 0.0;
+    let mut j = 0;
+    while j < N {
+        let start = from[j].si_value();
+        let displacement = to[j].si_value() - start;
+        let own = if displacement.abs() <= 0.0 {
+            cache[j] = SCurveJointCache::Idle { start };
+            0.0
+        } else {
+            let max_vel = limits.max_velocities[j].si_value();
+            let max_acc = limits.acc(j);
+            let max_jerk = limits.jerk(j);
+            if !max_jerk.is_finite() {
+                let trap = TrapezoidJointCache::unscaled(start, displacement, max_vel, max_acc);
+                let total = trap.total;
+                cache[j] = SCurveJointCache::Trapezoid(trap);
+                total
+            } else {
+                let finite =
+                    FiniteSCurveCache::unscaled(start, displacement, max_vel, max_acc, max_jerk);
+                let total = finite.total;
+                cache[j] = SCurveJointCache::Finite(finite);
+                total
+            }
         };
-        match profile {
-            CuTrajectoryProfile::Trapezoidal | CuTrajectoryProfile::SCurve => {
-                let sign = if displacement >= 0.0 { 1.0 } else { -1.0 };
-                let jerk_limited = profile == CuTrajectoryProfile::SCurve;
-                let own = if jerk_limited {
-                    scurve_joint_duration(prim.distance, prim.max_vel, prim.max_acc, prim.max_jerk)
-                } else {
-                    joint_profile_duration(prim.distance, prim.max_vel, prim.max_acc)
-                };
-                let (offset, vel) = stretched_eval(tau, at.duration, own, &prim, jerk_limited);
-                positions[j] = from[j].with_si_value(start + sign * offset);
-                velocities[j] = CuJointVelocity::from_coordinate(from[j], sign * vel);
-            }
-            CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic => {
-                let u = if at.duration > 0.0 {
-                    (tau / at.duration).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let (position, vel) = if profile == CuTrajectoryProfile::MinimumJerk {
-                    quintic_eval(
-                        u,
-                        start,
-                        start + displacement,
-                        start_vel[j].si_value(),
-                        end_vel[j].si_value(),
-                        at.duration,
-                    )
-                } else {
-                    cubic_eval(
-                        u,
-                        start,
-                        start + displacement,
-                        start_vel[j].si_value(),
-                        end_vel[j].si_value(),
-                        at.duration,
-                    )
-                };
-                positions[j] = from[j].with_si_value(position);
-                velocities[j] = CuJointVelocity::from_coordinate(from[j], vel);
-            }
+        if own > derived {
+            derived = own;
         }
         j += 1;
     }
-    (positions, velocities)
+    let effective = fixed_duration.unwrap_or(derived);
+    if effective > 0.0 {
+        let mut j = 0;
+        while j < N {
+            match &mut cache[j] {
+                SCurveJointCache::Idle { .. } => {}
+                SCurveJointCache::Finite(finite) => {
+                    finite.scale = finite.total / effective;
+                }
+                SCurveJointCache::Trapezoid(trap) => {
+                    trap.scale = trap.total / effective;
+                }
+            }
+            j += 1;
+        }
+    }
+    (effective, cache)
+}
+
+/// Builds the minimum-jerk quintic polynomial cache for segment `seg`.
+fn build_quintic_cache<const N: usize>(
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
+    seg: usize,
+    duration: f64,
+    inv_duration: f64,
+    timing: &CuTimingOverrides<'_, N>,
+) -> [QuinticJointCache; N] {
+    let mut cache = [QuinticJointCache::ZERO; N];
+    let mut j = 0;
+    while j < N {
+        let q0 = from[j].si_value();
+        let q1 = to[j].si_value();
+        let (v0, v1) = match timing.waypoint_velocities {
+            Some(vias) => (vias[seg][j].si_value(), vias[seg + 1][j].si_value()),
+            None => (0.0, 0.0),
+        };
+        cache[j] = QuinticJointCache::from_joint(q0, q1, v0, v1, duration, inv_duration);
+        j += 1;
+    }
+    cache
+}
+
+/// Builds the cubic Hermite polynomial cache for segment `seg`.
+fn build_cubic_cache<const N: usize>(
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
+    seg: usize,
+    duration: f64,
+    inv_duration: f64,
+    timing: &CuTimingOverrides<'_, N>,
+) -> [CubicJointCache; N] {
+    let mut cache = [CubicJointCache::ZERO; N];
+    let mut j = 0;
+    while j < N {
+        let q0 = from[j].si_value();
+        let q1 = to[j].si_value();
+        let (v0, v1) = match timing.waypoint_velocities {
+            Some(vias) => (vias[seg][j].si_value(), vias[seg + 1][j].si_value()),
+            None => (0.0, 0.0),
+        };
+        cache[j] = CubicJointCache::from_joint(q0, q1, v0, v1, duration, inv_duration);
+        j += 1;
+    }
+    cache
+}
+
+/// Monotonic segment cursor with a stack-allocated per-segment evaluation cache.
+///
+/// Advances forward as resampling time `t` increases, matching the exact
+/// boundary and zero-duration semantics of scanning from segment `0` while
+/// computing each segment's parameters only once on entry.
+struct SegmentCursor<'a, const N: usize> {
+    waypoints: &'a [[CuJointPosition; N]],
+    limits: &'a CuJointTrajectoryLimits<N>,
+    profile: CuTrajectoryProfile,
+    timing: &'a CuTimingOverrides<'a, N>,
+    all_zero_via: bool,
+    last: usize,
+    seg: usize,
+    start: f64,
+    duration: f64,
+    end: f64,
+    inv_duration: f64,
+    cached_seg: Option<usize>,
+    cache: SegmentCache<N>,
+}
+
+impl<'a, const N: usize> SegmentCursor<'a, N> {
+    fn new(
+        waypoints: &'a [[CuJointPosition; N]],
+        limits: &'a CuJointTrajectoryLimits<N>,
+        profile: CuTrajectoryProfile,
+        timing: &'a CuTimingOverrides<'a, N>,
+        all_zero_via: bool,
+        first_duration: f64,
+    ) -> Self {
+        let inv_duration = if first_duration > 0.0 {
+            1.0 / first_duration
+        } else {
+            0.0
+        };
+        Self {
+            waypoints,
+            limits,
+            profile,
+            timing,
+            all_zero_via,
+            last: waypoints.len() - 1,
+            seg: 0,
+            start: 0.0,
+            duration: first_duration,
+            end: first_duration,
+            inv_duration,
+            cached_seg: None,
+            cache: SegmentCache::empty(profile),
+        }
+    }
+
+    fn step_to(&mut self, seg: usize) {
+        self.seg = seg;
+        match self.timing.segment_durations {
+            Some(fixed) => {
+                self.duration = fixed[seg].get::<second>();
+            }
+            None => match self.profile {
+                CuTrajectoryProfile::Trapezoidal => {
+                    let (duration, cache) = build_trapezoidal_cache(
+                        &self.waypoints[seg],
+                        &self.waypoints[seg + 1],
+                        self.limits,
+                        None,
+                    );
+                    self.duration = duration;
+                    self.cache = SegmentCache::Trapezoidal(cache);
+                    self.cached_seg = Some(seg);
+                }
+                CuTrajectoryProfile::SCurve => {
+                    let (duration, cache) = build_scurve_cache(
+                        &self.waypoints[seg],
+                        &self.waypoints[seg + 1],
+                        self.limits,
+                        None,
+                    );
+                    self.duration = duration;
+                    self.cache = SegmentCache::SCurve(cache);
+                    self.cached_seg = Some(seg);
+                }
+                CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic => {
+                    self.duration = segment_minimum(
+                        &self.waypoints[seg],
+                        &self.waypoints[seg + 1],
+                        self.limits,
+                        self.profile,
+                        self.all_zero_via,
+                    );
+                }
+            },
+        }
+        self.end = self.start + self.duration;
+        self.inv_duration = if self.duration > 0.0 {
+            1.0 / self.duration
+        } else {
+            0.0
+        };
+    }
+
+    fn populate_cache(&mut self) {
+        let seg = self.seg;
+        let from = &self.waypoints[seg];
+        let to = &self.waypoints[seg + 1];
+        self.cache = match self.profile {
+            CuTrajectoryProfile::Trapezoidal => {
+                let (_, cache) =
+                    build_trapezoidal_cache(from, to, self.limits, Some(self.duration));
+                SegmentCache::Trapezoidal(cache)
+            }
+            CuTrajectoryProfile::SCurve => {
+                let (_, cache) = build_scurve_cache(from, to, self.limits, Some(self.duration));
+                SegmentCache::SCurve(cache)
+            }
+            CuTrajectoryProfile::MinimumJerk => SegmentCache::MinimumJerk(build_quintic_cache(
+                from,
+                to,
+                seg,
+                self.duration,
+                self.inv_duration,
+                self.timing,
+            )),
+            CuTrajectoryProfile::Cubic => SegmentCache::Cubic(build_cubic_cache(
+                from,
+                to,
+                seg,
+                self.duration,
+                self.inv_duration,
+                self.timing,
+            )),
+        };
+        self.cached_seg = Some(seg);
+    }
+
+    /// Advances the cursor to the segment containing monotonic time `t` and
+    /// evaluates every joint from the per-segment cache.
+    fn eval_at(&mut self, t: f64) -> ([CuJointPosition; N], [CuJointVelocity; N]) {
+        while self.seg + 1 < self.last && t >= self.end {
+            self.start += self.duration;
+            self.step_to(self.seg + 1);
+        }
+        if self.cached_seg != Some(self.seg) {
+            self.populate_cache();
+        }
+        let reference = &self.waypoints[0];
+        let tau = (t - self.start).clamp(0.0, self.duration);
+        let mut positions = [CuJointPosition::Fixed; N];
+        let mut velocities = [CuJointVelocity::Fixed; N];
+        match &self.cache {
+            SegmentCache::Trapezoidal(joints) => {
+                let mut j = 0;
+                while j < N {
+                    let (pos, vel) = joints[j].eval(tau);
+                    positions[j] = reference[j].with_si_value(pos);
+                    velocities[j] = CuJointVelocity::from_coordinate(reference[j], vel);
+                    j += 1;
+                }
+            }
+            SegmentCache::SCurve(joints) => {
+                let mut j = 0;
+                while j < N {
+                    let (pos, vel) = joints[j].eval(tau);
+                    positions[j] = reference[j].with_si_value(pos);
+                    velocities[j] = CuJointVelocity::from_coordinate(reference[j], vel);
+                    j += 1;
+                }
+            }
+            SegmentCache::MinimumJerk(joints) => {
+                let u = if self.duration > 0.0 {
+                    (tau * self.inv_duration).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let u2 = u * u;
+                let u3 = u2 * u;
+                let u4 = u3 * u;
+                let u5 = u4 * u;
+                let mut j = 0;
+                while j < N {
+                    let (pos, vel) = joints[j].eval(u, u2, u3, u4, u5);
+                    positions[j] = reference[j].with_si_value(pos);
+                    velocities[j] = CuJointVelocity::from_coordinate(reference[j], vel);
+                    j += 1;
+                }
+            }
+            SegmentCache::Cubic(joints) => {
+                let u = if self.duration > 0.0 {
+                    (tau * self.inv_duration).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let u2 = u * u;
+                let u3 = u2 * u;
+                let mut j = 0;
+                while j < N {
+                    let (pos, vel) = joints[j].eval(u, u2, u3);
+                    positions[j] = reference[j].with_si_value(pos);
+                    velocities[j] = CuJointVelocity::from_coordinate(reference[j], vel);
+                    j += 1;
+                }
+            }
+        }
+        (positions, velocities)
+    }
 }
 
 /// Checks waypoint-velocity magnitudes against the per-joint velocity limits.
@@ -1221,51 +1736,39 @@ fn vias_within_limits<const N: usize>(
     true
 }
 
-/// Checks the exact velocity extrema of every Hermite segment — waypoint
+/// Checks the exact velocity extrema of one Hermite segment — waypoint
 /// velocities at the ends included — against the velocity limits, with a
 /// small float tolerance.
 ///
 /// Sampling alone cannot certify this: a segment shorter than the sample
 /// period receives no interior samples, and a peak between two samples stays
 /// unseen, so the analytic extrema are checked instead.
-fn segments_within_limits<const N: usize>(
-    waypoints: &[[CuJointPosition; N]],
+fn segment_within_limits<const N: usize>(
+    from: &[CuJointPosition; N],
+    to: &[CuJointPosition; N],
+    seg: usize,
+    duration: f64,
     limits: &CuJointTrajectoryLimits<N>,
-    profile: CuTrajectoryProfile,
+    quintic: bool,
     timing: &CuTimingOverrides<'_, N>,
-    all_zero_via: bool,
 ) -> bool {
-    let quintic = profile == CuTrajectoryProfile::MinimumJerk;
-    let mut seg = 0;
-    while seg + 1 < waypoints.len() {
-        let duration = effective_duration(seg, waypoints, limits, profile, timing, all_zero_via);
-        if duration <= 0.0 {
-            seg += 1;
+    let mut j = 0;
+    while j < N {
+        if matches!(from[j], CuJointPosition::Fixed) {
+            j += 1;
             continue;
         }
-        let start_vel = waypoint_velocity(timing, seg, waypoints[seg]);
-        let end_vel = waypoint_velocity(timing, seg + 1, waypoints[seg + 1]);
-        let mut j = 0;
-        while j < N {
-            if matches!(waypoints[seg][j], CuJointPosition::Fixed) {
-                j += 1;
-                continue;
-            }
-            let distance = waypoints[seg + 1][j].si_value() - waypoints[seg][j].si_value();
-            let (high, low, _) = polynomial_extrema(
-                quintic,
-                distance,
-                start_vel[j].si_value(),
-                end_vel[j].si_value(),
-                duration,
-            );
-            let bound = limits.max_velocities[j].si_value() * (1.0 + 1e-9) + 1e-12;
-            if !high.is_finite() || !low.is_finite() || high > bound || low < -bound {
-                return false;
-            }
-            j += 1;
+        let distance = to[j].si_value() - from[j].si_value();
+        let (v0, v1) = match timing.waypoint_velocities {
+            Some(vias) => (vias[seg][j].si_value(), vias[seg + 1][j].si_value()),
+            None => (0.0, 0.0),
+        };
+        let (high, low, _) = polynomial_extrema(quintic, distance, v0, v1, duration);
+        let bound = limits.max_velocities[j].si_value() * (1.0 + 1e-9) + 1e-12;
+        if !high.is_finite() || !low.is_finite() || high > bound || low < -bound {
+            return false;
         }
-        seg += 1;
+        j += 1;
     }
     true
 }
@@ -1952,5 +2455,561 @@ mod tests {
             .is_err()
         );
         assert!(parse(r#"{"profile": "cubic"}"#).is_err());
+    }
+
+    fn pris(q: f64) -> CuJointPosition {
+        CuJointPosition::Prismatic(cu29::units::si::f64::Length::new::<
+            cu29::units::si::length::meter,
+        >(q))
+    }
+
+    fn pris_vel(v: f64) -> CuJointVelocity {
+        CuJointVelocity::from_coordinate(pris(0.0), v)
+    }
+
+    fn pris_acc(a: f64) -> CuJointAcceleration {
+        CuJointAcceleration::from_coordinate(pris(0.0), a)
+    }
+
+    fn pris_jerk(j: f64) -> CuJointJerk {
+        CuJointJerk::from_coordinate(pris(0.0), j)
+    }
+
+    fn rev_jerk(j: f64) -> CuJointJerk {
+        CuJointJerk::from_coordinate(rev(0.0), j)
+    }
+
+    fn reference_trapezoid_eval(
+        offset: f64,
+        distance: f64,
+        max_vel: f64,
+        max_acc: f64,
+    ) -> (f64, f64) {
+        if distance <= 0.0 || offset <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let accel_time = max_vel / max_acc;
+        if distance >= max_vel * accel_time {
+            let cruise = distance / max_vel - accel_time;
+            let total = distance / max_vel + accel_time;
+            let accel_distance = 0.5 * max_vel * accel_time;
+            if offset < accel_time {
+                (0.5 * max_acc * offset * offset, max_acc * offset)
+            } else if offset < accel_time + cruise {
+                (accel_distance + max_vel * (offset - accel_time), max_vel)
+            } else if offset < total {
+                let remaining = total - offset;
+                (
+                    distance - 0.5 * max_acc * remaining * remaining,
+                    max_acc * remaining,
+                )
+            } else {
+                (distance, 0.0)
+            }
+        } else {
+            let half = libm::sqrt(distance / max_acc);
+            let total = 2.0 * half;
+            if offset < half {
+                (0.5 * max_acc * offset * offset, max_acc * offset)
+            } else if offset < total {
+                let remaining = total - offset;
+                (
+                    distance - 0.5 * max_acc * remaining * remaining,
+                    max_acc * remaining,
+                )
+            } else {
+                (distance, 0.0)
+            }
+        }
+    }
+
+    fn reference_scurve_eval(
+        offset: f64,
+        distance: f64,
+        max_vel: f64,
+        max_acc: f64,
+        max_jerk: f64,
+    ) -> (f64, f64) {
+        if distance <= 0.0 || offset <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let (jerk_time, accel_time, cruise_time) =
+            scurve_shape(distance, max_vel, max_acc, max_jerk);
+        let total = 4.0 * jerk_time + 2.0 * accel_time + cruise_time;
+        if offset >= total {
+            return (distance, 0.0);
+        }
+        let mut remaining = offset;
+        let mut position = 0.0;
+        let mut velocity = 0.0;
+        let mut acceleration = 0.0;
+        let mut phase = 0;
+        while phase < 7 {
+            let (jerk, duration) = match phase {
+                0 => (max_jerk, jerk_time),
+                1 => (0.0, accel_time),
+                2 => (-max_jerk, jerk_time),
+                3 => (0.0, cruise_time),
+                4 => (-max_jerk, jerk_time),
+                5 => (0.0, accel_time),
+                _ => (max_jerk, jerk_time),
+            };
+            let step = if remaining < duration {
+                remaining
+            } else {
+                duration
+            };
+            position += velocity * step
+                + 0.5 * acceleration * step * step
+                + jerk * step * step * step / 6.0;
+            velocity += acceleration * step + 0.5 * jerk * step * step;
+            acceleration += jerk * step;
+            remaining -= step;
+            if remaining <= 0.0 {
+                break;
+            }
+            phase += 1;
+        }
+        (position, velocity)
+    }
+
+    fn reference_eval_at<const N: usize>(
+        t: f64,
+        waypoints: &[[CuJointPosition; N]],
+        limits: &CuJointTrajectoryLimits<N>,
+        profile: CuTrajectoryProfile,
+        timing: &CuTimingOverrides<'_, N>,
+        all_zero_via: bool,
+    ) -> ([CuJointPosition; N], [CuJointVelocity; N]) {
+        let mut seg = 0;
+        let mut seg_start = 0.0;
+        while seg + 2 < waypoints.len() {
+            let duration = match timing.segment_durations {
+                Some(fixed) => fixed[seg].get::<second>(),
+                None => segment_minimum(
+                    &waypoints[seg],
+                    &waypoints[seg + 1],
+                    limits,
+                    profile,
+                    all_zero_via,
+                ),
+            };
+            if t < seg_start + duration {
+                break;
+            }
+            seg_start += duration;
+            seg += 1;
+        }
+        let seg_duration = match timing.segment_durations {
+            Some(fixed) => fixed[seg].get::<second>(),
+            None => segment_minimum(
+                &waypoints[seg],
+                &waypoints[seg + 1],
+                limits,
+                profile,
+                all_zero_via,
+            ),
+        };
+        let from = waypoints[seg];
+        let to = waypoints[seg + 1];
+        let start_vel = waypoint_velocity(timing, seg, from);
+        let end_vel = waypoint_velocity(timing, seg + 1, to);
+        let tau = (t - seg_start).clamp(0.0, seg_duration);
+        let mut positions = [CuJointPosition::Fixed; N];
+        let mut velocities = [CuJointVelocity::Fixed; N];
+        let mut j = 0;
+        while j < N {
+            let start = from[j].si_value();
+            let displacement = to[j].si_value() - start;
+            let distance = displacement.abs();
+            let max_vel = limits.max_velocities[j].si_value();
+            let max_acc = limits.acc(j);
+            let max_jerk = limits.jerk(j);
+            match profile {
+                CuTrajectoryProfile::Trapezoidal | CuTrajectoryProfile::SCurve => {
+                    let sign = if displacement >= 0.0 { 1.0 } else { -1.0 };
+                    let jerk_limited = profile == CuTrajectoryProfile::SCurve;
+                    let own = if jerk_limited {
+                        scurve_joint_duration(distance, max_vel, max_acc, max_jerk)
+                    } else {
+                        joint_profile_duration(distance, max_vel, max_acc)
+                    };
+                    let (offset, vel) = if seg_duration <= 0.0 || own <= 0.0 {
+                        (0.0, 0.0)
+                    } else {
+                        let scale = own / seg_duration;
+                        let (off, v) = if jerk_limited && max_jerk.is_finite() {
+                            reference_scurve_eval(tau * scale, distance, max_vel, max_acc, max_jerk)
+                        } else {
+                            reference_trapezoid_eval(tau * scale, distance, max_vel, max_acc)
+                        };
+                        (off, v * scale)
+                    };
+                    positions[j] = from[j].with_si_value(start + sign * offset);
+                    velocities[j] = CuJointVelocity::from_coordinate(from[j], sign * vel);
+                }
+                CuTrajectoryProfile::MinimumJerk | CuTrajectoryProfile::Cubic => {
+                    let u = if seg_duration > 0.0 {
+                        (tau / seg_duration).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let (position, vel) = if profile == CuTrajectoryProfile::MinimumJerk {
+                        quintic_eval(
+                            u,
+                            start,
+                            start + displacement,
+                            start_vel[j].si_value(),
+                            end_vel[j].si_value(),
+                            seg_duration,
+                        )
+                    } else {
+                        cubic_eval(
+                            u,
+                            start,
+                            start + displacement,
+                            start_vel[j].si_value(),
+                            end_vel[j].si_value(),
+                            seg_duration,
+                        )
+                    };
+                    positions[j] = from[j].with_si_value(position);
+                    velocities[j] = CuJointVelocity::from_coordinate(from[j], vel);
+                }
+            }
+            j += 1;
+        }
+        (positions, velocities)
+    }
+
+    fn assert_matches_reference<const N: usize, const M: usize>(
+        waypoints: &[[CuJointPosition; N]],
+        limits: &CuJointTrajectoryLimits<N>,
+        profile: CuTrajectoryProfile,
+        overrides: &CuTimingOverrides<'_, N>,
+        sample_period: Time,
+        out: &mut CuTrajectoryPayload<N, M>,
+    ) {
+        let status =
+            with_profile(waypoints, limits, profile, overrides, sample_period, out).unwrap();
+        assert_eq!(status, CuTimingStatus::Success, "{profile:?}");
+        assert!(out.len() >= 2, "{profile:?}");
+        let all_zero_via = !vias_nonzero(overrides);
+        let pts = out.points();
+        let mut i = 1;
+        while i < pts.len() {
+            assert!(
+                pts[i].time_from_start > pts[i - 1].time_from_start,
+                "{profile:?}: non-increasing time at {i}"
+            );
+            i += 1;
+        }
+        let mut k = 1;
+        while k + 1 < pts.len() {
+            let t = pts[k].time_from_start.get::<second>();
+            let (exp_pos, exp_vel) =
+                reference_eval_at(t, waypoints, limits, profile, overrides, all_zero_via);
+            let mut j = 0;
+            while j < N {
+                assert_eq!(
+                    core::mem::discriminant(&pts[k].positions[j]),
+                    core::mem::discriminant(&exp_pos[j]),
+                    "{profile:?}: position kind mismatch at knot {k} joint {j}"
+                );
+                assert_eq!(
+                    core::mem::discriminant(&pts[k].velocities[j]),
+                    core::mem::discriminant(&exp_vel[j]),
+                    "{profile:?}: velocity kind mismatch at knot {k} joint {j}"
+                );
+                let dp = (pts[k].positions[j].si_value() - exp_pos[j].si_value()).abs();
+                let dv = (pts[k].velocities[j].si_value() - exp_vel[j].si_value()).abs();
+                assert!(
+                    dp <= 1e-12,
+                    "{profile:?}: position drift {dp} at knot {k} joint {j} (t={t})"
+                );
+                assert!(
+                    dv <= 1e-12,
+                    "{profile:?}: velocity drift {dv} at knot {k} joint {j} (t={t})"
+                );
+                j += 1;
+            }
+            k += 1;
+        }
+    }
+
+    #[test]
+    fn test_cursor_matches_reference_all_profiles_multi_segment() {
+        // Exercises all 4 S-curve regimes (cruise + const-accel, accel-limited
+        // no cruise, jerk-only short move, vel-limited no const-accel) as well
+        // as trapezoidal/triangular legs, reversals, and stationary joints.
+        let waypoints = [
+            [rev(0.0), rev(0.0), rev(0.5), rev(0.0)],
+            [rev(3.0), rev(-0.4), rev(0.5), rev(0.02)],
+            [rev(2.95), rev(0.8), rev(-0.2), rev(1.5)],
+            [rev(0.2), rev(0.8), rev(0.1), rev(1.48)],
+            [rev(-1.0), rev(-0.5), rev(0.9), rev(0.0)],
+        ];
+        let limits = CuJointTrajectoryLimits::new(
+            [rev_vel(1.0), rev_vel(0.8), rev_vel(1.2), rev_vel(0.6)],
+            [rev_acc(2.0), rev_acc(3.0), rev_acc(2.5), rev_acc(4.0)],
+        )
+        .with_jerks([
+            rev_jerk(10.0),
+            rev_jerk(2.0), // accel_full < 0: vel-limited without const-accel
+            rev_jerk(8.0),
+            rev_jerk(12.0),
+        ]);
+        let dt = Time::new::<second>(0.05);
+        let mut out = CuTrajectoryPayload::<4, 512>::new();
+        for profile in [
+            CuTrajectoryProfile::Trapezoidal,
+            CuTrajectoryProfile::SCurve,
+            CuTrajectoryProfile::MinimumJerk,
+            CuTrajectoryProfile::Cubic,
+        ] {
+            assert_matches_reference(
+                &waypoints,
+                &limits,
+                profile,
+                &CuTimingOverrides::default(),
+                dt,
+                &mut out,
+            );
+            let last = out.len() - 1;
+            assert_eq!(out.points()[0].positions, waypoints[0]);
+            assert_eq!(out.points()[last].positions, waypoints[4]);
+        }
+    }
+
+    #[test]
+    fn test_zero_displacement_and_short_segments_all_profiles() {
+        // Leading zero segment, consecutive middle zero segments, a tiny
+        // segment shorter than sample_period, and a trailing zero segment.
+        let waypoints = [
+            [rev(0.0), rev(1.0)],
+            [rev(0.0), rev(1.0)],    // leading zero-duration
+            [rev(1.0), rev(0.2)],    // normal move
+            [rev(1.0), rev(0.2)],    // middle zero-duration #1
+            [rev(1.0), rev(0.2)],    // middle zero-duration #2
+            [rev(1.0001), rev(0.2)], // shorter than dt = 0.05 s
+            [rev(0.3), rev(-0.6)],   // normal move
+            [rev(0.3), rev(-0.6)],   // trailing zero-duration
+        ];
+        let limits = CuJointTrajectoryLimits::new(
+            [rev_vel(1.0), rev_vel(1.0)],
+            [rev_acc(2.0), rev_acc(2.0)],
+        )
+        .with_jerks([rev_jerk(10.0), rev_jerk(10.0)]);
+        let dt = Time::new::<second>(0.05);
+        let mut out = CuTrajectoryPayload::<2, 256>::new();
+        for profile in [
+            CuTrajectoryProfile::Trapezoidal,
+            CuTrajectoryProfile::SCurve,
+            CuTrajectoryProfile::MinimumJerk,
+            CuTrajectoryProfile::Cubic,
+        ] {
+            assert_matches_reference(
+                &waypoints,
+                &limits,
+                profile,
+                &CuTimingOverrides::default(),
+                dt,
+                &mut out,
+            );
+        }
+
+        // All-zero-displacement path collapses to a single point for all profiles.
+        let stationary = [
+            [rev(0.5), rev(-0.2)],
+            [rev(0.5), rev(-0.2)],
+            [rev(0.5), rev(-0.2)],
+        ];
+        let mut single = CuTrajectoryPayload::<2, 16>::new();
+        for profile in [
+            CuTrajectoryProfile::Trapezoidal,
+            CuTrajectoryProfile::SCurve,
+            CuTrajectoryProfile::MinimumJerk,
+            CuTrajectoryProfile::Cubic,
+        ] {
+            let status = with_profile(
+                &stationary,
+                &limits,
+                profile,
+                &CuTimingOverrides::default(),
+                dt,
+                &mut single,
+            )
+            .unwrap();
+            assert_eq!(status, CuTimingStatus::Success);
+            assert_eq!(single.len(), 1);
+            assert_eq!(single.points()[0].positions, stationary[0]);
+        }
+    }
+
+    #[test]
+    fn test_fixed_durations_all_profiles_match_reference() {
+        let waypoints = [
+            [rev(0.0), rev(0.0)],
+            [rev(0.5), rev(-0.3)],
+            [rev(0.5), rev(-0.3)], // zero displacement with positive fixed duration
+            [rev(1.2), rev(0.4)],
+        ];
+        let limits = CuJointTrajectoryLimits::new(
+            [rev_vel(1.0), rev_vel(1.0)],
+            [rev_acc(2.0), rev_acc(2.0)],
+        )
+        .with_jerks([rev_jerk(10.0), rev_jerk(10.0)]);
+        // Include an exact sample-boundary alignment (dt = 0.05 divides 2.0, 0.25, 2.5).
+        let fixed = [
+            Time::new::<second>(2.0),
+            Time::new::<second>(0.25),
+            Time::new::<second>(2.5),
+        ];
+        let overrides = CuTimingOverrides {
+            segment_durations: Some(&fixed),
+            waypoint_velocities: None,
+        };
+        let dt = Time::new::<second>(0.05);
+        let mut out = CuTrajectoryPayload::<2, 256>::new();
+        for profile in [
+            CuTrajectoryProfile::Trapezoidal,
+            CuTrajectoryProfile::SCurve,
+            CuTrajectoryProfile::MinimumJerk,
+            CuTrajectoryProfile::Cubic,
+        ] {
+            assert_matches_reference(&waypoints, &limits, profile, &overrides, dt, &mut out);
+            assert!((out.duration().get::<second>() - 4.75).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_nonzero_via_velocities_match_reference() {
+        let waypoints = [
+            [rev(0.0), rev(0.0), rev(1.0)],
+            [rev(1.0), rev(-0.6), rev(0.5)],
+            [rev(2.2), rev(-0.2), rev(-0.3)],
+            [rev(1.8), rev(0.4), rev(0.0)],
+        ];
+        let vias = [
+            [rev_vel(0.1), rev_vel(-0.1), rev_vel(0.0)],
+            [rev_vel(0.6), rev_vel(-0.2), rev_vel(-0.4)],
+            [rev_vel(0.2), rev_vel(0.3), rev_vel(-0.1)],
+            [zero_vel(), zero_vel(), zero_vel()],
+        ];
+        let limits = CuJointTrajectoryLimits::new(
+            [rev_vel(2.0), rev_vel(2.0), rev_vel(2.0)],
+            [rev_acc(4.0), rev_acc(4.0), rev_acc(4.0)],
+        );
+        let fixed = [
+            Time::new::<second>(1.5),
+            Time::new::<second>(1.8),
+            Time::new::<second>(1.2),
+        ];
+        let dt = Time::new::<second>(0.02);
+        let mut out = CuTrajectoryPayload::<3, 512>::new();
+        for durations in [None, Some(fixed.as_slice())] {
+            let overrides = CuTimingOverrides {
+                segment_durations: durations,
+                waypoint_velocities: Some(&vias),
+            };
+            for profile in [CuTrajectoryProfile::MinimumJerk, CuTrajectoryProfile::Cubic] {
+                assert_matches_reference(&waypoints, &limits, profile, &overrides, dt, &mut out);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mixed_joint_kinds_all_profiles_match_reference() {
+        let waypoints = [
+            [rev(0.0), pris(0.0), CuJointPosition::Fixed],
+            [rev(0.8), pris(0.3), CuJointPosition::Fixed],
+            [rev(0.8), pris(0.3), CuJointPosition::Fixed],
+            [rev(-0.4), pris(0.05), CuJointPosition::Fixed],
+        ];
+        let limits = CuJointTrajectoryLimits::new(
+            [rev_vel(0.8), pris_vel(0.25), CuJointVelocity::Fixed],
+            [rev_acc(1.5), pris_acc(0.6), CuJointAcceleration::Fixed],
+        )
+        .with_jerks([rev_jerk(6.0), pris_jerk(3.0), CuJointJerk::Fixed]);
+        let dt = Time::new::<second>(0.02);
+        let mut out = CuTrajectoryPayload::<3, 512>::new();
+        for profile in [
+            CuTrajectoryProfile::Trapezoidal,
+            CuTrajectoryProfile::SCurve,
+            CuTrajectoryProfile::MinimumJerk,
+            CuTrajectoryProfile::Cubic,
+        ] {
+            assert_matches_reference(
+                &waypoints,
+                &limits,
+                profile,
+                &CuTimingOverrides::default(),
+                dt,
+                &mut out,
+            );
+            for p in out.points() {
+                assert_eq!(p.positions[2], CuJointPosition::Fixed);
+                assert_eq!(p.velocities[2], CuJointVelocity::Fixed);
+                assert_eq!(p.accelerations[2], CuJointAcceleration::Fixed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_scurve_infinite_and_mixed_jerks_match_reference() {
+        let waypoints = [
+            [rev(0.0), pris(0.0), CuJointPosition::Fixed],
+            [rev(1.2), pris(0.4), CuJointPosition::Fixed],
+            [rev(0.2), pris(0.1), CuJointPosition::Fixed],
+        ];
+        let dt = Time::new::<second>(0.02);
+
+        // Mixed finite + infinite jerk + fixed joint.
+        let mixed_limits = CuJointTrajectoryLimits::new(
+            [rev_vel(0.8), pris_vel(0.3), CuJointVelocity::Fixed],
+            [rev_acc(1.6), pris_acc(0.8), CuJointAcceleration::Fixed],
+        )
+        .with_jerks([rev_jerk(5.0), pris_jerk(f64::INFINITY), CuJointJerk::Fixed]);
+        let fixed = [Time::new::<second>(3.0), Time::new::<second>(2.5)];
+        let mut out = CuTrajectoryPayload::<3, 512>::new();
+        for durations in [None, Some(fixed.as_slice())] {
+            let overrides = CuTimingOverrides {
+                segment_durations: durations,
+                waypoint_velocities: None,
+            };
+            assert_matches_reference(
+                &waypoints,
+                &mixed_limits,
+                CuTrajectoryProfile::SCurve,
+                &overrides,
+                dt,
+                &mut out,
+            );
+        }
+
+        // `max_jerks: None` on SCurve must match Trapezoidal point-for-point.
+        let unbounded_limits = CuJointTrajectoryLimits::new(
+            [rev_vel(0.8), pris_vel(0.3), CuJointVelocity::Fixed],
+            [rev_acc(1.6), pris_acc(0.8), CuJointAcceleration::Fixed],
+        );
+        let mut scurve_out = CuTrajectoryPayload::<3, 512>::new();
+        assert_matches_reference(
+            &waypoints,
+            &unbounded_limits,
+            CuTrajectoryProfile::SCurve,
+            &CuTimingOverrides::default(),
+            dt,
+            &mut scurve_out,
+        );
+        let mut trap_out = CuTrajectoryPayload::<3, 512>::new();
+        assert_matches_reference(
+            &waypoints,
+            &unbounded_limits,
+            CuTrajectoryProfile::Trapezoidal,
+            &CuTimingOverrides::default(),
+            dt,
+            &mut trap_out,
+        );
+        assert_eq!(scurve_out.points(), trap_out.points());
     }
 }

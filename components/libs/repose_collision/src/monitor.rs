@@ -5,8 +5,17 @@
 //! tracks *state* — whether the watched configuration is currently in violation, and when that
 //! state *changes* — so callers can raise a hold exactly once instead of re-acting every cycle.
 
+use bincode::Decode;
+use bincode::Encode;
+use cu29::prelude::*;
+use serde::Deserialize;
+use serde::Serialize;
+
 /// Outcome of one monitoring pass over a configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Serialize, Deserialize, Reflect,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum CuMonitorTransition {
     /// Watch was already in collision and still is (no new event).
     StillInCollision,
@@ -15,13 +24,14 @@ pub enum CuMonitorTransition {
     /// Collision cleared this pass.
     ClearedCollision,
     /// Watch was clear and remains clear (no new event).
+    #[default]
     StillClear,
 }
 
 /// Stateful wrapper for a collision watch: raises edge events when a configuration
 /// enters or leaves violation, so consumers (tasks, executors) get one event per
 /// collision episode rather than one per cycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Reflect)]
 pub struct CuCollisionMonitor {
     in_collision: bool,
 }

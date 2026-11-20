@@ -324,20 +324,41 @@ impl<const N: usize, const M: usize> CuRobotCollisionModel<N, M> {
         env: &CuCollisionEnv<'_>,
         out_report: &mut CuCollisionReport<MAX_CONTACTS>,
     ) -> CuResult<()> {
+        self.check_frames_with_closest(link_frames, env, out_report)?;
+        Ok(())
+    }
+
+    /// Evaluates self-collision and `env` (obstacles, attached shapes, exclusions) for
+    /// precomputed `link_frames`, writing contacts into `out_report` (cleared first) and
+    /// returning the pair with minimum signed distance across all checked pairs (`None` if no
+    /// pair was checked).
+    ///
+    /// Fails, leaving `out_report` unmodified, if `env` is invalid for this model (see
+    /// [`CuCollisionEnv`]).
+    pub fn check_frames_with_closest<const MAX_CONTACTS: usize>(
+        &self,
+        link_frames: &[Transform3D<f64>; N],
+        env: &CuCollisionEnv<'_>,
+        out_report: &mut CuCollisionReport<MAX_CONTACTS>,
+    ) -> CuResult<Option<CuCollisionContact>> {
         self.validate_env(env)?;
         out_report.clear();
         let margin_m = self.safety_margin.get::<meter>();
+        let mut closest: Option<CuCollisionContact> = None;
         let mut min_dist_m = f64::INFINITY;
         self.visit_pairs(link_frames, env, |contact| {
             let d_m = contact.signed_distance.get::<meter>();
-            min_dist_m = min_dist_m.min(d_m);
+            if d_m < min_dist_m || (closest.is_none() && !d_m.is_nan()) {
+                min_dist_m = d_m;
+                closest = Some(contact);
+            }
             if d_m < margin_m {
                 out_report.push_contact(contact);
             }
             true
         });
         out_report.min_signed_distance = Length64::new::<meter>(min_dist_m);
-        Ok(())
+        Ok(closest)
     }
 
     /// Runs forward kinematics for `q` and calls [`check_frames`](Self::check_frames).

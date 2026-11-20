@@ -79,6 +79,7 @@ api-check:
     cargo public-api -p repose-joint-rrt-star
     cargo public-api -p repose-mujoco-sim
     cargo public-api -p repose-policy-rl
+    cargo public-api -p repose-safety
     cargo public-api -p repose
 
 # Check every library crate for SemVer breaks against the latest release tag (needs cargo-semver-checks).
@@ -125,6 +126,7 @@ release-dry-run:
     cargo publish --dry-run -p repose-joint-rrt-star
     cargo publish --dry-run -p repose-mujoco-sim
     cargo publish --dry-run -p repose-policy-rl
+    cargo publish --dry-run -p repose-safety
     cargo publish --dry-run -p repose
 
 # Verify strict no_std compatibility across shared crates.

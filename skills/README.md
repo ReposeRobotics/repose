@@ -13,7 +13,7 @@ They are for Repose users. The skills for working on Repose itself are in
 | [`repose-getting-started`](repose-getting-started/SKILL.md) | Dependency setup, crate map, shared conventions; start here |
 | [`repose-robot-config`](repose-robot-config/SKILL.md) | Preset, inline chain and collision model, URDF/SRDF import |
 | [`repose-kinematics`](repose-kinematics/SKILL.md) | FK, Jacobians, DLS IK, differential IK, servo |
-| [`repose-collision`](repose-collision/SKILL.md) | Collision models, planning scenes, attached objects, exclusions |
+| [`repose-collision`](repose-collision/SKILL.md) | Collision models, planning scenes, attached objects, exclusions, safety shield (`repose-safety`) |
 | [`repose-motion-planning`](repose-motion-planning/SKILL.md) | Planner contract, choosing a planner, pose and Cartesian planning |
 | [`repose-trajectory-and-control`](repose-trajectory-and-control/SKILL.md) | Timing, blending, follower, joint controller, gripper |
 | [`repose-copper-app`](repose-copper-app/SKILL.md) | RON graphs, bridges, MuJoCo simulation, sim-to-hardware |

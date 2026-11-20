@@ -30,6 +30,7 @@ repose-motion-planning = { version = "0.9.0", path = "../../tasks/repose_motion_
 repose-joint-rrt-star = { version = "0.9.0", path = "../../tasks/repose_joint_rrt_star", default-features = false }
 repose-controller = { version = "0.9.0", path = "../../tasks/repose_controller", default-features = false }
 repose-io = { version = "0.9.0", path = "../../tasks/repose_io", default-features = false }
+repose-safety = { version = "0.9.0", path = "../../tasks/repose_safety", default-features = false }
 repose-mujoco-sim = { version = "0.9.0", path = "../../bridges/repose_mujoco_sim", default-features = false, optional = true }
 
 [features]
@@ -46,6 +47,7 @@ std = [
   "repose-joint-rrt-star/std",
   "repose-controller/std",
   "repose-io/std",
+  "repose-safety/std",
 ]
 # MuJoCo simulator bridge (host only).
 mujoco-sim = ["std", "dep:repose-mujoco-sim", "repose-mujoco-sim/std"]
@@ -104,5 +106,10 @@ required-features = ["std"]
 
 [[bench]]
 name = "policy_rl"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "safety"
 harness = false
 required-features = ["std"]

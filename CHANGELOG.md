@@ -19,6 +19,19 @@ may be breaking.
 
 ### Added
 
+- `repose-safety` (re-exported as `repose::safety`): added the `no_std`,
+  zero-allocation [`CuSafetyShieldTask`] and [`CuSafetyReport`] real-time safety
+  shield sitting between setpoint sources (`CuFollowTrajectoryTask`,
+  `CuSetpointMuxTask`, or `repose-policy-rl` action tasks) and
+  `CuControllerTask`, enforcing joint limits, self/environment/attached
+  collision margins, axis-aligned TCP `CuWorkspaceBounds` fences, Cartesian TCP
+  speed limits (`max_tcp_speed`), and velocity-extrapolated
+  `braking_horizon` lookahead with safe stationary holds and fixed-size
+  `Freezable` state.
+- `repose-collision`: derived `Default`, `Serialize`, `Deserialize`, `Encode`,
+  `Decode`, and `Reflect` on `CuMonitorTransition` (and `Encode`, `Decode`,
+  `Reflect` on `CuCollisionMonitor`), and added
+  `CuRobotCollisionModel::check_frames_with_closest`.
 - `repose-trajectory`: added simplex arbitration and switch-reason attribution
   telemetry (`CuSetpointSwitchReason`, `CuSetpointMuxReport`,
   `CuSetpointMuxTask::last_report`, `CuSetpointMuxTask::evaluate`, and
@@ -40,9 +53,10 @@ may be breaking.
   rigid-body dynamics (`inverse_dynamics`, `gravity_compensation`), trajectory
   following, bumpless setpoint multiplexing, Cartesian path blending and
   parameterization, pose-goal / Cartesian / path-constrained motion planning,
-  `CuControllerTask` position and PD / model-based effort modes, and
+  `CuControllerTask` position and PD / model-based effort modes,
   `repose-policy-rl` observation, single-step and chunked ONNX inference, ACT
-  temporal ensembling, and joint / VLA Cartesian / gripper action tasks.
+  temporal ensembling, joint / VLA Cartesian / gripper action tasks, and
+  `CuSafetyShieldTask` (`safety` bench).
 
 ### Changed
 

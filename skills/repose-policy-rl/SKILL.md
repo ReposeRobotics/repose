@@ -222,3 +222,8 @@ Action tasks read **disjoint** slices of one action via `offset`
   joint action task into `repose_trajectory::CuSetpointMuxTask<N>` (classical
   input first). It switches bumplessly and falls back to a hold on a policy
   `Idle` / `Fault`; see the `repose-trajectory-and-control` skill.
+- **Runtime safety shield:** insert `repose_safety::CuSafetyShieldTask<N>`
+  between the action task (or `CuSetpointMuxTask<N>`) and `CuControllerTask<N>`
+  to enforce self/scene collisions, an axis-aligned TCP `workspace` fence,
+  `max_tcp_speed`, and `braking_horizon` lookahead while logging a
+  `CuSafetyReport` every cycle; see `repose-collision`.

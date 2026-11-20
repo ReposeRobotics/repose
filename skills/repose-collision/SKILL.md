@@ -106,6 +106,28 @@ reference rejects the whole query. Publish scene and exclusions together.
 `monitor.update(in_collision)` returns a `CuMonitorTransition`, so you raise a
 hold once when a violation starts instead of every cycle.
 
+### Real-time safety shield (`repose-safety`)
+
+`repose_safety::CuSafetyShieldTask<N, M = N, MAX_OBS = 32, MAX_ATTACHED = 8, MAX_CONTACTS = 16>`
+(re-exported as `repose::safety::CuSafetyShieldTask`) sits between any setpoint
+source (`CuFollowTrajectoryTask`, `CuSetpointMuxTask`, or `repose-policy-rl`
+action tasks) and `CuControllerTask`:
+
+- Inputs: `CuTrajectoryFollowOutput<N>`, `CuJointStatePayload<N>`,
+  `CuPlanningScene<MAX_OBS, MAX_ATTACHED>`.
+- Outputs: `(CuTrajectoryFollowOutput<N>, CuSafetyReport)`.
+- Config (`CuSafetyShieldParams<N, M>`): `chain`, `collision_model`, optional
+  `workspace` (`{"min": [x, y, z], "max": [x, y, z]}` TCP keep-in box in base
+  frame), optional `braking_horizon` (checks `clamp_to_limits(q + v * t)`),
+  `near_miss_margin` (default `0.02` m), optional `max_tcp_speed` (m/s via
+  `geometric_jacobian`), and `require_scene` (default `false`).
+- On any violation (`HeldCollision`, `HeldBrakingLookahead`,
+  `HeldWorkspaceFence`, `HeldTcpSpeed`, `HeldJointLimits`, `HeldMissingScene`,
+  `HeldInvalidScene`), the shield holds `last_safe` (or clamped measured state)
+  at zero velocity/acceleration and emits `CuSafetyReport` with `verdict`,
+  `transition` (`CuMonitorTransition`), `near_miss`, `min_clearance`,
+  `tcp_speed`, `witness` (`CuSafetyWitness`), and `scene_revision`.
+
 ## Pitfalls
 
 - Planners and the pose planner snapshot the scene **once per job** and return

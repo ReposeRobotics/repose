@@ -12,6 +12,7 @@ members = [
   "components/tasks/repose_io",
   "components/tasks/repose_motion_planning",
   "components/tasks/repose_policy_rl",
+  "components/tasks/repose_safety",
 ]
 default-members = [
   "components/bridges/repose_mujoco_sim",
@@ -26,6 +27,7 @@ default-members = [
   "components/tasks/repose_io",
   "components/tasks/repose_motion_planning",
   "components/tasks/repose_policy_rl",
+  "components/tasks/repose_safety",
 ]
 resolver = "3"
 

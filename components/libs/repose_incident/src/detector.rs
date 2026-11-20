@@ -559,12 +559,14 @@ impl<const N: usize> CuIncidentDetector<N> {
 
         let mut triggers: Vec<CuIncidentTrigger> = Vec::new();
 
-        let policy_fault_now = sample.policy_status == Some(CuPolicyStatus::Fault);
-        if policy_fault_now && !self.in_policy_fault {
-            self.policy_faults = self.policy_faults.saturating_add(1);
-            triggers.push(CuIncidentTrigger::PolicyFault);
+        if let Some(status) = sample.policy_status {
+            let policy_fault_now = status == CuPolicyStatus::Fault;
+            if policy_fault_now && !self.in_policy_fault {
+                self.policy_faults = self.policy_faults.saturating_add(1);
+                triggers.push(CuIncidentTrigger::PolicyFault);
+            }
+            self.in_policy_fault = policy_fault_now;
         }
-        self.in_policy_fault = policy_fault_now;
 
         if sample.action_clamped {
             self.clamped_cycles = self.clamped_cycles.saturating_add(1);
@@ -606,19 +608,22 @@ impl<const N: usize> CuIncidentDetector<N> {
         }
         self.in_near_miss = near_miss_now;
 
-        let robot_fault_now =
-            matches!(sample.robot_status, Some(status) if status != CuRobotStatus::Ready);
-        if robot_fault_now && !self.in_robot_fault {
-            triggers.push(CuIncidentTrigger::RobotFault);
+        if let Some(status) = sample.robot_status {
+            let robot_fault_now = status != CuRobotStatus::Ready;
+            if robot_fault_now && !self.in_robot_fault {
+                triggers.push(CuIncidentTrigger::RobotFault);
+            }
+            self.in_robot_fault = robot_fault_now;
         }
-        self.in_robot_fault = robot_fault_now;
 
-        let controller_fault_now = sample.controller_status == Some(CuControllerStatus::Fault);
-        if controller_fault_now && !self.in_controller_fault {
-            self.controller_faults = self.controller_faults.saturating_add(1);
-            triggers.push(CuIncidentTrigger::ControllerFault);
+        if let Some(status) = sample.controller_status {
+            let controller_fault_now = status == CuControllerStatus::Fault;
+            if controller_fault_now && !self.in_controller_fault {
+                self.controller_faults = self.controller_faults.saturating_add(1);
+                triggers.push(CuIncidentTrigger::ControllerFault);
+            }
+            self.in_controller_fault = controller_fault_now;
         }
-        self.in_controller_fault = controller_fault_now;
 
         let recent_scene_change = self.has_recent_scene_change(sample);
 
@@ -651,7 +656,7 @@ impl<const N: usize> CuIncidentDetector<N> {
                 }
             } else {
                 let mut flags = EpisodeFlags {
-                    has_robot_fault: robot_fault_now,
+                    has_robot_fault: self.in_robot_fault,
                     ..EpisodeFlags::default()
                 };
                 let mut primary = first_trigger;

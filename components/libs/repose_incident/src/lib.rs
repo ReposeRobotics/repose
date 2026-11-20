@@ -482,4 +482,47 @@ mod tests {
             CuIncidentBlame::HardwareOrBridge
         );
     }
+
+    #[test]
+    fn missing_status_samples_do_not_trigger_duplicate_faults() {
+        let params = CuIncidentDetectorParams {
+            cooldown: Time::new::<second>(0.05),
+            ..CuIncidentDetectorParams::default()
+        };
+        let mut detector = CuIncidentDetector::<6>::from_params(params).unwrap();
+
+        // Cycle 0: policy, robot, and controller enter fault.
+        let mut s0 = nominal_sample(0, 0);
+        s0.policy_status = Some(CuPolicyStatus::Fault);
+        s0.robot_status = Some(CuRobotStatus::NotReady);
+        s0.controller_status = Some(CuControllerStatus::Fault);
+        detector.observe(&s0).unwrap();
+
+        // Cycle 1: missing telemetry frames (None) must NOT count as recovery.
+        let mut s1 = nominal_sample(1, 100_000_000);
+        s1.policy_status = None;
+        s1.robot_status = None;
+        s1.controller_status = None;
+        detector.observe(&s1).unwrap();
+
+        // Cycle 2 (well past cooldown): same faults still active -> no duplicate incidents/counts.
+        let mut s2 = nominal_sample(2, 200_000_000);
+        s2.policy_status = Some(CuPolicyStatus::Fault);
+        s2.robot_status = Some(CuRobotStatus::NotReady);
+        s2.controller_status = Some(CuControllerStatus::Fault);
+        detector.observe(&s2).unwrap();
+
+        // Cycle 3: observed recovery clears latch; Cycle 4: new fault DOES count.
+        let s3 = nominal_sample(3, 300_000_000);
+        detector.observe(&s3).unwrap();
+
+        let mut s4 = nominal_sample(4, 400_000_000);
+        s4.policy_status = Some(CuPolicyStatus::Fault);
+        detector.observe(&s4).unwrap();
+
+        let summary = detector.finish();
+        assert_eq!(summary.policy_faults, 2);
+        assert_eq!(summary.controller_faults, 1);
+        assert_eq!(summary.incidents.len(), 2);
+    }
 }

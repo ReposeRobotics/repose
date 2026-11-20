@@ -128,12 +128,15 @@ do the contact-rich part, with one controller downstream:
   controller is `Holding`. It never resumes the policy on its own: a new
   classical plan has to run first.
 - Read the active source with `CuSetpointMuxTask::source()`
-  (`classical` / `policy` / `hold`) and the latest telemetry with
-  `CuSetpointMuxTask::last_report()`. To log arbitration telemetry into `.copper`
-  logs on every cycle, use `CuAuditedSetpointMuxTask<N>`, which shares
+  (`classical` / `policy` / `hold`, current on both `process()` and
+  `evaluate()`); `CuSetpointMuxTask::last_report()` is updated by `evaluate()`
+  only (not `process()`). To log arbitration telemetry into `.copper` logs on
+  every cycle, use `CuAuditedSetpointMuxTask<N>`, which shares
   `CuSetpointMuxParams` and emits `(CuTrajectoryFollowOutput<N>, CuSetpointMuxReport)`
   (`source`, `switched`, `reason: CuSetpointSwitchReason`, `blending`,
-  `blend_progress`).
+  `blend_progress`) — declare the report connection after the setpoint
+  connection (or `(src: "mux", dst: "__nc__", msg: "repose_trajectory::CuSetpointMuxReport")`
+  when unused).
 
 ## Follower semantics (`CuFollowStatus`)
 

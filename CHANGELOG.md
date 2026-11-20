@@ -19,6 +19,12 @@ may be breaking.
 
 ### Added
 
+- `repose-trajectory`: added simplex arbitration and switch-reason attribution
+  telemetry (`CuSetpointSwitchReason`, `CuSetpointMuxReport`,
+  `CuSetpointMuxTask::last_report`, `CuSetpointMuxTask::evaluate`, and
+  dual-output `CuAuditedSetpointMuxTask<N>`) without changing
+  `CuSetpointMuxTask<N>`'s `CuTask` interface, RON config, or `Freezable`
+  keyframe layout.
 - `repose-policy-rl`: `CuBoundPolicy` (`Clamp` or `Fault`) and optional
   observation and raw-action magnitude guardrails (`max_observation_abs`,
   `observation_bound_policy`, `max_action_abs`, `action_bound_policy`) on

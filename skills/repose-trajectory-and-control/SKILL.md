@@ -67,6 +67,7 @@ zero; zero = exact stop, positive = rounded corner). Time the result with
 | `repose_motion_planning::CuPlanToTrajectoryTask<N, CAP>` | `CuJointPlanPath<N>` → `CuTrajectoryPayload<N, CAP>` | `CuTimingParams<N>`: `limits` (required), `profile`, `sample_period` |
 | `repose_trajectory::CuFollowTrajectoryTask<N, MAX_POINTS>` | `CuTrajectoryPayload<N, MAX_POINTS>` → `CuTrajectoryFollowOutput<N>` | optional `"interpolation"`: `linear` / `cubic` / `quintic` (default: the payload's own) |
 | `repose_trajectory::CuSetpointMuxTask<N>` | `CuTrajectoryFollowOutput<N>` (classical) + `CuTrajectoryFollowOutput<N>` (policy) → `CuTrajectoryFollowOutput<N>` | optional `"blend_time"` (s, default `0.2`, `0` = hard switch) |
+| `repose_trajectory::CuAuditedSetpointMuxTask<N>` | `CuTrajectoryFollowOutput<N>` (classical) + `CuTrajectoryFollowOutput<N>` (policy) → `CuTrajectoryFollowOutput<N>` + `CuSetpointMuxReport` | optional `"blend_time"` (s, default `0.2`, `0` = hard switch) |
 | `repose_controller::CuControllerTask<N>` | `CuTrajectoryFollowOutput<N>` + `CuJointStatePayload<N>` → `CuJointCommandPayload<N>` | see below |
 
 Match `CAP` / `MAX_POINTS` across the timing task, the connection `msg:` type,
@@ -127,7 +128,15 @@ do the contact-rich part, with one controller downstream:
   controller is `Holding`. It never resumes the policy on its own: a new
   classical plan has to run first.
 - Read the active source with `CuSetpointMuxTask::source()`
-  (`classical` / `policy` / `hold`); it round-trips through `Freezable`.
+  (`classical` / `policy` / `hold`, current on both `process()` and
+  `evaluate()`); `CuSetpointMuxTask::last_report()` is updated by `evaluate()`
+  only (not `process()`). To log arbitration telemetry into `.copper` logs on
+  every cycle, use `CuAuditedSetpointMuxTask<N>`, which shares
+  `CuSetpointMuxParams` and emits `(CuTrajectoryFollowOutput<N>, CuSetpointMuxReport)`
+  (`source`, `switched`, `reason: CuSetpointSwitchReason`, `blending`,
+  `blend_progress`) — declare the report connection after the setpoint
+  connection (or `(src: "mux", dst: "__nc__", msg: "repose_trajectory::CuSetpointMuxReport")`
+  when unused).
 
 ## Follower semantics (`CuFollowStatus`)
 

@@ -73,10 +73,29 @@ macro_rules! planners {
                 collision_model: CuRobotCollisionModel<N, M>,
                 params: CuPlannerChoice,
             ) -> CuResult<Self> {
+                // Keep each concrete planner's stack frame out of this match so
+                // debug builds don't reserve space for every variant at once.
+                #[inline(never)]
+                fn new_boxed<P, const N: usize, const M: usize>(
+                    chain: CuKinematicChain<N>,
+                    collision_model: CuRobotCollisionModel<N, M>,
+                ) -> CuResult<Box<P>>
+                where
+                    P: CuJointPlanner<N, M>,
+                    P::Params: Default,
+                {
+                    Ok(Box::new(P::new(
+                        chain,
+                        collision_model,
+                        Default::default(),
+                    )?))
+                }
+
                 Ok(match params {
-                    $(CuPlannerChoice::$variant => Self::$variant(Box::new(
-                        CuJointPlanner::new(chain, collision_model, Default::default())?,
-                    )),)+
+                    $(CuPlannerChoice::$variant => Self::$variant(new_boxed::<$ty<N, M>, N, M>(
+                        chain,
+                        collision_model,
+                    )?),)+
                 })
             }
 

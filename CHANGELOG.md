@@ -31,6 +31,11 @@ may be breaking.
   rollout loops, and update/smooth active `..count` waypoints in place without
   copying unused tail slots. Public API, RNG order, and determinism are
   unchanged.
+- `repose-motion-planning`: `CuJointAStar` now uses a fixed-capacity indexed
+  binary min-heap for its open set with exact deterministic tie-breaking by node
+  index, power-of-two hash slot masking, and single-joint neighbor updates,
+  replacing the `O(V²)` linear open-set scan without changing the public API,
+  search order, or `no_std` / zero-allocation guarantees.
 
 ## [0.9.0] - 2026-11-17
 

@@ -19,6 +19,7 @@
 //! | [`rrt_star`] | `repose-joint-rrt-star` | Joint-space RRT* planner |
 //! | [`planners`] | (this crate) | The planner registry: [`planners::CuPlannerChoice`] (RON names) and [`planners::CuAnyPlanner`] |
 //! | [`controller`] | `repose-controller` | Joint controller with watchdog and rate limiting |
+//! | [`safety`] | `repose-safety` | Real-time safety shield (collision, workspace fence, braking lookahead) |
 //! | [`io`] | `repose-io` | Digital IO payloads and an IO-driven gripper |
 //! | `mujoco_sim` | `repose-mujoco-sim` | MuJoCo simulator bridge (feature `mujoco-sim`) |
 //!
@@ -38,6 +39,7 @@ pub use repose_motion_planning as motion_planning;
 pub use repose_mujoco_sim as mujoco_sim;
 pub use repose_robot_description as robot_description;
 pub use repose_robot_interface as robot_interface;
+pub use repose_safety as safety;
 pub use repose_trajectory as trajectory;
 
 pub mod planners;

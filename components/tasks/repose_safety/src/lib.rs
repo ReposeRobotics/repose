@@ -172,8 +172,8 @@ mod tests {
         let mut out_sp = CuTrajectoryFollowOutput::default();
         let mut out_rep = CuSafetyReport::default();
 
-        // Cycle 0: clear safe pose at q = [0.3, 0, 0, 0, 0, 0].
-        let q_safe = [0.3, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Cycle 0: clear safe pose tilted away from the Z-axis obstacle.
+        let q_safe = [0.3, 0.6, 0.0, 0.0, 0.0, 0.0];
         let sp_safe = sp_with_vel(
             q_safe,
             [0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -506,5 +506,70 @@ mod tests {
         )
         .unwrap();
         assert!(CuSafetyShieldTask::<6>::new(Some(&unknown_field), ()).is_err());
+    }
+
+    #[test]
+    fn test_joint_velocity_limit_enforced_as_held_joint_limits() {
+        let mut task = CuSafetyShieldTask::<6>::from_params(rebel_params()).unwrap();
+        let mut out_sp = CuTrajectoryFollowOutput::default();
+        let mut out_rep = CuSafetyReport::default();
+
+        let q = [0.0; 6];
+        let sp_safe = sp_with_vel(q, [0.0; 6], CuFollowStatus::Running);
+        task.evaluate(Some(&sp_safe), None, None, &mut out_sp, &mut out_rep)
+            .unwrap();
+        assert_eq!(out_rep.verdict, CuSafetyVerdict::Clear);
+
+        // igus ReBeL max_velocity is 2.16 rad/s; 2.5 rad/s on joint 2 must trigger HeldJointLimits.
+        let sp_fast = sp_with_vel(q, [0.0, 0.0, 2.5, 0.0, 0.0, 0.0], CuFollowStatus::Running);
+        task.evaluate(Some(&sp_fast), None, None, &mut out_sp, &mut out_rep)
+            .unwrap();
+        assert_eq!(out_rep.verdict, CuSafetyVerdict::HeldJointLimits);
+        assert_eq!(out_rep.witness, CuSafetyWitness::Joint { index: 2 });
+        assert_eq!(out_sp.status, CuFollowStatus::Finished);
+        assert_eq!(out_sp.positions, sp_safe.positions);
+    }
+
+    #[test]
+    fn test_stale_last_safe_invalidated_when_scene_changes_onto_it() {
+        let mut task = CuSafetyShieldTask::<6>::from_params(rebel_params()).unwrap();
+        let mut out_sp = CuTrajectoryFollowOutput::default();
+        let mut out_rep = CuSafetyReport::default();
+
+        // Cycle 0: latch safe home pose q = [0; 6] in empty scene.
+        let sp_home = sp_with_vel([0.0; 6], [0.0; 6], CuFollowStatus::Running);
+        task.evaluate(Some(&sp_home), None, None, &mut out_sp, &mut out_rep)
+            .unwrap();
+        assert_eq!(out_rep.verdict, CuSafetyVerdict::Clear);
+        assert!(task.last_safe().is_some());
+
+        // Cycle 1: an obstacle appears directly on q = [0; 6] while commanding a bad setpoint.
+        // Cached last_safe is now colliding in the updated scene, so the shield must invalidate
+        // last_safe and emit Idle (non-motion) instead of Finished at the colliding pose.
+        let mut scene = CuPlanningScene::new();
+        let m = Length::new::<meter>;
+        scene
+            .add_obstacle(
+                CuCollisionShape::Sphere(
+                    CuSphere::new([m(0.0), m(0.0), m(0.87)], m(0.08)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap();
+        let st = state_at([0.3, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let sp_bad = sp_with_vel([0.0; 6], [0.0; 6], CuFollowStatus::Running);
+        task.evaluate(
+            Some(&sp_bad),
+            Some(&st),
+            Some(&scene),
+            &mut out_sp,
+            &mut out_rep,
+        )
+        .unwrap();
+        assert_eq!(out_rep.verdict, CuSafetyVerdict::HeldCollision);
+        assert!(task.last_safe().is_none());
+        assert_eq!(out_sp.status, CuFollowStatus::Idle);
+        assert_eq!(out_sp.positions, st.positions);
+        assert!(out_sp.velocities.iter().all(|v| v.si_value() == 0.0));
     }
 }

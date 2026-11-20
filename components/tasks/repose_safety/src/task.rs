@@ -131,15 +131,54 @@ impl<
         Some(clamped)
     }
 
-    /// Writes a stationary safe hold (or `ErrorEmptyTrajectory` zeros when no
-    /// safe or measured position exists) into `out_setpoint`.
-    fn write_safe_hold(&self, out_setpoint: &mut CuTrajectoryFollowOutput<N>) {
-        if let Some(pos) = self.last_safe {
+    /// Returns `true` when `hold_q` is collision-free in `env` and inside any
+    /// configured workspace bounds.
+    fn is_hold_safe(&mut self, hold_q: &[CuJointPosition; N], env: &CuCollisionEnv<'_>) -> bool {
+        let mut hold_frames = [Transform3D::<f64>::identity(); N];
+        let mut hold_ee = Transform3D::<f64>::identity();
+        if self
+            .chain
+            .forward_frames(hold_q, &mut hold_frames, &mut hold_ee)
+            .is_err()
+        {
+            return false;
+        }
+        if self
+            .model
+            .check_frames_with_closest(&hold_frames, env, &mut self.scratch_report)
+            .is_err()
+            || !self.scratch_report.is_collision_free()
+        {
+            return false;
+        }
+        if let Some(ws) = &self.params.workspace {
+            let mat = hold_ee.to_matrix();
+            if ws.evaluate_point([mat[0][3], mat[1][3], mat[2][3]]).0 < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Writes a non-motion fallback when no safe cached configuration can be
+    /// verified against the current scene: `Idle` when an anchor existed (so the
+    /// controller holds measured state / brakes instead of driving toward a stale
+    /// configuration or zeros), or `ErrorEmptyTrajectory` zeros when uninitialized.
+    fn write_unverified_hold(
+        &self,
+        had_anchor: bool,
+        state: Option<&CuJointStatePayload<N>>,
+        out_setpoint: &mut CuTrajectoryFollowOutput<N>,
+    ) {
+        if had_anchor {
+            let positions = self
+                .valid_clamped_measured(state)
+                .unwrap_or_else(|| self.zero_positions());
             *out_setpoint = CuTrajectoryFollowOutput {
-                positions: pos,
-                velocities: pos.map(|q| CuJointVelocity::from_coordinate(q, 0.0)),
-                accelerations: pos.map(|q| CuJointAcceleration::from_coordinate(q, 0.0)),
-                status: CuFollowStatus::Finished,
+                positions,
+                velocities: positions.map(|q| CuJointVelocity::from_coordinate(q, 0.0)),
+                accelerations: positions.map(|q| CuJointAcceleration::from_coordinate(q, 0.0)),
+                status: CuFollowStatus::Idle,
             };
         } else {
             let zeros = self.zero_positions();
@@ -149,6 +188,32 @@ impl<
                 accelerations: zeros.map(|q| CuJointAcceleration::from_coordinate(q, 0.0)),
                 status: CuFollowStatus::ErrorEmptyTrajectory,
             };
+        }
+    }
+
+    /// Revalidates any cached `last_safe` against `env` (and workspace bounds)
+    /// before emitting it as a `Finished` hold. If `last_safe` is no longer safe
+    /// in `env`, clears it and emits a non-motion `Idle` fallback instead.
+    fn write_validated_safe_hold(
+        &mut self,
+        env: &CuCollisionEnv<'_>,
+        state: Option<&CuJointStatePayload<N>>,
+        out_setpoint: &mut CuTrajectoryFollowOutput<N>,
+    ) {
+        if let Some(pos) = self.last_safe {
+            if self.is_hold_safe(&pos, env) {
+                *out_setpoint = CuTrajectoryFollowOutput {
+                    positions: pos,
+                    velocities: pos.map(|q| CuJointVelocity::from_coordinate(q, 0.0)),
+                    accelerations: pos.map(|q| CuJointAcceleration::from_coordinate(q, 0.0)),
+                    status: CuFollowStatus::Finished,
+                };
+            } else {
+                self.last_safe = None;
+                self.write_unverified_hold(true, state, out_setpoint);
+            }
+        } else {
+            self.write_unverified_hold(false, state, out_setpoint);
         }
     }
 
@@ -182,6 +247,10 @@ impl<
                 )
             );
             if !kinds_match {
+                return Some(j as u16);
+            }
+            let max_v = joint.limits.max_velocity().si_value();
+            if !max_v.is_finite() || v.si_value().abs() > max_v {
                 return Some(j as u16);
             }
         }
@@ -243,7 +312,13 @@ impl<
         }
 
         if let Some(joint_idx) = self.check_joint_limits(sp) {
-            self.write_safe_hold(out_setpoint);
+            if self.params.require_scene && scene.is_none() {
+                let had_anchor = self.last_safe.is_some();
+                self.write_unverified_hold(had_anchor, state, out_setpoint);
+            } else {
+                let env = scene.map_or(CuCollisionEnv::EMPTY, CuPlanningScene::collision_env);
+                self.write_validated_safe_hold(&env, state, out_setpoint);
+            }
             *out_report = CuSafetyReport {
                 verdict: CuSafetyVerdict::HeldJointLimits,
                 transition: self.monitor.update(true),
@@ -271,7 +346,8 @@ impl<
         let tcp_speed = Velocity::new::<meter_per_second>(tcp_speed_mps);
 
         if self.params.require_scene && scene.is_none() {
-            self.write_safe_hold(out_setpoint);
+            let had_anchor = self.last_safe.is_some();
+            self.write_unverified_hold(had_anchor, state, out_setpoint);
             *out_report = CuSafetyReport {
                 verdict: CuSafetyVerdict::HeldMissingScene,
                 transition: self.monitor.update(true),
@@ -296,7 +372,8 @@ impl<
             self.model
                 .check_frames_with_closest(&frames, &env, &mut self.scratch_report)
         else {
-            self.write_safe_hold(out_setpoint);
+            let had_anchor = self.last_safe.is_some();
+            self.write_unverified_hold(had_anchor, state, out_setpoint);
             *out_report = CuSafetyReport {
                 verdict: CuSafetyVerdict::HeldInvalidScene,
                 transition: self.monitor.update(true),
@@ -393,7 +470,8 @@ impl<
                     &env,
                     &mut self.scratch_report,
                 ) else {
-                    self.write_safe_hold(out_setpoint);
+                    let had_anchor = self.last_safe.is_some();
+                    self.write_unverified_hold(had_anchor, state, out_setpoint);
                     *out_report = CuSafetyReport {
                         verdict: CuSafetyVerdict::HeldInvalidScene,
                         transition: self.monitor.update(true),
@@ -444,7 +522,7 @@ impl<
         let in_violation = verdict != CuSafetyVerdict::Clear;
         let transition = self.monitor.update(in_violation);
         if in_violation {
-            self.write_safe_hold(out_setpoint);
+            self.write_validated_safe_hold(&env, state, out_setpoint);
         } else {
             self.last_safe = Some(sp.positions);
             *out_setpoint = sp.clone();

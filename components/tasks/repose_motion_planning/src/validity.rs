@@ -257,8 +257,9 @@ impl<const N: usize, const M: usize> CuSceneValidity<N, M> {
     }
 }
 
-/// Joint-space L2 distance under `metric` (dimensionless, metric-scaled).
-pub fn joint_distance<const N: usize>(
+/// Squared joint-space L2 distance under `metric` (dimensionless, metric-scaled).
+#[inline]
+pub(crate) fn joint_distance_sq<const N: usize>(
     a: &[CuJointPosition; N],
     b: &[CuJointPosition; N],
     metric: CuJointMetric,
@@ -268,5 +269,14 @@ pub fn joint_distance<const N: usize>(
         let d = metric.normalized(b[j]) - metric.normalized(a[j]);
         sum += d * d;
     }
-    libm::sqrt(sum)
+    sum
+}
+
+/// Joint-space L2 distance under `metric` (dimensionless, metric-scaled).
+pub fn joint_distance<const N: usize>(
+    a: &[CuJointPosition; N],
+    b: &[CuJointPosition; N],
+    metric: CuJointMetric,
+) -> f64 {
+    libm::sqrt(joint_distance_sq(a, b, metric))
 }

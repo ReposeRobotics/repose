@@ -15,6 +15,12 @@ may be breaking.
   caches edge costs at link time, and runs Dijkstra over a fixed-capacity
   indexed binary min-heap with identical tie-breaking, RNG sequence, public API,
   and `no_std` / zero-allocation guarantees.
+- `repose-joint-rrt-star`: `CuJointRrtStar` now uses squared joint-space
+  distance pre-filtering for nearest-neighbor and rewiring neighborhood checks,
+  reuses a single-pass stack-allocated neighbor list between parent selection
+  and rewiring, and caches `parent_dist` per node so rewire cost propagation
+  runs without recomputing `joint_distance`. Public API, RNG consumption, and
+  deterministic tree construction are unchanged.
 - `repose-trajectory`: `parameterize` now advances a monotonic segment cursor
   with a stack-allocated per-segment parameter cache instead of scanning
   segments and recomputing per-joint shapes on every resampled knot, and folds

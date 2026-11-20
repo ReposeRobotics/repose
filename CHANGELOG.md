@@ -22,8 +22,10 @@ may be breaking.
 - `repose-policy-rl`: `CuBoundPolicy` (`Clamp` or `Fault`) and optional
   observation and raw-action magnitude guardrails (`max_observation_abs`,
   `observation_bound_policy`, `max_action_abs`, `action_bound_policy`) on
-  `CuPolicyParams` and `CuChunkPolicyParams`, enforcing OOD clamping or
-  inference-skipping faults after non-finite checks; and `CuJointActionReport`
+  `CuPolicyParams` and `CuChunkPolicyParams`, enforcing clamping or faults
+  after non-finite checks (observation faults skip inference, while action
+  faults reject the inferred output and publish zeros); and
+  `CuJointActionReport`
   exposed via `CuJointActionTask::last_report()` with `step_limited_mask`,
   `joint_limited_mask`, `step_limited_count`, `joint_limited_count`,
   `max_requested_delta_si`, and `is_step_limited` / `is_joint_limited` /

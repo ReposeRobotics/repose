@@ -68,6 +68,10 @@ dynamic batch dimension). Anything else is a startup error.
         "model_hash": 1234567890,        // optional FNV-1a 64 of the file; mismatch fails startup
         "decimation": 1,                 // infer every k-th cycle, hold between
         "previous_action": true,         // append last raw action → OBS = IN + ACT
+        "max_observation_abs": 10.0,     // optional positive finite bound on IN features
+        "observation_bound_policy": "clamp", // clamp (default) | fault
+        "max_action_abs": 1.0,           // optional positive finite bound on raw model outputs
+        "action_bound_policy": "clamp",  // clamp (default) | fault
     },
 ),
 (
@@ -91,11 +95,23 @@ Inputs/outputs:
   features for a fault.
 - Single-step policy: `CuPolicyObservation<IN>` → `CuPolicyObservation<OBS>`
   (exact model input, for the log) + `CuPolicyAction<ACT>` (raw output).
+  Optional `max_observation_abs` and `max_action_abs` guardrails enforce
+  symmetric magnitude bounds via `CuBoundPolicy` (`"clamp"` or `"fault"`,
+  configurable via `observation_bound_policy` and `action_bound_policy`).
+  Non-finite features or outputs always `Fault` regardless of bound policy;
+  in `clamp` mode on `CuPolicyTask`, the logged `CuPolicyObservation<OBS>`
+  records the clamped features fed to the model, while `fault` mode logs the
+  raw OOD features and skips inference.
 - Chunked policy: `CuPolicyObservation<OBS>` → `CuPolicyActionChunk<H, ACT>`
   (or publish `CuPolicyActionChunk<H, ACT>` directly from a VLA bridge).
+  Supports the same `max_observation_abs`, `observation_bound_policy`,
+  `max_action_abs`, and `action_bound_policy` (`CuBoundPolicy`) fields.
 - Action chunker: `CuPolicyActionChunk<H, ACT>` → `CuPolicyAction<ACT>`.
 - Joint/Cartesian action: `CuPolicyAction<ACT>` + `CuJointStatePayload<N>` →
-  `CuTrajectoryFollowOutput<N>` (Cartesian also emits `CuCartesianActionReport`).
+  `CuTrajectoryFollowOutput<N>` (`CuJointActionTask::last_report()` exposes a
+  `CuJointActionReport` with `step_limited_mask`, `joint_limited_mask`,
+  `step_limited_count`, `joint_limited_count`, and `max_requested_delta_si`;
+  Cartesian also emits `CuCartesianActionReport`).
   Connect it to `CuControllerTask<N>` in place of the trajectory follower.
 - Gripper action: `CuPolicyAction<ACT>` → `CuGripperCommandPayload` for
   `repose_io::CuGripperTask`.
@@ -116,6 +132,10 @@ ACT, Diffusion Policy, π0, and OpenVLA-OFT emit `H`-step chunks `[1, H, ACT]` a
     config: {
         "model": "act_policy.onnx",
         "decimation": 1,                 // 1 = infer every cycle (ACT), >1 = sparse queries
+        "max_observation_abs": 10.0,     // optional positive finite bound on OBS features
+        "observation_bound_policy": "clamp", // clamp (default) | fault
+        "max_action_abs": 1.0,           // optional positive finite bound on raw chunk outputs
+        "action_bound_policy": "clamp",  // clamp (default) | fault
     },
 ),
 (

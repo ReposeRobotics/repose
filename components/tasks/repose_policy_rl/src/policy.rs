@@ -18,6 +18,20 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
 
+/// Action taken when a finite observation or raw model output exceeds a
+/// configured bound (`max_observation_abs` or `max_action_abs`).
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Serialize, Deserialize, Reflect,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CuBoundPolicy {
+    /// Clamp out-of-range elements to `[-limit, limit]`.
+    #[default]
+    Clamp,
+    /// Reject the cycle as [`CuPolicyStatus::Fault`] with zero action output.
+    Fault,
+}
+
 /// Parameters of [`CuPolicyTask`]; the node `config:` block.
 ///
 /// ```ron
@@ -26,6 +40,10 @@ use std::path::Path;
 ///     "model_hash": 1234567890,
 ///     "decimation": 1,
 ///     "previous_action": true,
+///     "max_observation_abs": 10.0,
+///     "observation_bound_policy": "clamp",
+///     "max_action_abs": 1.0,
+///     "action_bound_policy": "clamp",
 /// }
 /// ```
 ///
@@ -60,6 +78,26 @@ pub struct CuPolicyParams<const IN: usize, const OBS: usize, const ACT: usize> {
     /// alone and `OBS == IN`.
     #[serde(default)]
     pub previous_action: bool,
+    /// Optional symmetric magnitude bound on the upstream `IN` observation
+    /// features (dimensionless; must be positive and finite when `Some`).
+    /// Checked on every usable cycle after finiteness; behavior when exceeded
+    /// is governed by `observation_bound_policy`. `None` disables the check.
+    #[serde(default)]
+    pub max_observation_abs: Option<f32>,
+    /// Policy when a finite upstream observation feature exceeds
+    /// `max_observation_abs`; defaults to `clamp`.
+    #[serde(default)]
+    pub observation_bound_policy: CuBoundPolicy,
+    /// Optional symmetric magnitude bound on raw ONNX model output elements
+    /// (dimensionless; must be positive and finite when `Some`). Behavior when
+    /// exceeded is governed by `action_bound_policy`. `None` disables the
+    /// check.
+    #[serde(default)]
+    pub max_action_abs: Option<f32>,
+    /// Policy when a finite raw model output exceeds `max_action_abs`;
+    /// defaults to `clamp`.
+    #[serde(default)]
+    pub action_bound_policy: CuBoundPolicy,
 }
 
 fn default_decimation() -> u32 {
@@ -67,21 +105,26 @@ fn default_decimation() -> u32 {
 }
 
 impl<const IN: usize, const OBS: usize, const ACT: usize> Default for CuPolicyParams<IN, OBS, ACT> {
-    /// Empty model path, no hash pin, decimation 1, no previous action.
-    /// Rejected by [`Self::validate`] until `model` is set.
+    /// Empty model path, no hash pin, decimation 1, no previous action, no
+    /// observation or action magnitude bounds. Rejected by [`Self::validate`]
+    /// until `model` is set.
     fn default() -> Self {
         Self {
             model: String::new(),
             model_hash: None,
             decimation: default_decimation(),
             previous_action: false,
+            max_observation_abs: None,
+            observation_bound_policy: CuBoundPolicy::default(),
+            max_action_abs: None,
+            action_bound_policy: CuBoundPolicy::default(),
         }
     }
 }
 
 impl<const IN: usize, const OBS: usize, const ACT: usize> CuPolicyParams<IN, OBS, ACT> {
-    /// Checks the model path, decimation, and that `OBS` is `IN + ACT` with
-    /// `previous_action` or `IN` without it.
+    /// Checks the model path, decimation, optional observation/action bounds,
+    /// and that `OBS` is `IN + ACT` with `previous_action` or `IN` without it.
     pub fn validate(&self) -> CuResult<()> {
         if self.model.is_empty() {
             return Err(CuError::from(
@@ -91,6 +134,20 @@ impl<const IN: usize, const OBS: usize, const ACT: usize> CuPolicyParams<IN, OBS
         if self.decimation == 0 {
             return Err(CuError::from(
                 "repose-policy-rl: 'decimation' must be at least 1",
+            ));
+        }
+        if let Some(limit) = self.max_observation_abs
+            && (!limit.is_finite() || limit <= 0.0)
+        {
+            return Err(CuError::from(
+                "repose-policy-rl: 'max_observation_abs' must be positive and finite",
+            ));
+        }
+        if let Some(limit) = self.max_action_abs
+            && (!limit.is_finite() || limit <= 0.0)
+        {
+            return Err(CuError::from(
+                "repose-policy-rl: 'max_action_abs' must be positive and finite",
             ));
         }
         if self.previous_action {
@@ -128,6 +185,14 @@ impl<const IN: usize, const OBS: usize, const ACT: usize> CuPolicyParams<IN, OBS
 /// - **A non-finite feature** (an observation task signals a fault by
 ///   filling its payload with `NaN`), a failed inference, or a non-finite
 ///   model output: [`CuPolicyStatus::Fault`] with zero values.
+///
+/// When `max_observation_abs` is set, finite upstream `IN` features exceeding
+/// `[-limit, limit]` are either clamped before logging and inference
+/// (`CuBoundPolicy::Clamp`) or faulted without running inference
+/// (`CuBoundPolicy::Fault`, logging the un-clamped OOD input). When
+/// `max_action_abs` is set, finite raw model outputs exceeding `[-limit, limit]`
+/// are either clamped (`CuBoundPolicy::Clamp`) or faulted
+/// (`CuBoundPolicy::Fault`).
 ///
 /// The model input is checked on every cycle, so a bad input faults a held
 /// cycle too and clears the previous action. A fault lasts until the next
@@ -241,18 +306,52 @@ impl<const IN: usize, const OBS: usize, const ACT: usize> CuTask for CuPolicyTas
 
         let mut observation = CuPolicyObservation::<OBS>::default();
         self.build_input(&features.values, &mut observation.values);
-        observation_out.set_payload(observation.clone());
 
         // Checked on every cycle, not only when inferring: a held action
         // must not outlive inputs the policy could not have acted on.
-        let input_bad = observation.values.iter().any(|value| !value.is_finite());
+        // Non-finite inputs always fault before any OOD bound clamping.
+        let non_finite_input = observation.values.iter().any(|value| !value.is_finite());
+        let mut input_bad = non_finite_input;
+        if !non_finite_input && let Some(limit) = self.params.max_observation_abs {
+            match self.params.observation_bound_policy {
+                CuBoundPolicy::Clamp => {
+                    for value in &mut observation.values[..IN] {
+                        *value = value.clamp(-limit, limit);
+                    }
+                }
+                CuBoundPolicy::Fault => {
+                    if observation.values[..IN]
+                        .iter()
+                        .any(|value| value.abs() > limit)
+                    {
+                        input_bad = true;
+                    }
+                }
+            }
+        }
+        observation_out.set_payload(observation.clone());
+
         let infer_now = self.cycle.is_multiple_of(u64::from(self.params.decimation));
         self.cycle = self.cycle.wrapping_add(1);
         let (values, status) = if infer_now {
             let mut fresh = [0.0f32; ACT];
-            let failed = input_bad
+            let mut failed = input_bad
                 || self.backend.infer(&observation.values, &mut fresh).is_err()
                 || fresh.iter().any(|value| !value.is_finite());
+            if !failed && let Some(limit) = self.params.max_action_abs {
+                match self.params.action_bound_policy {
+                    CuBoundPolicy::Clamp => {
+                        for value in &mut fresh {
+                            *value = value.clamp(-limit, limit);
+                        }
+                    }
+                    CuBoundPolicy::Fault => {
+                        if fresh.iter().any(|value| value.abs() > limit) {
+                            failed = true;
+                        }
+                    }
+                }
+            }
             if failed {
                 self.last_action = [0.0; ACT];
                 ([0.0; ACT], CuPolicyStatus::Fault)

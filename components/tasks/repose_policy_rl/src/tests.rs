@@ -803,6 +803,7 @@ fn chained_observation_chunk_policy_and_temporal_ensembler() {
         model: fixture("chunk_4_3_2.onnx"),
         decimation: 2,
         model_hash: None,
+        ..CuChunkPolicyParams::default()
     })
     .unwrap();
     let mut ensembler = CuActionChunkTask::<3, 2>::from_params(CuActionChunkParams {
@@ -849,4 +850,326 @@ fn chained_observation_chunk_policy_and_temporal_ensembler() {
     let stopped = run_cycle(Some(unready));
     assert_eq!(stopped.status, CuPolicyStatus::Idle);
     assert_eq!(stopped.values, [0.0, 0.0]);
+}
+
+// --- OOD observation and action bound guardrails ----------------------------
+
+#[test]
+fn bound_params_reject_non_positive_or_non_finite_limits_and_typos() {
+    use crate::CuBoundPolicy;
+    use crate::CuChunkPolicyParams;
+    use crate::CuChunkPolicyTask;
+
+    for bad in [
+        0.0f32,
+        -0.0,
+        -1.5,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ] {
+        assert!(
+            CuPolicyParams {
+                max_observation_abs: Some(bad),
+                ..identity_params()
+            }
+            .validate()
+            .is_err(),
+            "max_observation_abs {bad}"
+        );
+        assert!(
+            CuPolicyParams {
+                max_action_abs: Some(bad),
+                ..identity_params()
+            }
+            .validate()
+            .is_err(),
+            "max_action_abs {bad}"
+        );
+        assert!(
+            CuChunkPolicyParams {
+                model: fixture("chunk_4_3_2.onnx"),
+                max_observation_abs: Some(bad),
+                ..CuChunkPolicyParams::default()
+            }
+            .validate()
+            .is_err(),
+            "chunk max_observation_abs {bad}"
+        );
+        assert!(
+            CuChunkPolicyParams {
+                model: fixture("chunk_4_3_2.onnx"),
+                max_action_abs: Some(bad),
+                ..CuChunkPolicyParams::default()
+            }
+            .validate()
+            .is_err(),
+            "chunk max_action_abs {bad}"
+        );
+    }
+
+    // RON round-trip with explicit OOD bounds on both single-step and chunked policies.
+    let policy_ron = format!(
+        r#"#![enable(unwrap_newtypes)]
+{{
+    "model": "{}",
+    "max_observation_abs": 5.0,
+    "observation_bound_policy": "fault",
+    "max_action_abs": 1.25,
+    "action_bound_policy": "clamp",
+}}"#,
+        fixture("identity_4.onnx")
+    );
+    let cfg: ComponentConfig = ron::from_str(&policy_ron).unwrap();
+    let task = CuPolicyTask::<4, 4, 4>::new(Some(&cfg), ()).unwrap();
+    assert_eq!(task.params().max_observation_abs, Some(5.0));
+    assert_eq!(task.params().observation_bound_policy, CuBoundPolicy::Fault);
+    assert_eq!(task.params().max_action_abs, Some(1.25));
+    assert_eq!(task.params().action_bound_policy, CuBoundPolicy::Clamp);
+
+    let chunk_ron = format!(
+        r#"#![enable(unwrap_newtypes)]
+{{
+    "model": "{}",
+    "max_observation_abs": 8.0,
+    "observation_bound_policy": "clamp",
+    "max_action_abs": 2.0,
+    "action_bound_policy": "fault",
+}}"#,
+        fixture("chunk_4_3_2.onnx")
+    );
+    let chunk_cfg: ComponentConfig = ron::from_str(&chunk_ron).unwrap();
+    let chunk_task = CuChunkPolicyTask::<4, 3, 2>::new(Some(&chunk_cfg), ()).unwrap();
+    assert_eq!(chunk_task.params().max_observation_abs, Some(8.0));
+    assert_eq!(
+        chunk_task.params().observation_bound_policy,
+        CuBoundPolicy::Clamp
+    );
+    assert_eq!(chunk_task.params().max_action_abs, Some(2.0));
+    assert_eq!(
+        chunk_task.params().action_bound_policy,
+        CuBoundPolicy::Fault
+    );
+
+    // Unknown field typo rejection.
+    for typo in [
+        format!(
+            r#"#![enable(unwrap_newtypes)] {{"model": "{}", "max_observation_abss": 5.0}}"#,
+            fixture("identity_4.onnx")
+        ),
+        format!(
+            r#"#![enable(unwrap_newtypes)] {{"model": "{}", "observation_bound_polcy": "fault"}}"#,
+            fixture("identity_4.onnx")
+        ),
+        format!(
+            r#"#![enable(unwrap_newtypes)] {{"model": "{}", "max_action_abss": 1.0}}"#,
+            fixture("identity_4.onnx")
+        ),
+        format!(
+            r#"#![enable(unwrap_newtypes)] {{"model": "{}", "action_bound_polcy": "fault"}}"#,
+            fixture("identity_4.onnx")
+        ),
+    ] {
+        let cfg: ComponentConfig = ron::from_str(&typo).unwrap();
+        assert!(CuPolicyTask::<4, 4, 4>::new(Some(&cfg), ()).is_err());
+    }
+}
+
+#[test]
+fn observation_bound_clamp_clamps_logged_input_and_feeds_model() {
+    use crate::CuBoundPolicy;
+
+    let mut task = CuPolicyTask::from_params(CuPolicyParams::<4, 4, 4> {
+        max_observation_abs: Some(2.0),
+        observation_bound_policy: CuBoundPolicy::Clamp,
+        ..identity_params()
+    })
+    .unwrap();
+    let (obs, act) = run(&mut task, features([5.0, -3.5, 1.25, -2.0]));
+    assert_eq!(obs.values, [2.0, -2.0, 1.25, -2.0]);
+    assert_eq!(act.status, CuPolicyStatus::Fresh);
+    assert_eq!(act.values, [2.0, -2.0, 1.25, -2.0]);
+
+    // Non-finite features still always fault even under Clamp.
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let (_, act) = run(&mut task, features([bad, 0.5, 0.0, 0.0]));
+        assert_eq!(act.status, CuPolicyStatus::Fault, "{bad}");
+        assert_eq!(act.values, [0.0; 4]);
+    }
+}
+
+#[test]
+fn observation_bound_clamp_only_clamps_upstream_features_before_previous_action() {
+    use crate::CuBoundPolicy;
+
+    let mut task = CuPolicyTask::from_params(CuPolicyParams::<18, 24, 6> {
+        max_observation_abs: Some(1.0),
+        observation_bound_policy: CuBoundPolicy::Clamp,
+        ..linear_params()
+    })
+    .unwrap();
+    let mut input = [0.0f32; 18];
+    input[12..18].copy_from_slice(&[3.0, -3.0, 0.5, -0.5, 2.0, -2.0]);
+    // Upstream features are clamped to [-1, 1]; linear_24_6 gain is 0.5 on goal error.
+    let (obs, act) = run(&mut task, features(input));
+    assert_eq!(&obs.values[12..18], [1.0, -1.0, 0.5, -0.5, 1.0, -1.0]);
+    assert_eq!(act.status, CuPolicyStatus::Fresh);
+    assert_eq!(act.values, [0.5, -0.5, 0.25, -0.25, 0.5, -0.5]);
+
+    // Next cycle's appended previous action matches the last raw action.
+    let (obs, _) = run(&mut task, features([0.0; 18]));
+    assert_eq!(&obs.values[18..24], [0.5, -0.5, 0.25, -0.25, 0.5, -0.5]);
+}
+
+#[test]
+fn observation_bound_fault_skips_inference_and_faults_held_cycles() {
+    use crate::CuBoundPolicy;
+
+    let mut task = CuPolicyTask::from_params(CuPolicyParams::<18, 24, 6> {
+        decimation: 3,
+        max_observation_abs: Some(2.5),
+        observation_bound_policy: CuBoundPolicy::Fault,
+        ..linear_params()
+    })
+    .unwrap();
+    let mut good = [0.0f32; 18];
+    good[12..18].copy_from_slice(&[1.0; 6]);
+    let (_, act) = run(&mut task, features(good));
+    assert_eq!(act.status, CuPolicyStatus::Fresh);
+    assert_eq!(act.values, [0.5; 6]);
+
+    // Cycle 1 (held): OOD observation faults immediately, logs the raw OOD
+    // feature, and clears previous_action.
+    let mut ood = [0.0f32; 18];
+    ood[0] = 3.0;
+    let (obs, act) = run(&mut task, features(ood));
+    assert_eq!(obs.values[0], 3.0);
+    assert_eq!(act.status, CuPolicyStatus::Fault);
+    assert_eq!(act.values, [0.0; 6]);
+
+    // Cycle 2 (still before next inference): fault stays latched.
+    let (_, act) = run(&mut task, features(good));
+    assert_eq!(act.status, CuPolicyStatus::Fault);
+
+    // Cycle 3 (inference): recovers cleanly with previous_action cleared to zeros.
+    let (obs, act) = run(&mut task, features(good));
+    assert_eq!(&obs.values[18..24], [0.0; 6]);
+    assert_eq!(act.status, CuPolicyStatus::Fresh);
+    assert_eq!(act.values, [0.5; 6]);
+
+    // Also verify Fault on an inference cycle skips tract inference (using nan.onnx:
+    // if tract ran, it would produce NaN, though either way it's Fault with zeros;
+    // with identity_4.onnx, OOD input on inference cycle faults with zero action).
+    let mut id_task = CuPolicyTask::from_params(CuPolicyParams::<4, 4, 4> {
+        max_observation_abs: Some(1.0),
+        observation_bound_policy: CuBoundPolicy::Fault,
+        ..identity_params()
+    })
+    .unwrap();
+    let (obs, act) = run(&mut id_task, features([0.5, -1.5, 0.0, 0.0]));
+    assert_eq!(obs.values, [0.5, -1.5, 0.0, 0.0]);
+    assert_eq!(act.status, CuPolicyStatus::Fault);
+    assert_eq!(act.values, [0.0; 4]);
+}
+
+#[test]
+fn action_bound_clamp_and_fault_enforce_raw_model_output_limits() {
+    use crate::CuBoundPolicy;
+
+    let mut clamp_task = CuPolicyTask::from_params(CuPolicyParams::<18, 24, 6> {
+        max_action_abs: Some(0.4),
+        action_bound_policy: CuBoundPolicy::Clamp,
+        ..linear_params()
+    })
+    .unwrap();
+    let mut input = [0.0f32; 18];
+    input[12..18].copy_from_slice(&[2.0, -2.0, 0.5, -0.5, 1.0, -1.0]);
+    // Raw linear_24_6 output would be [1.0, -1.0, 0.25, -0.25, 0.5, -0.5].
+    let (_, act) = run(&mut clamp_task, features(input));
+    assert_eq!(act.status, CuPolicyStatus::Fresh);
+    assert_eq!(act.values, [0.4, -0.4, 0.25, -0.25, 0.4, -0.4]);
+
+    // Previous action fed to next cycle reflects the clamped action.
+    let (obs, _) = run(&mut clamp_task, features([0.0; 18]));
+    assert_eq!(&obs.values[18..24], [0.4, -0.4, 0.25, -0.25, 0.4, -0.4]);
+
+    // Fault mode rejects out-of-range raw model outputs and clears previous_action.
+    let mut fault_task = CuPolicyTask::from_params(CuPolicyParams::<4, 4, 4> {
+        max_action_abs: Some(0.9),
+        action_bound_policy: CuBoundPolicy::Fault,
+        ..identity_params()
+    })
+    .unwrap();
+    let (_, act) = run(&mut fault_task, features([0.5, -0.5, 0.9, 0.91]));
+    assert_eq!(act.status, CuPolicyStatus::Fault);
+    assert_eq!(act.values, [0.0; 4]);
+}
+
+#[test]
+fn chunk_policy_enforces_observation_and_action_bound_policies() {
+    use crate::CuBoundPolicy;
+    use crate::CuChunkPolicyParams;
+    use crate::CuChunkPolicyTask;
+
+    let run_chunk = |task: &mut CuChunkPolicyTask<4, 3, 2>,
+                     obs: Option<CuPolicyObservation<4>>|
+     -> crate::CuPolicyActionChunk<3, 2> {
+        let (ctx, _clock) = CuContext::new_mock_clock();
+        let msg = CuMsg::new(obs);
+        let mut out = CuMsg::default();
+        task.process(&ctx, &msg, &mut out).unwrap();
+        out.payload().unwrap().clone()
+    };
+
+    // Observation clamp + action clamp on chunk_4_3_2.onnx:
+    // obs = [10.0, 2.0, 3.0, 6.0] clamped to max_observation_abs=4.0 -> [4.0, 2.0, 3.0, 4.0].
+    // obs[0]+obs[2] = 7.0, obs[1]+obs[3] = 6.0; scales = [0.25, 0.5, 0.75]
+    // raw chunk = [[1.75, 1.5], [3.5, 3.0], [5.25, 4.5]], clamped at 3.25.
+    let mut clamp_task = CuChunkPolicyTask::<4, 3, 2>::from_params(CuChunkPolicyParams {
+        model: fixture("chunk_4_3_2.onnx"),
+        max_observation_abs: Some(4.0),
+        observation_bound_policy: CuBoundPolicy::Clamp,
+        max_action_abs: Some(3.25),
+        action_bound_policy: CuBoundPolicy::Clamp,
+        ..CuChunkPolicyParams::default()
+    })
+    .unwrap();
+    let chunk = run_chunk(&mut clamp_task, features([10.0, 2.0, 3.0, 6.0]));
+    assert_eq!(chunk.status, CuPolicyStatus::Fresh);
+    assert_eq!(chunk.values, [[1.75, 1.5], [3.25, 3.0], [3.25, 3.25]]);
+
+    // Non-finite still faults even with observation Clamp.
+    let chunk = run_chunk(&mut clamp_task, features([f32::INFINITY, 0.0, 0.0, 0.0]));
+    assert_eq!(chunk.status, CuPolicyStatus::Fault);
+    assert_eq!(chunk.values, [[0.0; 2]; 3]);
+
+    // Observation Fault mode rejects OOD input (including held decimation cycle).
+    let mut obs_fault_task = CuChunkPolicyTask::<4, 3, 2>::from_params(CuChunkPolicyParams {
+        model: fixture("chunk_4_3_2.onnx"),
+        decimation: 2,
+        max_observation_abs: Some(5.0),
+        observation_bound_policy: CuBoundPolicy::Fault,
+        ..CuChunkPolicyParams::default()
+    })
+    .unwrap();
+    assert_eq!(
+        run_chunk(&mut obs_fault_task, features([1.0, 2.0, 3.0, 4.0])).status,
+        CuPolicyStatus::Fresh
+    );
+    let held_ood = run_chunk(&mut obs_fault_task, features([1.0, 2.0, 3.0, -5.5]));
+    assert_eq!(held_ood.status, CuPolicyStatus::Fault);
+    assert_eq!(held_ood.values, [[0.0; 2]; 3]);
+
+    // Action Fault mode rejects chunk outputs exceeding max_action_abs.
+    let mut act_fault_task = CuChunkPolicyTask::<4, 3, 2>::from_params(CuChunkPolicyParams {
+        model: fixture("chunk_4_3_2.onnx"),
+        max_action_abs: Some(4.0),
+        action_bound_policy: CuBoundPolicy::Fault,
+        ..CuChunkPolicyParams::default()
+    })
+    .unwrap();
+    // obs = [1, 2, 3, 6] -> step 2 reaches [3.0, 6.0] > 4.0 -> Fault!
+    let faulted = run_chunk(&mut act_fault_task, features([1.0, 2.0, 3.0, 6.0]));
+    assert_eq!(faulted.status, CuPolicyStatus::Fault);
+    assert_eq!(faulted.values, [[0.0; 2]; 3]);
 }

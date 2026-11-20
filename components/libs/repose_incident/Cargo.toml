@@ -1,0 +1,43 @@
+[package]
+name = "repose-incident"
+description = "Black-box incident detector, root-cause attribution, timeline summarizer, and counterfactual scorecard engine for copper-rs"
+version.workspace = true
+publish.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[package.metadata.copper]
+kind = "lib"
+domains = ["diagnostics/incident", "safety"]
+environments = ["host"]
+
+[dependencies]
+bincode = { workspace = true }
+cu29 = { workspace = true }
+repose-collision = { version = "0.9.0", path = "../repose_collision", default-features = false }
+repose-controller = { version = "0.9.0", path = "../../tasks/repose_controller", default-features = false }
+repose-kinematics = { version = "0.9.0", path = "../repose_kinematics", default-features = false }
+repose-policy-rl = { version = "0.9.0", path = "../../tasks/repose_policy_rl", default-features = false }
+repose-trajectory = { version = "0.9.0", path = "../repose_trajectory", default-features = false }
+serde = { workspace = true }
+serde_json = "1.0"
+
+[features]
+default = ["std"]
+std = [
+  "cu29/std",
+  "repose-kinematics/std",
+  "repose-collision/std",
+  "repose-trajectory/std",
+  "repose-controller/std",
+  "repose-policy-rl/std",
+  "bincode/std",
+  "serde/std",
+  "serde_json/std",
+]

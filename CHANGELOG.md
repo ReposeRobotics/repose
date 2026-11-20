@@ -19,6 +19,14 @@ may be breaking.
 
 ### Added
 
+- `repose-incident`: new host (`std`) crate providing black-box per-cycle
+  incident detection (`CuIncidentDetector`, `CuCycleSample`), windowed episode
+  manifests (`CuIncidentRecord`, `CuIncidentWindow`, `CuIncidentSummary` with
+  `to_json_pretty()`), deterministic root-cause blame attribution
+  (`CuIncidentBlame`: `LearnedPolicy`, `EnvironmentChange`,
+  `TrajectoryOrCollision`, `ControllerOrTracking`, `HardwareOrBridge`), and
+  counterfactual checkpoint regression gating (`CuCheckpointDiff::compare`,
+  `passed_gate()`).
 - `repose-safety` (re-exported as `repose::safety`): added the `no_std`,
   zero-allocation [`CuSafetyShieldTask`] and [`CuSafetyReport`] real-time safety
   shield sitting between setpoint sources (`CuFollowTrajectoryTask`,

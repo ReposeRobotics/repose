@@ -244,6 +244,51 @@ impl<const N: usize> CuJointActionParams<N> {
     }
 }
 
+/// What [`CuJointActionTask`] did with the action on its most recent cycle.
+///
+/// Exposed via [`CuJointActionTask::last_report`] without changing the task's
+/// `CuTrajectoryFollowOutput<N>` output contract, so telemetry and incident
+/// triage can inspect step-clamping, joint-limit clamping, and requested delta
+/// magnitude.
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Encode, Decode, Serialize, Deserialize, Reflect,
+)]
+pub struct CuJointActionReport {
+    /// Bitmask of joints (`1u64 << j`, for `j < 64`) whose target change from
+    /// the reference position was clamped by `max_step`.
+    pub step_limited_mask: u64,
+    /// Bitmask of joints (`1u64 << j`, for `j < 64`) whose target was clamped
+    /// by the chain's joint limits.
+    pub joint_limited_mask: u64,
+    /// Number of joints clamped by `max_step` on the cycle.
+    pub step_limited_count: u16,
+    /// Number of joints clamped by the chain's joint limits on the cycle.
+    pub joint_limited_count: u16,
+    /// Maximum `|raw_target[j] - reference[j]|` across all joints on the
+    /// cycle, in each joint's SI unit (radians or meters), before `max_step`
+    /// and joint-limit clamping. Zero on hold or held-delta cycles.
+    pub max_requested_delta_si: f64,
+}
+
+impl CuJointActionReport {
+    /// Returns `true` if joint `j` was clamped by `max_step` (`false` when
+    /// `j >= 64`).
+    pub const fn is_step_limited(&self, j: usize) -> bool {
+        j < 64 && (self.step_limited_mask & (1u64 << j)) != 0
+    }
+
+    /// Returns `true` if joint `j` was clamped by the chain's joint limits
+    /// (`false` when `j >= 64`).
+    pub const fn is_joint_limited(&self, j: usize) -> bool {
+        j < 64 && (self.joint_limited_mask & (1u64 << j)) != 0
+    }
+
+    /// Returns `true` if any joint was clamped by `max_step` or joint limits.
+    pub const fn any_limited(&self) -> bool {
+        self.step_limited_count > 0 || self.joint_limited_count > 0
+    }
+}
+
 /// Turns a raw policy action into a limited joint setpoint.
 ///
 /// Inputs are `(action, state)`: a [`CuPolicyAction<ACT>`] and a
@@ -327,6 +372,8 @@ pub struct CuJointActionTask<const N: usize, const ACT: usize> {
     #[reflect(ignore)]
     previous_target: [CuJointPosition; N],
     has_target: bool,
+    #[reflect(ignore)]
+    last_report: CuJointActionReport,
 }
 
 impl<const N: usize, const ACT: usize> CuJointActionTask<N, ACT> {
@@ -349,12 +396,19 @@ impl<const N: usize, const ACT: usize> CuJointActionTask<N, ACT> {
             chain,
             previous_target: [CuJointPosition::default(); N],
             has_target: false,
+            last_report: CuJointActionReport::default(),
         })
     }
 
     /// Params this task runs with.
     pub fn params(&self) -> &CuJointActionParams<N> {
         &self.params
+    }
+
+    /// Diagnostic report of clamping and requested delta magnitude from the
+    /// most recent `process` call.
+    pub fn last_report(&self) -> &CuJointActionReport {
+        &self.last_report
     }
 
     /// Setpoint at rest: zero velocity and acceleration carrying each
@@ -418,6 +472,7 @@ impl<const N: usize, const ACT: usize> CuTask for CuJointActionTask<N, ACT> {
         output: &mut Self::Output<'o>,
     ) -> CuResult<()> {
         output.tov = input.1.tov;
+        self.last_report = CuJointActionReport::default();
         let action = input.0.payload();
         let state = input.1.payload();
 
@@ -494,6 +549,7 @@ impl<const N: usize, const ACT: usize> CuTask for CuJointActionTask<N, ACT> {
             state.positions
         };
         let mut target = [CuJointPosition::default(); N];
+        let mut report = CuJointActionReport::default();
         for j in 0..N {
             let raw = base[j].si_value() + self.params.scale[j] * f64::from(values[j]);
             if !raw.is_finite() {
@@ -501,19 +557,40 @@ impl<const N: usize, const ACT: usize> CuTask for CuJointActionTask<N, ACT> {
                 output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
                 return Ok(());
             }
+            let ref_si = reference[j].si_value();
+            let requested_delta = raw - ref_si;
+            let delta_abs = requested_delta.abs();
+            if delta_abs > report.max_requested_delta_si {
+                report.max_requested_delta_si = delta_abs;
+            }
             let stepped = match self.params.max_step {
                 Some(max_step) => {
-                    let change = (raw - reference[j].si_value()).clamp(-max_step, max_step);
-                    reference[j].si_value() + change
+                    if delta_abs > max_step {
+                        if j < 64 {
+                            report.step_limited_mask |= 1u64 << j;
+                        }
+                        report.step_limited_count = report.step_limited_count.saturating_add(1);
+                    }
+                    let change = requested_delta.clamp(-max_step, max_step);
+                    ref_si + change
                 }
                 None => raw,
             };
             target[j] = base[j].with_si_value(stepped);
         }
+        let pre_limit = target;
         if self.chain.clamp_to_limits(&mut target).is_err() {
             self.has_target = false;
             output.set_payload(hold(self, CuFollowStatus::ErrorEmptyTrajectory));
             return Ok(());
+        }
+        for j in 0..N {
+            if target[j].si_value() != pre_limit[j].si_value() {
+                if j < 64 {
+                    report.joint_limited_mask |= 1u64 << j;
+                }
+                report.joint_limited_count = report.joint_limited_count.saturating_add(1);
+            }
         }
         let mut setpoint = Self::setpoint(target, CuFollowStatus::Running);
         if let Some(period) = self.params.period {
@@ -530,6 +607,7 @@ impl<const N: usize, const ACT: usize> CuTask for CuJointActionTask<N, ACT> {
         }
         self.previous_target = target;
         self.has_target = true;
+        self.last_report = report;
         output.set_payload(setpoint);
         Ok(())
     }
@@ -1373,5 +1451,85 @@ mod tests {
         }
         assert!((q - 0.4).abs() < 1e-6, "q = {q}");
         assert_ne!(last_status, CuControllerStatus::Fault);
+    }
+
+    #[test]
+    fn last_report_records_step_and_joint_clamping_and_resets_on_holds() {
+        let mut p = params(chain2(-0.5, 0.5), CuJointActionKind::PositionDelta);
+        p.max_step = Some(0.2);
+        let mut task = CuJointActionTask::<2, 2>::from_params(p).unwrap();
+        assert_eq!(*task.last_report(), CuJointActionReport::default());
+
+        // Joint 0 requests +0.1 (neither step nor limit clamped).
+        // Joint 1 requests +0.35 from 0.30 -> delta 0.35 > max_step 0.2 (step clamped to 0.50),
+        // then 0.50 is inside [-0.5, 0.5] so not joint-limited.
+        let mut st = state::<2>(0.0);
+        st.positions = [rev(0.0), rev(0.30)];
+        let out = run_values(&mut task, [0.1, 0.35], st.clone());
+        assert_eq!(out.status, CuFollowStatus::Running);
+        let report = *task.last_report();
+        assert_eq!(report.step_limited_mask, 0b10);
+        assert_eq!(report.step_limited_count, 1);
+        assert_eq!(report.joint_limited_mask, 0);
+        assert_eq!(report.joint_limited_count, 0);
+        assert!(report.is_step_limited(1));
+        assert!(!report.is_step_limited(0));
+        assert!(!report.is_joint_limited(1));
+        assert!(report.any_limited());
+        assert!((report.max_requested_delta_si - 0.35).abs() < 1e-7);
+
+        // Held delta keeps previous target and resets last_report.
+        let out = run(
+            &mut task,
+            Some(action(0.35, CuPolicyStatus::Held)),
+            Some(st),
+        );
+        assert_eq!(out.status, CuFollowStatus::Running);
+        assert_eq!(*task.last_report(), CuJointActionReport::default());
+        assert!(!task.last_report().any_limited());
+
+        // Joint 0 at 0.45 requests +0.15 -> delta 0.15 <= max_step 0.2 (not step-limited),
+        // target 0.60 clamped to 0.50 (joint-limited).
+        // Joint 1 at 0.45 requests +0.30 -> delta 0.30 > max_step 0.2 (step-limited to 0.65),
+        // then 0.65 clamped to 0.50 (also joint-limited!).
+        let mut st2 = state::<2>(0.45);
+        st2.positions = [rev(0.45), rev(0.45)];
+        // First clear previous target via Idle so reference is measured st2 (0.45).
+        run(&mut task, None, Some(st2.clone()));
+        assert_eq!(*task.last_report(), CuJointActionReport::default());
+
+        let out = run_values(&mut task, [0.15, 0.30], st2.clone());
+        assert_eq!(out.status, CuFollowStatus::Running);
+        let report = *task.last_report();
+        assert_eq!(report.step_limited_mask, 0b10);
+        assert_eq!(report.step_limited_count, 1);
+        assert_eq!(report.joint_limited_mask, 0b11);
+        assert_eq!(report.joint_limited_count, 2);
+        assert!(!report.is_step_limited(0));
+        assert!(report.is_step_limited(1));
+        assert!(report.is_joint_limited(0));
+        assert!(report.is_joint_limited(1));
+        assert!(report.any_limited());
+        assert!((report.max_requested_delta_si - 0.30).abs() < 1e-7);
+
+        // Fault action resets last_report.
+        let out = run(
+            &mut task,
+            Some(action(0.1, CuPolicyStatus::Fault)),
+            Some(st2),
+        );
+        assert_eq!(out.status, CuFollowStatus::ErrorEmptyTrajectory);
+        assert_eq!(*task.last_report(), CuJointActionReport::default());
+
+        // CuJointActionReport round-trips serde and bincode.
+        let text = ron::to_string(&report).unwrap();
+        let back: CuJointActionReport = ron::from_str(&text).unwrap();
+        assert_eq!(back, report);
+        let mut bytes = [0u8; 256];
+        let len =
+            bincode::encode_into_slice(report, &mut bytes, bincode::config::standard()).unwrap();
+        let (decoded, _): (CuJointActionReport, usize) =
+            bincode::decode_from_slice(&bytes[..len], bincode::config::standard()).unwrap();
+        assert_eq!(decoded, report);
     }
 }

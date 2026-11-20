@@ -15,6 +15,7 @@ use crate::payload::CuPolicyAction;
 use crate::payload::CuPolicyActionChunk;
 use crate::payload::CuPolicyObservation;
 use crate::payload::CuPolicyStatus;
+use crate::policy::CuBoundPolicy;
 use bincode::Decode;
 use bincode::Encode;
 use bincode::de::Decoder;
@@ -493,6 +494,10 @@ impl<const H: usize, const ACT: usize> CuTask for CuActionChunkTask<H, ACT> {
 ///     "model": "act_policy.onnx",
 ///     "model_hash": 1234567890,
 ///     "decimation": 1,
+///     "max_observation_abs": 10.0,
+///     "observation_bound_policy": "clamp",
+///     "max_action_abs": 1.0,
+///     "action_bound_policy": "clamp",
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reflect)]
@@ -509,6 +514,22 @@ pub struct CuChunkPolicyParams {
     /// [`CuPolicyStatus::Held`] on the cycles in between. Counts cycles, not
     /// wall time, so replay is cycle-exact. Defaults to `1`.
     pub decimation: u32,
+    /// Optional symmetric magnitude bound on observation features
+    /// (dimensionless; must be positive and finite when `Some`). Checked on
+    /// every usable cycle after finiteness; behavior when exceeded is
+    /// governed by `observation_bound_policy`. `None` disables the check.
+    pub max_observation_abs: Option<f32>,
+    /// Policy when a finite observation feature exceeds `max_observation_abs`;
+    /// defaults to `clamp`.
+    pub observation_bound_policy: CuBoundPolicy,
+    /// Optional symmetric magnitude bound on raw ONNX action chunk elements
+    /// (dimensionless; must be positive and finite when `Some`). Behavior when
+    /// exceeded is governed by `action_bound_policy`. `None` disables the
+    /// check.
+    pub max_action_abs: Option<f32>,
+    /// Policy when a finite raw chunk element exceeds `max_action_abs`;
+    /// defaults to `clamp`.
+    pub action_bound_policy: CuBoundPolicy,
 }
 
 impl Default for CuChunkPolicyParams {
@@ -517,12 +538,16 @@ impl Default for CuChunkPolicyParams {
             model: String::new(),
             model_hash: None,
             decimation: default_decimation(),
+            max_observation_abs: None,
+            observation_bound_policy: CuBoundPolicy::default(),
+            max_action_abs: None,
+            action_bound_policy: CuBoundPolicy::default(),
         }
     }
 }
 
 impl CuChunkPolicyParams {
-    /// Checks the model path and decimation.
+    /// Checks the model path, decimation, and optional observation/action bounds.
     pub fn validate(&self) -> CuResult<()> {
         if self.model.is_empty() {
             return Err(CuError::from(
@@ -532,6 +557,20 @@ impl CuChunkPolicyParams {
         if self.decimation == 0 {
             return Err(CuError::from(
                 "repose-policy-rl: 'decimation' must be at least 1",
+            ));
+        }
+        if let Some(limit) = self.max_observation_abs
+            && (!limit.is_finite() || limit <= 0.0)
+        {
+            return Err(CuError::from(
+                "repose-policy-rl: 'max_observation_abs' must be positive and finite",
+            ));
+        }
+        if let Some(limit) = self.max_action_abs
+            && (!limit.is_finite() || limit <= 0.0)
+        {
+            return Err(CuError::from(
+                "repose-policy-rl: 'max_action_abs' must be positive and finite",
             ));
         }
         Ok(())
@@ -555,6 +594,13 @@ impl CuChunkPolicyParams {
 /// - **Between-query cycle**: [`CuPolicyStatus::Held`] with zero values and no
 ///   inference, telling [`CuActionChunkTask`] to keep stepping its buffered
 ///   horizon while still checking every cycle's observation for faults.
+///
+/// When `max_observation_abs` is set, finite observation elements exceeding
+/// `[-limit, limit]` are either clamped before inference
+/// (`CuBoundPolicy::Clamp`) or faulted without running inference
+/// (`CuBoundPolicy::Fault`). When `max_action_abs` is set, finite raw chunk
+/// elements exceeding `[-limit, limit]` are either clamped
+/// (`CuBoundPolicy::Clamp`) or faulted (`CuBoundPolicy::Fault`).
 #[derive(Reflect)]
 #[reflect(no_field_bounds, from_reflect = false)]
 pub struct CuChunkPolicyTask<const OBS: usize, const H: usize, const ACT: usize> {
@@ -642,18 +688,45 @@ impl<const OBS: usize, const H: usize, const ACT: usize> CuTask for CuChunkPolic
             return Ok(());
         };
 
-        let input_bad = observation.values.iter().any(|v| !v.is_finite());
+        let mut obs_values = observation.values;
+        let non_finite_input = obs_values.iter().any(|v| !v.is_finite());
+        let mut input_bad = non_finite_input;
+        if !non_finite_input && let Some(limit) = self.params.max_observation_abs {
+            match self.params.observation_bound_policy {
+                CuBoundPolicy::Clamp => {
+                    for value in &mut obs_values {
+                        *value = value.clamp(-limit, limit);
+                    }
+                }
+                CuBoundPolicy::Fault => {
+                    if obs_values.iter().any(|v| v.abs() > limit) {
+                        input_bad = true;
+                    }
+                }
+            }
+        }
         let infer_now = self.cycle.is_multiple_of(u64::from(self.params.decimation));
         self.cycle = self.cycle.wrapping_add(1);
 
         let (values, status) = if infer_now {
             let mut fresh = [[0.0f32; ACT]; H];
-            let failed = input_bad
-                || self
-                    .backend
-                    .infer_chunk(&observation.values, &mut fresh)
-                    .is_err()
+            let mut failed = input_bad
+                || self.backend.infer_chunk(&obs_values, &mut fresh).is_err()
                 || fresh.iter().flatten().any(|v| !v.is_finite());
+            if !failed && let Some(limit) = self.params.max_action_abs {
+                match self.params.action_bound_policy {
+                    CuBoundPolicy::Clamp => {
+                        for value in fresh.iter_mut().flatten() {
+                            *value = value.clamp(-limit, limit);
+                        }
+                    }
+                    CuBoundPolicy::Fault => {
+                        if fresh.iter().flatten().any(|v| v.abs() > limit) {
+                            failed = true;
+                        }
+                    }
+                }
+            }
             if failed {
                 ([[0.0; ACT]; H], CuPolicyStatus::Fault)
             } else {

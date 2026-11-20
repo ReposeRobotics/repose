@@ -111,6 +111,7 @@ mod policy;
 
 pub use action::CuJointActionKind;
 pub use action::CuJointActionParams;
+pub use action::CuJointActionReport;
 pub use action::CuJointActionTask;
 pub use cartesian::CARTESIAN_ACTION_WIDTH;
 pub use cartesian::CuCartesianActionParams;
@@ -133,6 +134,7 @@ pub use payload::CuPolicyAction;
 pub use payload::CuPolicyActionChunk;
 pub use payload::CuPolicyObservation;
 pub use payload::CuPolicyStatus;
+pub use policy::CuBoundPolicy;
 pub use policy::CuPolicyParams;
 pub use policy::CuPolicyTask;
 

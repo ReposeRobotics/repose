@@ -55,11 +55,13 @@ two worktrees.
 
 ### Benchmarks
 
-Performance-sensitive paths (FK/IK, collision checks, every planner, trajectory
-timing) have [divan](https://github.com/nvzqz/divan) benchmarks in
-`components/libs/repose/benches/`. Run them locally with `just bench`. The
-`CodSpeed` workflow runs them on every PR and reports regressions on
-[CodSpeed](https://app.codspeed.io/ReposeRobotics/repose).
+Performance-sensitive paths (FK/IK, rigid-body dynamics, collision checks, every
+planner plus pose/Cartesian/constrained planning, trajectory timing/following/mux,
+joint controller modes, and RL/VLA policy execution) have
+[divan](https://github.com/nvzqz/divan) benchmarks in
+`components/libs/repose/benches/` and `components/libs/repose_kinematics/benches/`.
+Run them locally with `just bench`. The `CodSpeed` workflow runs them on every PR
+and reports regressions on [CodSpeed](https://app.codspeed.io/ReposeRobotics/repose).
 
 ### Releases
 

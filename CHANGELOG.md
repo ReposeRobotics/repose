@@ -9,6 +9,12 @@ may be breaking.
 
 ### Changed
 
+- `repose-motion-planning`: `CuJointPrm` now filters candidate neighbours by
+  squared joint-space distance before taking `sqrt`, skips segment collision
+  checks for already-full-degree neighbours without changing candidate selection,
+  caches edge costs at link time, and runs Dijkstra over a fixed-capacity
+  indexed binary min-heap with identical tie-breaking, RNG sequence, public API,
+  and `no_std` / zero-allocation guarantees.
 - `repose-trajectory`: `parameterize` now advances a monotonic segment cursor
   with a stack-allocated per-segment parameter cache instead of scanning
   segments and recomputing per-joint shapes on every resampled knot, and folds

@@ -140,6 +140,7 @@ impl CuJointRrtStarParams {
 struct RrtNode<const N: usize> {
     q: [CuJointPosition; N],
     parent: u16,
+    parent_dist: f64,
     cost: f64,
 }
 
@@ -148,6 +149,7 @@ impl<const N: usize> Default for RrtNode<N> {
         Self {
             q: [CuJointPosition::default(); N],
             parent: u16::MAX,
+            parent_dist: 0.0,
             cost: 0.0,
         }
     }
@@ -222,8 +224,9 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
             );
 
             // Informed pruning: skip configurations that cannot possibly improve best_cost
-            let min_possible = joint_distance(&self.start, &q_new, self.params.metric)
-                + joint_distance(&q_new, &self.goal, self.params.metric);
+            let dist_to_goal = joint_distance(&q_new, &self.goal, self.params.metric);
+            let min_possible =
+                joint_distance(&self.start, &q_new, self.params.metric) + dist_to_goal;
             if min_possible >= self.best_cost {
                 continue;
             }
@@ -232,11 +235,6 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                 continue;
             }
 
-            // Choose best parent inside `rewire_radius` neighborhood
-            let mut best_parent = nearest_idx;
-            let mut best_new_cost = self.nodes[nearest_idx].cost
-                + joint_distance(&self.nodes[nearest_idx].q, &q_new, self.params.metric);
-
             if !self
                 .validity
                 .is_segment_interior_free(&self.nodes[nearest_idx].q, &q_new)
@@ -244,29 +242,62 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                 continue;
             }
 
+            // Compute nearest distance once; collect all neighbors within `rewire_radius`
+            // in a single pass using squared-distance pre-filtering.
+            let nearest_dist =
+                joint_distance(&self.nodes[nearest_idx].q, &q_new, self.params.metric);
+            let rewire_radius_sq = rewire_radius * rewire_radius;
+            let mut neighbors = [(0_u16, 0.0_f64); RRT_STAR_MAX_NODES];
+            let mut neighbor_count = 0usize;
             let mut idx = 0;
             while idx < self.node_count {
-                if idx != nearest_idx {
-                    let d = joint_distance(&self.nodes[idx].q, &q_new, self.params.metric);
-                    if d <= rewire_radius {
-                        let cand_cost = self.nodes[idx].cost + d;
-                        if cand_cost < best_new_cost
-                            && self
-                                .validity
-                                .is_segment_interior_free(&self.nodes[idx].q, &q_new)
-                        {
-                            best_parent = idx;
-                            best_new_cost = cand_cost;
+                if idx == nearest_idx {
+                    if nearest_dist <= rewire_radius && neighbor_count < neighbors.len() {
+                        neighbors[neighbor_count] = (idx as u16, nearest_dist);
+                        neighbor_count += 1;
+                    }
+                } else {
+                    let d_sq = joint_distance_sq(&self.nodes[idx].q, &q_new, self.params.metric);
+                    if d_sq <= rewire_radius_sq {
+                        let d = libm::sqrt(d_sq);
+                        if d <= rewire_radius && neighbor_count < neighbors.len() {
+                            neighbors[neighbor_count] = (idx as u16, d);
+                            neighbor_count += 1;
                         }
                     }
                 }
                 idx += 1;
             }
 
+            // Choose best parent inside `rewire_radius` neighborhood (exact index order).
+            let mut best_parent = nearest_idx;
+            let mut best_parent_dist = nearest_dist;
+            let mut best_new_cost = self.nodes[nearest_idx].cost + nearest_dist;
+
+            let mut n = 0;
+            while n < neighbor_count {
+                let (nbr_u16, d) = neighbors[n];
+                let idx = nbr_u16 as usize;
+                if idx != nearest_idx {
+                    let cand_cost = self.nodes[idx].cost + d;
+                    if cand_cost < best_new_cost
+                        && self
+                            .validity
+                            .is_segment_interior_free(&self.nodes[idx].q, &q_new)
+                    {
+                        best_parent = idx;
+                        best_parent_dist = d;
+                        best_new_cost = cand_cost;
+                    }
+                }
+                n += 1;
+            }
+
             let new_idx = self.node_count;
             self.nodes[new_idx] = RrtNode {
                 q: q_new,
                 parent: best_parent as u16,
+                parent_dist: best_parent_dist,
                 cost: best_new_cost,
             };
             self.node_count += 1;
@@ -274,23 +305,23 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
             // Rewire neighbors through `new_idx` if cheaper. Skipping ancestors of
             // `new_idx` keeps the parent links acyclic.
             let mut rewired = false;
-            let mut nbr = 0;
-            while nbr < new_idx {
-                if nbr != best_parent {
-                    let d = joint_distance(&q_new, &self.nodes[nbr].q, self.params.metric);
-                    if d <= rewire_radius
-                        && best_new_cost + d < self.nodes[nbr].cost
-                        && !self.is_ancestor_of(nbr, new_idx)
-                        && self
-                            .validity
-                            .is_segment_interior_free(&q_new, &self.nodes[nbr].q)
-                    {
-                        self.nodes[nbr].parent = new_idx as u16;
-                        self.nodes[nbr].cost = best_new_cost + d;
-                        rewired = true;
-                    }
+            let mut n = 0;
+            while n < neighbor_count {
+                let (nbr_u16, d) = neighbors[n];
+                let nbr = nbr_u16 as usize;
+                if nbr != best_parent
+                    && best_new_cost + d < self.nodes[nbr].cost
+                    && !self.is_ancestor_of(nbr, new_idx)
+                    && self
+                        .validity
+                        .is_segment_interior_free(&q_new, &self.nodes[nbr].q)
+                {
+                    self.nodes[nbr].parent = new_idx as u16;
+                    self.nodes[nbr].parent_dist = d;
+                    self.nodes[nbr].cost = best_new_cost + d;
+                    rewired = true;
                 }
-                nbr += 1;
+                n += 1;
             }
 
             // Propagate rewired costs to descendants so tree costs stay consistent.
@@ -303,12 +334,7 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                         let p = self.nodes[i].parent;
                         if p != u16::MAX {
                             let pu = p as usize;
-                            let c = self.nodes[pu].cost
-                                + joint_distance(
-                                    &self.nodes[pu].q,
-                                    &self.nodes[i].q,
-                                    self.params.metric,
-                                );
+                            let c = self.nodes[pu].cost + self.nodes[i].parent_dist;
                             if c < self.nodes[i].cost - 1e-12 {
                                 self.nodes[i].cost = c;
                                 changed = true;
@@ -329,13 +355,13 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
             }
 
             // Try connecting `new_idx` to `goal` if within `goal_threshold` and capacity allows
-            let dist_to_goal = joint_distance(&q_new, &self.goal, self.params.metric);
             if dist_to_goal <= goal_threshold
                 && best_new_cost + dist_to_goal < self.best_cost
                 && self.validity.is_segment_interior_free(&q_new, &self.goal)
             {
                 if let Some(g_idx) = self.goal_node_idx {
                     self.nodes[g_idx].parent = new_idx as u16;
+                    self.nodes[g_idx].parent_dist = dist_to_goal;
                     self.nodes[g_idx].cost = best_new_cost + dist_to_goal;
                     self.best_cost = best_new_cost + dist_to_goal;
                 } else if self.node_count < cap {
@@ -343,6 +369,7 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
                     self.nodes[g_idx] = RrtNode {
                         q: self.goal,
                         parent: new_idx as u16,
+                        parent_dist: dist_to_goal,
                         cost: best_new_cost + dist_to_goal,
                     };
                     self.node_count += 1;
@@ -526,14 +553,14 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
 
     fn nearest_node(&self, q_target: &[CuJointPosition; N]) -> usize {
         let mut best_idx = 0;
-        let mut best_dist = f64::INFINITY;
+        let mut best_dist_sq = f64::INFINITY;
         let mut i = 0;
         while i < self.node_count {
             // Do not expand out of the goal node itself
             if Some(i) != self.goal_node_idx {
-                let d = joint_distance(&self.nodes[i].q, q_target, self.params.metric);
-                if d < best_dist {
-                    best_dist = d;
+                let d_sq = joint_distance_sq(&self.nodes[i].q, q_target, self.params.metric);
+                if d_sq < best_dist_sq {
+                    best_dist_sq = d_sq;
                     best_idx = i;
                 }
             }
@@ -541,6 +568,21 @@ impl<const N: usize, const M: usize> CuJointRrtStar<N, M> {
         }
         best_idx
     }
+}
+
+fn joint_distance_sq<const N: usize>(
+    a: &[CuJointPosition; N],
+    b: &[CuJointPosition; N],
+    metric: CuJointMetric,
+) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut j = 0;
+    while j < N {
+        let d = metric.normalized(b[j]) - metric.normalized(a[j]);
+        sum += d * d;
+        j += 1;
+    }
+    sum
 }
 
 fn steer<const N: usize>(
@@ -616,6 +658,7 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointRrtStar<N, 
         self.nodes[0] = RrtNode {
             q: self.start,
             parent: u16::MAX,
+            parent_dist: 0.0,
             cost: 0.0,
         };
         self.node_count = 1;
@@ -630,6 +673,7 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointRrtStar<N, 
             self.nodes[1] = RrtNode {
                 q: self.goal,
                 parent: 0,
+                parent_dist: self.straight_line_cost,
                 cost: self.straight_line_cost,
             };
             self.node_count = 2;
@@ -1180,6 +1224,202 @@ mod tests {
         assert_eq!(path_after.waypoints, path_before.waypoints);
         assert_eq!(path_after.len, path_before.len);
         assert_eq!(path_after.cost, path_before.cost);
+    }
+
+    #[test]
+    fn test_joint_distance_sq_matches_joint_distance_with_metric_and_fixed() {
+        let a = [
+            CuJointPosition::Revolute(Angle64::new::<radian>(0.4)),
+            CuJointPosition::Prismatic(Length::new::<meter>(0.15)),
+            CuJointPosition::Fixed,
+            CuJointPosition::Revolute(Angle64::new::<radian>(-0.3)),
+        ];
+        let b = [
+            CuJointPosition::Revolute(Angle64::new::<radian>(-0.8)),
+            CuJointPosition::Prismatic(Length::new::<meter>(0.65)),
+            CuJointPosition::Fixed,
+            CuJointPosition::Revolute(Angle64::new::<radian>(0.9)),
+        ];
+
+        for metric in [
+            CuJointMetric::default(),
+            CuJointMetric {
+                angular_scale: Angle64::new::<radian>(2.5),
+                linear_scale: Length::new::<meter>(0.25),
+            },
+        ] {
+            let d_sq = joint_distance_sq(&a, &b, metric);
+            let d = joint_distance(&a, &b, metric);
+            assert_eq!(libm::sqrt(d_sq).to_bits(), d.to_bits());
+            assert!((d_sq - d * d).abs() < 1e-12);
+            assert_eq!(d_sq, joint_distance_sq(&b, &a, metric));
+            assert_eq!(joint_distance_sq(&a, &a, metric), 0.0);
+
+            // Fixed joint contributes zero regardless of metric scaling.
+            let a_3 = [a[0], a[1], a[3]];
+            let b_3 = [b[0], b[1], b[3]];
+            assert_eq!(d_sq, joint_distance_sq(&a_3, &b_3, metric));
+        }
+    }
+
+    #[test]
+    fn test_nearest_node_uses_squared_distance_and_skips_goal() {
+        let mut planner = CuJointRrtStar::new(
+            igus_rebel_chain(),
+            igus_rebel_collision_model(),
+            CuJointRrtStarParams {
+                metric: CuJointMetric {
+                    angular_scale: Angle64::new::<radian>(0.5),
+                    linear_scale: Length::new::<meter>(1.0),
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        planner.nodes[0].q = detour_rad([0.0, 0.7, -0.2, 0.0, 0.0, 0.0]);
+        planner.nodes[1].q = detour_rad([0.3, 0.7, -0.2, 0.0, 0.0, 0.0]);
+        planner.nodes[2].q = detour_rad([0.31, 0.7, -0.2, 0.0, 0.0, 0.0]);
+        planner.nodes[3].q = detour_rad([-0.5, 0.7, -0.2, 0.0, 0.0, 0.0]);
+        planner.node_count = 4;
+        planner.goal_node_idx = Some(1);
+
+        let target = detour_rad([0.3, 0.7, -0.2, 0.0, 0.0, 0.0]);
+        // Node 1 is exact match but marked as goal_node_idx, so node 2 must win.
+        assert_eq!(planner.nearest_node(&target), 2);
+    }
+
+    #[test]
+    fn test_single_pass_neighborhood_parent_selection_and_rewire_propagation() {
+        let metric = CuJointMetric::default();
+        let params = CuJointRrtStarParams {
+            step_size: 0.5,
+            goal_bias: 1.0,
+            goal_threshold: 0.05,
+            rewire_radius: 0.7,
+            max_nodes: 32,
+            metric,
+            ..Default::default()
+        };
+        let mut planner =
+            CuJointRrtStar::new(igus_rebel_chain(), igus_rebel_collision_model(), params).unwrap();
+
+        let pose = |j0: f64, j5: f64| detour_rad([j0, 0.7, -0.2, 0.0, 0.0, j5]);
+        let req = CuJointPlanRequest {
+            start: pose(0.0, 0.0),
+            goal: pose(0.0, 0.9),
+            ..Default::default()
+        };
+        planner.begin(&req, 1).unwrap();
+        // Reset direct-line connection so we can inspect a single RRT* grow(1) step.
+        planner.goal_node_idx = None;
+        planner.best_cost = f64::INFINITY;
+        planner.status = CuPlanStatus::Searching;
+
+        let d25 = joint_distance(&pose(0.2, 0.7), &pose(0.0, 1.4), metric);
+        let cost5 = 2.0 + d25;
+        let cost4 = cost5 + 0.4;
+        let cost3 = cost4 + 0.4;
+
+        // Place child indices (3, 4) before their parent (5) so cost propagation
+        // must execute multiple passes using cached `parent_dist`.
+        planner.nodes[0] = RrtNode {
+            q: pose(0.0, 0.0),
+            parent: u16::MAX,
+            parent_dist: 0.0,
+            cost: 0.0,
+        };
+        planner.nodes[1] = RrtNode {
+            q: pose(0.0, 0.4),
+            parent: 0,
+            parent_dist: 0.4,
+            cost: 0.4,
+        };
+        planner.nodes[2] = RrtNode {
+            q: pose(0.2, 0.7),
+            parent: 0,
+            parent_dist: 2.0,
+            cost: 2.0,
+        };
+        planner.nodes[3] = RrtNode {
+            q: pose(0.0, 2.2),
+            parent: 4,
+            parent_dist: 0.4,
+            cost: cost3,
+        };
+        planner.nodes[4] = RrtNode {
+            q: pose(0.0, 1.8),
+            parent: 5,
+            parent_dist: 0.4,
+            cost: cost4,
+        };
+        planner.nodes[5] = RrtNode {
+            q: pose(0.0, 1.4),
+            parent: 2,
+            parent_dist: d25,
+            cost: cost5,
+        };
+        planner.node_count = 6;
+
+        planner.grow(1);
+
+        // Node 2 was nearest to goal (0.0, 0.9), but node 1 (dist 0.5 <= rewire_radius 0.7)
+        // has lower cost (0.9 vs ~2.283) and must be selected as best_parent.
+        // Because `q_new` reached `goal`, node 7 is also attached as `goal_node_idx`.
+        assert_eq!(planner.node_count, 8);
+        let new_idx = 6;
+        assert_eq!(planner.nodes[new_idx].parent, 1);
+        assert!((planner.nodes[new_idx].parent_dist - 0.5).abs() < 1e-12);
+        assert!((planner.nodes[new_idx].cost - 0.9).abs() < 1e-12);
+        assert_eq!(planner.goal_node_idx, Some(7));
+        assert_eq!(planner.nodes[7].parent, new_idx as u16);
+        assert_eq!(planner.nodes[7].parent_dist, 0.0);
+        assert!((planner.nodes[7].cost - 0.9).abs() < 1e-12);
+
+        // Node 5 (within rewire_radius 0.7) is rewired through node 6, updating parent_dist.
+        assert_eq!(planner.nodes[5].parent, new_idx as u16);
+        assert!((planner.nodes[5].parent_dist - 0.5).abs() < 1e-12);
+        assert!((planner.nodes[5].cost - 1.4).abs() < 1e-12);
+
+        // Multi-level descendants outside rewire_radius propagate costs via cached parent_dist.
+        assert_eq!(planner.nodes[4].parent, 5);
+        assert!((planner.nodes[4].cost - 1.8).abs() < 1e-12);
+        assert_eq!(planner.nodes[3].parent, 4);
+        assert!((planner.nodes[3].cost - 2.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_tree_parent_dist_and_cost_invariants_after_obstructed_planning() {
+        let mut planner = CuJointRrtStar::new(
+            igus_rebel_chain(),
+            igus_rebel_collision_model(),
+            CuJointRrtStarParams::default(),
+        )
+        .unwrap();
+        let (status, _) = drive(&mut planner, &obstructed_request(), 7);
+        assert!(status.has_path());
+        let metric = planner.params().metric;
+
+        for i in 0..planner.node_count {
+            let node = planner.nodes[i];
+            if node.parent == u16::MAX {
+                assert_eq!(node.parent_dist, 0.0);
+                assert_eq!(node.cost, 0.0);
+            } else {
+                let p = node.parent as usize;
+                let expected_dist = joint_distance(&planner.nodes[p].q, &node.q, metric);
+                assert!(
+                    (node.parent_dist - expected_dist).abs() < 1e-12,
+                    "node {i}: parent_dist={} expected={expected_dist}",
+                    node.parent_dist
+                );
+                let expected_cost = planner.nodes[p].cost + node.parent_dist;
+                assert!(
+                    (node.cost - expected_cost).abs() < 1e-10,
+                    "node {i}: cost={} expected={expected_cost}",
+                    node.cost
+                );
+            }
+        }
     }
 }
 

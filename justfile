@@ -48,8 +48,8 @@ examples:
 # Build every library crate except the simulator for bare-metal targets (no OS, `core` + `alloc` only):
 # 64-bit Arm and Cortex-M. Guards the `no_std` surface that a qualified toolchain (Ferrocene) would build.
 bare-metal:
-    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --target aarch64-unknown-none
-    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --target thumbv7em-none-eabihf
+    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --exclude repose-incident --target aarch64-unknown-none
+    cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --exclude repose-incident --target thumbv7em-none-eabihf
 
 # Run the divan benchmarks (kinematics, dynamics, collision, planning, trajectory, controller, policy-rl); CI runs them under CodSpeed.
 bench:
@@ -71,6 +71,7 @@ fuzz-ik *args:
 api-check:
     cargo public-api -p repose-kinematics
     cargo public-api -p repose-collision
+    cargo public-api -p repose-incident
     cargo public-api -p repose-robot-description
     cargo public-api -p repose-trajectory
     cargo public-api -p repose-controller
@@ -118,6 +119,7 @@ release level *args:
 release-dry-run:
     cargo publish --dry-run -p repose-kinematics
     cargo publish --dry-run -p repose-collision
+    cargo publish --dry-run -p repose-incident
     cargo publish --dry-run -p repose-robot-description
     cargo publish --dry-run -p repose-trajectory
     cargo publish --dry-run -p repose-controller

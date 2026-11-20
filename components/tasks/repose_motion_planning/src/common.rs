@@ -78,16 +78,6 @@ pub(crate) fn steer<const N: usize>(
     })
 }
 
-/// Length of a configuration sequence under `metric`.
-pub(crate) fn path_length<const N: usize>(
-    path: &[[CuJointPosition; N]],
-    metric: CuJointMetric,
-) -> f64 {
-    path.windows(2)
-        .map(|w| joint_distance(&w[0], &w[1], metric))
-        .sum()
-}
-
 /// Greedy line-of-sight shortcut of `raw` (start to goal) into `out`: from
 /// each anchor jump to the farthest later configuration with a free segment.
 /// Sets `len` and `cost`; returns `false` when the result still exceeds

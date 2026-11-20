@@ -20,7 +20,6 @@ use crate::CuPlannerKind;
 use crate::MAX_WAYPOINTS;
 use crate::common::check_endpoints;
 use crate::common::length_quality;
-use crate::common::path_length;
 use crate::common::write_header;
 use crate::validity::CuSceneValidity;
 use crate::validity::joint_distance;
@@ -125,6 +124,10 @@ pub struct CuJointStomp<const N: usize, const M: usize = N> {
     params: CuJointStompParams,
     path: [[f64; N]; MAX_WAYPOINTS],
     kinds: [CuJointPosition; N],
+    scales: [f64; N],
+    lo: [f64; N],
+    hi: [f64; N],
+    is_fixed: [bool; N],
     best: [[CuJointPosition; N]; MAX_WAYPOINTS],
     count: usize,
     best_cost: f64,
@@ -142,12 +145,21 @@ fn normal(rng: &mut CuRng) -> f64 {
 
 /// In-place `[1/4, 1/2, 1/4]` smoothing along the path, endpoints fixed at zero.
 fn smooth<const N: usize>(values: &mut [[f64; N]], count: usize) {
-    let copy: [[f64; N]; MAX_WAYPOINTS] =
-        core::array::from_fn(|i| if i < count { values[i] } else { [0.0; N] });
-    for i in 1..count - 1 {
-        for j in 0..N {
-            values[i][j] = 0.25 * copy[i - 1][j] + 0.5 * copy[i][j] + 0.25 * copy[i + 1][j];
+    if count < 3 {
+        if count >= 1 {
+            values[0] = [0.0; N];
+            values[count - 1] = [0.0; N];
         }
+        return;
+    }
+    let mut prev = values[0];
+    for i in 1..count - 1 {
+        let curr = values[i];
+        let next = values[i + 1];
+        for j in 0..N {
+            values[i][j] = 0.25 * prev[j] + 0.5 * curr[j] + 0.25 * next[j];
+        }
+        prev = curr;
     }
     values[0] = [0.0; N];
     values[count - 1] = [0.0; N];
@@ -173,6 +185,10 @@ impl<const N: usize, const M: usize> CuJointStomp<N, M> {
             params,
             path: [[0.0; N]; MAX_WAYPOINTS],
             kinds: [CuJointPosition::default(); N],
+            scales: [1.0; N],
+            lo: [0.0; N],
+            hi: [0.0; N],
+            is_fixed: [false; N],
             best: [[CuJointPosition::default(); N]; MAX_WAYPOINTS],
             count: 0,
             best_cost: f64::INFINITY,
@@ -188,82 +204,104 @@ impl<const N: usize, const M: usize> CuJointStomp<N, M> {
         self.iterations
     }
 
-    fn scale(&self, j: usize) -> f64 {
-        self.params.metric.scale(self.kinds[j])
-    }
-
     fn configuration(&self, x: &[f64; N]) -> [CuJointPosition; N] {
-        core::array::from_fn(|j| self.kinds[j].with_si_value(x[j] * self.scale(j)))
+        core::array::from_fn(|j| self.kinds[j].with_si_value(x[j] * self.scales[j]))
     }
 
-    fn clamp(&self, x: &mut [f64; N]) {
-        for (j, value) in x.iter_mut().enumerate() {
-            if matches!(self.kinds[j], CuJointPosition::Fixed) {
-                *value = 0.0;
-                continue;
-            }
-            let limits = self.validity.chain().joints()[j].limits;
-            let lo = limits.lower().si_value() / self.scale(j);
-            let hi = limits.upper().si_value() / self.scale(j);
-            *value = value.clamp(lo, hi);
+    fn obstacle_cost(&self, x: &[f64; N], eps: f64, obstacle_weight: f64) -> f64 {
+        if obstacle_weight == 0.0 {
+            return 0.0;
         }
-    }
-
-    fn obstacle_cost(&self, x: &[f64; N]) -> f64 {
-        let eps = self.params.clearance.get::<meter>();
         match self.validity.clearance(&self.configuration(x)) {
             Some(c) if c >= eps => 0.0,
-            Some(c) => self.params.obstacle_weight * (eps - c) * (eps - c) / eps,
-            None => self.params.obstacle_weight * eps,
+            Some(c) => obstacle_weight * (eps - c) * (eps - c) / eps,
+            None => obstacle_weight * eps,
         }
+    }
+
+    fn path_cost(&self) -> f64 {
+        let mut total = 0.0_f64;
+        for w in self.path[..self.count].windows(2) {
+            let mut sum = 0.0_f64;
+            for ((&a, &b), &fixed) in w[0].iter().zip(&w[1]).zip(&self.is_fixed) {
+                if !fixed {
+                    let d = b - a;
+                    sum += d * d;
+                }
+            }
+            total += libm::sqrt(sum);
+        }
+        total
     }
 
     fn record_if_better(&mut self) {
-        let mut q = [[CuJointPosition::default(); N]; MAX_WAYPOINTS];
-        for (slot, x) in q.iter_mut().zip(&self.path[..self.count]) {
-            *slot = self.configuration(x);
-        }
-        let free = (1..self.count - 1).all(|i| self.validity.is_configuration_free(&q[i]))
-            && (0..self.count - 1)
-                .all(|i| self.validity.is_segment_interior_free(&q[i], &q[i + 1]));
-        if !free {
+        if self.count < 2 {
             return;
         }
-        let cost = path_length(&q[..self.count], self.params.metric);
-        if cost < self.best_cost {
-            self.best_cost = cost;
-            self.best = q;
+        let cost = self.path_cost();
+        if !cost.is_finite() || cost >= self.best_cost {
+            return;
         }
+        let mut q = [[CuJointPosition::default(); N]; MAX_WAYPOINTS];
+        q[0] = self.configuration(&self.path[0]);
+        for (slot, x) in q[1..self.count - 1]
+            .iter_mut()
+            .zip(&self.path[1..self.count - 1])
+        {
+            let qi = self.configuration(x);
+            if !self.validity.is_configuration_free(&qi) {
+                return;
+            }
+            *slot = qi;
+        }
+        q[self.count - 1] = self.configuration(&self.path[self.count - 1]);
+        if !(0..self.count - 1).all(|i| self.validity.is_segment_interior_free(&q[i], &q[i + 1])) {
+            return;
+        }
+        self.best_cost = cost;
+        self.best[..self.count].copy_from_slice(&q[..self.count]);
     }
 
     // Rollout, waypoint and joint indices address several parallel arrays;
     // explicit indices read clearer than zipped iterators here.
     #[allow(clippy::needless_range_loop)]
     fn iterate(&mut self) {
-        let k = self.params.rollouts as usize;
         let count = self.count;
+        if count < 3 {
+            return;
+        }
+        let k = self.params.rollouts as usize;
+        let noise_scale = self.params.noise;
+        let sensitivity = self.params.sensitivity;
+        let smoothness_weight = self.params.smoothness_weight;
+        let obstacle_weight = self.params.obstacle_weight;
+        let eps = self.params.clearance.get::<meter>();
         let mut noise = [[[0.0_f64; N]; MAX_WAYPOINTS]; STOMP_MAX_ROLLOUTS];
         let mut costs = [[0.0_f64; MAX_WAYPOINTS]; STOMP_MAX_ROLLOUTS];
         for r in 0..k {
             for i in 1..count - 1 {
                 for j in 0..N {
-                    noise[r][i][j] = self.params.noise * normal(&mut self.rng);
+                    noise[r][i][j] = noise_scale * normal(&mut self.rng);
                 }
             }
             smooth(&mut noise[r], count);
             for i in 1..count - 1 {
                 let mut x = self.path[i];
                 for j in 0..N {
-                    x[j] += noise[r][i][j];
+                    x[j] = if self.is_fixed[j] {
+                        0.0
+                    } else {
+                        (x[j] + noise[r][i][j]).clamp(self.lo[j], self.hi[j])
+                    };
                 }
-                self.clamp(&mut x);
                 let mut acceleration = 0.0;
                 for j in 0..N {
                     let a = (self.path[i - 1][j] + noise[r][i - 1][j]) - 2.0 * x[j]
                         + (self.path[i + 1][j] + noise[r][i + 1][j]);
                     acceleration += a * a;
                 }
-                costs[r][i] = self.obstacle_cost(&x) + self.params.smoothness_weight * acceleration;
+                costs[r][i] =
+                    self.obstacle_cost(&x, eps, obstacle_weight) + smoothness_weight * acceleration;
             }
         }
         let mut update = [[0.0_f64; N]; MAX_WAYPOINTS];
@@ -275,23 +313,26 @@ impl<const N: usize, const M: usize> CuJointStomp<N, M> {
             let mut weights = [0.0_f64; STOMP_MAX_ROLLOUTS];
             let mut total = 0.0;
             for r in 0..k {
-                weights[r] = libm::exp(-self.params.sensitivity * (costs[r][i] - lo) / span);
+                weights[r] = libm::exp(-sensitivity * (costs[r][i] - lo) / span);
                 total += weights[r];
             }
             for r in 0..k {
+                let weight = weights[r] / total;
                 for j in 0..N {
-                    update[i][j] += weights[r] / total * noise[r][i][j];
+                    update[i][j] += weight * noise[r][i][j];
                 }
             }
         }
         smooth(&mut update, count);
         for i in 1..count - 1 {
-            let mut x = self.path[i];
+            let slot = &mut self.path[i];
             for j in 0..N {
-                x[j] += update[i][j];
+                slot[j] = if self.is_fixed[j] {
+                    0.0
+                } else {
+                    (slot[j] + update[i][j]).clamp(self.lo[j], self.hi[j])
+                };
             }
-            self.clamp(&mut x);
-            self.path[i] = x;
         }
     }
 }
@@ -322,12 +363,29 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointStomp<N, M>
             return Ok(self.status);
         }
         let last = (self.count - 1) as f64;
-        for i in 0..self.count {
-            let t = i as f64 / last;
-            for j in 0..N {
-                let a = self.params.metric.normalized(request.start[j]);
-                let b = self.params.metric.normalized(request.goal[j]);
-                self.path[i][j] = a + t * (b - a);
+        let joints = self.validity.chain().joints();
+        for (j, spec) in joints.iter().enumerate() {
+            let fixed = matches!(self.kinds[j], CuJointPosition::Fixed);
+            let scale = self.params.metric.scale(self.kinds[j]);
+            self.is_fixed[j] = fixed;
+            self.scales[j] = scale;
+            if fixed {
+                self.lo[j] = 0.0;
+                self.hi[j] = 0.0;
+                for row in &mut self.path[..self.count] {
+                    row[j] = 0.0;
+                }
+            } else {
+                let limits = spec.limits;
+                self.lo[j] = limits.lower().si_value() / scale;
+                self.hi[j] = limits.upper().si_value() / scale;
+                let a = request.start[j].si_value() / scale;
+                let b = request.goal[j].si_value() / scale;
+                let delta = b - a;
+                for (i, row) in self.path[..self.count].iter_mut().enumerate() {
+                    let t = i as f64 / last;
+                    row[j] = a + t * delta;
+                }
             }
         }
         // A free straight line is already the shortest path.
@@ -392,3 +450,191 @@ impl<const N: usize, const M: usize> CuJointPlanner<N, M> for CuJointStomp<N, M>
 }
 
 crate::impl_planner_type_path!(CuJointStomp, "repose_motion_planning::CuJointStomp");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cu29::units::si::angle::radian;
+    use cu29::units::si::f64::Angle;
+    use cu29::units::si::f64::Velocity;
+    use cu29::units::si::velocity::meter_per_second;
+    use repose_collision::CuCollisionModelParams;
+    use repose_collision::CuCollisionShape;
+    use repose_collision::CuLinkShape;
+    use repose_collision::CuSphere;
+    use repose_kinematics::CuJointAxis;
+    use repose_kinematics::CuJointLimits;
+    use repose_kinematics::CuJointSpec;
+    use repose_kinematics::CuJointType;
+
+    fn m(v: f64) -> Length {
+        Length::new::<meter>(v)
+    }
+
+    fn gantry_with_fixed() -> (CuKinematicChain<4>, CuRobotCollisionModel<4, 1>) {
+        let limits =
+            CuJointLimits::prismatic(m(-1.0), m(1.0), Velocity::new::<meter_per_second>(1.0));
+        let origin = [m(0.0); 3];
+        let rpy = [Angle::new::<radian>(0.0); 3];
+        let chain = CuKinematicChain::new([
+            CuJointSpec::prismatic(origin, rpy, CuJointAxis::PosX, limits),
+            CuJointSpec::prismatic(origin, rpy, CuJointAxis::PosY, limits),
+            CuJointSpec::prismatic(origin, rpy, CuJointAxis::PosZ, limits),
+            CuJointSpec {
+                joint_type: CuJointType::Fixed,
+                origin_translation: origin,
+                origin_rpy: rpy,
+                axis: CuJointAxis::PosZ,
+                limits: CuJointLimits::Fixed,
+            },
+        ]);
+        let sphere = CuCollisionShape::Sphere(CuSphere::new([m(0.0); 3], m(0.02)).unwrap());
+        let model = CuRobotCollisionModel::new(
+            &[CuLinkShape::new(sphere, Some(2))],
+            CuCollisionModelParams {
+                safety_margin: m(0.0),
+                skip_adjacent_links: false,
+            },
+        )
+        .unwrap();
+        (chain, model)
+    }
+
+    fn cfg(x: f64, y: f64, z: f64) -> [CuJointPosition; 4] {
+        [
+            m(x).into(),
+            m(y).into(),
+            m(z).into(),
+            CuJointPosition::Fixed,
+        ]
+    }
+
+    #[test]
+    fn test_record_if_better_skips_non_improving_and_rejects_colliding() {
+        let (chain, model) = gantry_with_fixed();
+        let params = CuJointStompParams {
+            waypoints: 5,
+            ..Default::default()
+        };
+        let mut planner = CuJointStomp::new(chain, model, params).unwrap();
+        let mut req = CuJointPlanRequest {
+            start: cfg(-0.3, 0.0, 0.0),
+            goal: cfg(0.3, 0.0, 0.0),
+            ..Default::default()
+        };
+        assert_eq!(planner.begin(&req, 7).unwrap(), CuPlanStatus::Converged);
+        let initial_cost = planner.best_cost;
+        let initial_best = planner.best;
+        assert!(libm::fabs(initial_cost - 0.6) < 1e-12);
+
+        // Worse (longer) path must not overwrite `best`.
+        planner.path[2] = [0.0, 0.25, 0.0, 0.0];
+        planner.record_if_better();
+        assert_eq!(planner.best_cost, initial_cost);
+        assert_eq!(planner.best[..5], initial_best[..5]);
+
+        // Equal-cost path must not overwrite `best`.
+        planner.path[2] = [0.05, 0.0, 0.0, 0.0];
+        planner.record_if_better();
+        assert_eq!(planner.best_cost, initial_cost);
+        assert_eq!(planner.best[..5], initial_best[..5]);
+
+        // Non-finite path cost must be ignored safely.
+        planner.path[2] = [0.0, f64::NAN, 0.0, 0.0];
+        planner.record_if_better();
+        assert_eq!(planner.best_cost, initial_cost);
+        assert_eq!(planner.best[..5], initial_best[..5]);
+
+        // Colliding lower-cost path must still be rejected.
+        let obstacle = CuCollisionShape::Sphere(CuSphere::new([m(0.0); 3], m(0.1)).unwrap());
+        req.scene.add_obstacle(obstacle, None).unwrap();
+        assert_eq!(planner.begin(&req, 7).unwrap(), CuPlanStatus::Searching);
+        planner.best_cost = 10.0;
+        let sentinel = cfg(0.77, -0.88, 0.99);
+        planner.best[0] = sentinel;
+        planner.record_if_better();
+        assert_eq!(planner.best_cost, 10.0);
+        assert_eq!(planner.best[0], sentinel);
+
+        // Free detour cheaper than 10.0 is accepted and only writes `..count`.
+        planner.best[planner.count] = sentinel;
+        planner.path[1] = [-0.15, 0.2, 0.0, 0.0];
+        planner.path[2] = [0.0, 0.25, 0.0, 0.0];
+        planner.path[3] = [0.15, 0.2, 0.0, 0.0];
+        planner.record_if_better();
+        assert!(planner.best_cost < 1.0);
+        assert_eq!(planner.best[2], cfg(0.0, 0.25, 0.0));
+        assert_eq!(planner.best[planner.count], sentinel);
+    }
+
+    #[test]
+    fn test_converged_obstacle_detour_seeded_determinism_and_invariants() {
+        let (chain, model) = gantry_with_fixed();
+        let params = CuJointStompParams {
+            waypoints: 9,
+            rollouts: 8,
+            noise: 0.4,
+            sensitivity: 10.0,
+            clearance: m(0.06),
+            obstacle_weight: 40.0,
+            smoothness_weight: 1.0,
+            max_iterations: 150,
+            metric: CuJointMetric {
+                angular_scale: Angle::new::<radian>(0.5),
+                linear_scale: m(0.25),
+            },
+            ..Default::default()
+        };
+        let mut req = CuJointPlanRequest {
+            start: cfg(-0.3, 0.0, 0.0),
+            goal: cfg(0.3, 0.0, 0.0),
+            ..Default::default()
+        };
+        let obstacle =
+            CuCollisionShape::Sphere(CuSphere::new([m(0.0), m(0.01), m(0.0)], m(0.08)).unwrap());
+        req.scene.add_obstacle(obstacle, None).unwrap();
+
+        let mut p1 = CuJointStomp::new(chain, model, params).unwrap();
+        let mut p2 = CuJointStomp::new(chain, model, params).unwrap();
+        let path_tail = [0.123, -0.456, 0.789, 0.321];
+        let best_tail = cfg(0.42, -0.42, 0.13);
+        for slot in &mut p1.path[params.waypoints as usize..] {
+            *slot = path_tail;
+        }
+        for slot in &mut p1.best[params.waypoints as usize..] {
+            *slot = best_tail;
+        }
+
+        let mut s1 = p1.begin(&req, 42).unwrap();
+        let mut s2 = p2.begin(&req, 42).unwrap();
+        assert_eq!(s1, CuPlanStatus::Searching);
+        assert_eq!(s2, CuPlanStatus::Searching);
+        while !s1.is_final() {
+            s1 = p1.step(32).unwrap();
+        }
+        while !s2.is_final() {
+            s2 = p2.step(32).unwrap();
+        }
+        assert_eq!(s1, CuPlanStatus::Converged);
+        assert_eq!(s2, CuPlanStatus::Converged);
+
+        let mut out1 = CuJointPlanPath::default();
+        let mut out2 = CuJointPlanPath::default();
+        p1.write_best(&mut out1);
+        p2.write_best(&mut out2);
+        assert_eq!(out1, out2);
+        assert_eq!(out1.len, params.waypoints);
+        assert!(out1.cost.is_finite());
+        assert!(out1.cost > p1.straight_cost);
+        for wp in out1.waypoints() {
+            assert_eq!(wp.positions[3], CuJointPosition::Fixed);
+            assert!(p1.validity.is_configuration_free(&wp.positions));
+        }
+        for slot in &p1.path[params.waypoints as usize..] {
+            assert_eq!(*slot, path_tail);
+        }
+        for slot in &p1.best[params.waypoints as usize..] {
+            assert_eq!(*slot, best_tail);
+        }
+    }
+}

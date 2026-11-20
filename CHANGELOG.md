@@ -25,6 +25,12 @@ may be breaking.
   binary search (`O(log n)`) for knot lookup and hoists Hermite basis /
   reciprocal-duration evaluation across joints without changing the public API
   or boundary semantics.
+- `repose-motion-planning`: `CuJointPathOptimizer` and `CuJointStomp` now
+  short-circuit `record_if_better` on path cost before collision checking,
+  hoist per-joint scales/limits/fixed-joint flags out of inner waypoint and
+  rollout loops, and update/smooth active `..count` waypoints in place without
+  copying unused tail slots. Public API, RNG order, and determinism are
+  unchanged.
 
 ## [0.9.0] - 2026-11-17
 

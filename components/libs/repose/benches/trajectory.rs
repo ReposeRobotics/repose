@@ -173,8 +173,8 @@ fn setpoint_mux_passthrough(bencher: Bencher) {
     });
 }
 
-/// Full 200 ms (200 cycles at 1 kHz) bumpless quintic handoff from classical to
-/// policy inside [`CuSetpointMuxTask`].
+/// Full 200 ms bumpless quintic handoff (plus completion at 201 ms) from
+/// classical to policy inside [`CuSetpointMuxTask`].
 #[divan::bench]
 fn setpoint_mux_blend_1khz(bencher: Bencher) {
     let (ctx, _clock) = CuContext::new_mock_clock();
@@ -209,7 +209,7 @@ fn setpoint_mux_blend_1khz(bencher: Bencher) {
         let mut mux = CuSetpointMuxTask::<6>::from_params(CuSetpointMuxParams::default()).unwrap();
         mux.process(&ctx, &(&arm_classical, &empty_policy), &mut out)
             .unwrap();
-        for cycle in 1..=200u64 {
+        for cycle in 1..=201u64 {
             let t = Tov::Time(CuTime::from_nanos(cycle * 1_000_000));
             done_classical.tov = t;
             policy.tov = t;

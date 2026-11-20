@@ -124,7 +124,7 @@ fn pose_from_joint_target(q: &[CuJointPosition; 6]) -> CuTcpPose {
     let (roll, yaw) = if sy.abs() < 1.0 - 1e-9 {
         (m[2][1].atan2(m[2][2]), m[1][0].atan2(m[0][0]))
     } else {
-        (m[1][2].atan2(m[1][1]), 0.0)
+        ((-m[1][2]).atan2(m[1][1]), 0.0)
     };
     CuTcpPose {
         translation: tf.translation(),

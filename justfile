@@ -53,7 +53,7 @@ bare-metal:
 
 # Run the divan benchmarks (kinematics, dynamics, collision, planning, trajectory, controller, policy-rl); CI runs them under CodSpeed.
 bench:
-    cargo bench -p repose
+    cargo bench -p repose -p repose-kinematics
 
 # Build and run the CodSpeed IK benchmarks for repose-kinematics (needs cargo-codspeed).
 # Locally this only validates the benches; CI reports measurements to CodSpeed.

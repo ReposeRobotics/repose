@@ -7,6 +7,16 @@ may be breaking.
 
 ## [Unreleased]
 
+### Added
+
+- `repose`: expanded Divan / CodSpeed benchmarks covering serial-chain
+  rigid-body dynamics (`inverse_dynamics`, `gravity_compensation`), trajectory
+  following, bumpless setpoint multiplexing, Cartesian path blending and
+  parameterization, pose-goal / Cartesian / path-constrained motion planning,
+  `CuControllerTask` position and PD / model-based effort modes, and
+  `repose-policy-rl` observation, single-step and chunked ONNX inference, ACT
+  temporal ensembling, and joint / VLA Cartesian / gripper action tasks.
+
 ### Changed
 
 - `repose-motion-planning`: `CuJointPrm` now filters candidate neighbours by

@@ -51,9 +51,9 @@ bare-metal:
     cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --target aarch64-unknown-none
     cargo build --workspace --lib --no-default-features --exclude repose-mujoco-sim --exclude repose-policy-rl --target thumbv7em-none-eabihf
 
-# Run the divan benchmarks (kinematics, collision, planning, trajectory); CI runs them under CodSpeed.
+# Run the divan benchmarks (kinematics, dynamics, collision, planning, trajectory, controller, policy-rl); CI runs them under CodSpeed.
 bench:
-    cargo bench -p repose
+    cargo bench -p repose -p repose-kinematics
 
 # Build and run the CodSpeed IK benchmarks for repose-kinematics (needs cargo-codspeed).
 # Locally this only validates the benches; CI reports measurements to CodSpeed.

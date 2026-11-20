@@ -49,7 +49,61 @@ pub enum CuSetpointSource {
     Hold,
 }
 
-/// Parameters (node `config:`) of [`CuSetpointMuxTask`].
+/// Why the setpoint mux most recently changed (or kept) its active source.
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode, Reflect,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CuSetpointSwitchReason {
+    /// Initial state before any source switch has occurred.
+    #[default]
+    Initial,
+    /// Classical transit finished while armed and a usable `Running` policy took over.
+    TransitFinishedToPolicy,
+    /// A new `Running` classical trajectory preempted the policy or released `Hold`.
+    ClassicalPreempted,
+    /// Policy setpoint was missing (`None`).
+    PolicyMissing,
+    /// Policy reported `Idle`.
+    PolicyIdle,
+    /// Policy reported `Finished`.
+    PolicyFinished,
+    /// Policy reported `ErrorEmptyTrajectory` (e.g. policy `Fault` or invalid action).
+    PolicyFault,
+    /// Policy setpoint contained non-finite values or mismatched joint kinds.
+    PolicyUnusable,
+    /// Classical setpoint contained non-finite values or mismatched joint kinds.
+    ClassicalUnusable,
+}
+
+/// Per-cycle arbitration telemetry from [`CuSetpointMuxTask`] / [`CuAuditedSetpointMuxTask`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Encode, Decode, Reflect)]
+pub struct CuSetpointMuxReport {
+    /// Active setpoint source this cycle (`Classical`, `Policy`, or `Hold`).
+    pub source: CuSetpointSource,
+    /// `true` on the exact cycle `source` changed (edge trigger for incident timelines).
+    pub switched: bool,
+    /// Reason for the most recent switch (or `Initial` before the first switch).
+    pub reason: CuSetpointSwitchReason,
+    /// `true` while the quintic bumpless blend is still decaying.
+    pub blending: bool,
+    /// Blend progress in `[0.0, 1.0]` (`1.0` when not blending). Dimensionless.
+    pub blend_progress: f64,
+}
+
+impl Default for CuSetpointMuxReport {
+    fn default() -> Self {
+        Self {
+            source: CuSetpointSource::Classical,
+            switched: false,
+            reason: CuSetpointSwitchReason::Initial,
+            blending: false,
+            blend_progress: 1.0,
+        }
+    }
+}
+
+/// Parameters (node `config:`) of [`CuSetpointMuxTask`] and [`CuAuditedSetpointMuxTask`].
 ///
 /// ```ron
 /// config: {}                    // 0.2 s blend on every switch
@@ -133,7 +187,9 @@ fn usable<const N: usize>(
 ///
 /// Inputs are `(classical, policy)`, both [`CuTrajectoryFollowOutput<N>`];
 /// output is one [`CuTrajectoryFollowOutput<N>`] for
-/// `repose_controller::CuControllerTask`.
+/// `repose_controller::CuControllerTask`. Use [`CuAuditedSetpointMuxTask`]
+/// when you also want [`CuSetpointMuxReport`] published as a Copper output
+/// message in the `.copper` log.
 ///
 /// # Arbitration
 ///
@@ -195,6 +251,10 @@ pub struct CuSetpointMuxTask<const N: usize> {
     hold: [CuJointPosition; N],
     #[reflect(ignore)]
     blend: Option<Blend<N>>,
+    #[reflect(ignore)]
+    reason: CuSetpointSwitchReason,
+    #[reflect(ignore)]
+    last_report: CuSetpointMuxReport,
 }
 
 impl<const N: usize> Default for CuSetpointMuxTask<N> {
@@ -206,6 +266,8 @@ impl<const N: usize> Default for CuSetpointMuxTask<N> {
             last: None,
             hold: [CuJointPosition::default(); N],
             blend: None,
+            reason: CuSetpointSwitchReason::Initial,
+            last_report: CuSetpointMuxReport::default(),
         }
     }
 }
@@ -233,6 +295,11 @@ impl<const N: usize> CuSetpointMuxTask<N> {
     /// Whether a bumpless blend is in progress.
     pub fn is_blending(&self) -> bool {
         self.blend.is_some()
+    }
+
+    /// Most recent per-cycle arbitration telemetry report.
+    pub fn last_report(&self) -> &CuSetpointMuxReport {
+        &self.last_report
     }
 
     fn hold_setpoint(&self) -> CuTrajectoryFollowOutput<N> {
@@ -322,20 +389,27 @@ impl<const N: usize> CuSetpointMuxTask<N> {
         }
     }
 
-    /// Arbitration and output for one cycle; see the type docs.
-    fn step(
+    /// Evaluates one arbitration cycle, writing the setpoint and telemetry
+    /// report into caller-provided buffers without allocating.
+    pub fn evaluate(
         &mut self,
         classical: Option<&CuTrajectoryFollowOutput<N>>,
         policy: Option<&CuTrajectoryFollowOutput<N>>,
         now: CuTime,
-    ) -> CuTrajectoryFollowOutput<N> {
+        out_setpoint: &mut CuTrajectoryFollowOutput<N>,
+        out_report: &mut CuSetpointMuxReport,
+    ) {
+        let prev_source = self.source;
         let last = self.last.clone();
         let classical_running =
             classical.filter(|c| c.status == CuFollowStatus::Running && usable(c, last.as_ref()));
 
         match self.source {
             CuSetpointSource::Classical => match classical {
-                Some(c) if !usable(c, last.as_ref()) => self.enter_hold(now),
+                Some(c) if !usable(c, last.as_ref()) => {
+                    self.reason = CuSetpointSwitchReason::ClassicalUnusable;
+                    self.enter_hold(now);
+                }
                 Some(c) => {
                     let policy_ready = policy.filter(|p| {
                         p.status == CuFollowStatus::Running && usable(p, last.as_ref())
@@ -343,6 +417,7 @@ impl<const N: usize> CuSetpointMuxTask<N> {
                     match (c.status, policy_ready) {
                         (CuFollowStatus::Running, _) => self.armed = true,
                         (CuFollowStatus::Finished, Some(p)) if self.armed => {
+                            self.reason = CuSetpointSwitchReason::TransitFinishedToPolicy;
                             self.switch(CuSetpointSource::Policy, p, now);
                         }
                         _ => {}
@@ -352,21 +427,38 @@ impl<const N: usize> CuSetpointMuxTask<N> {
             },
             CuSetpointSource::Policy => {
                 if let Some(c) = classical_running {
+                    self.reason = CuSetpointSwitchReason::ClassicalPreempted;
                     self.switch(CuSetpointSource::Classical, c, now);
-                } else if !policy.is_some_and(|p| {
-                    p.status == CuFollowStatus::Running && usable(p, last.as_ref())
-                }) {
-                    self.enter_hold(now);
+                } else {
+                    let drop_reason = match policy {
+                        None => Some(CuSetpointSwitchReason::PolicyMissing),
+                        Some(p) => match p.status {
+                            CuFollowStatus::Running if usable(p, last.as_ref()) => None,
+                            CuFollowStatus::Running => Some(CuSetpointSwitchReason::PolicyUnusable),
+                            CuFollowStatus::Idle => Some(CuSetpointSwitchReason::PolicyIdle),
+                            CuFollowStatus::Finished => {
+                                Some(CuSetpointSwitchReason::PolicyFinished)
+                            }
+                            CuFollowStatus::ErrorEmptyTrajectory => {
+                                Some(CuSetpointSwitchReason::PolicyFault)
+                            }
+                        },
+                    };
+                    if let Some(reason) = drop_reason {
+                        self.reason = reason;
+                        self.enter_hold(now);
+                    }
                 }
             }
             CuSetpointSource::Hold => {
                 if let Some(c) = classical_running {
+                    self.reason = CuSetpointSwitchReason::ClassicalPreempted;
                     self.switch(CuSetpointSource::Classical, c, now);
                 }
             }
         }
 
-        let mut out = match self.source {
+        *out_setpoint = match self.source {
             CuSetpointSource::Classical => match classical {
                 Some(c) => c.clone(),
                 None => {
@@ -390,15 +482,69 @@ impl<const N: usize> CuSetpointMuxTask<N> {
         // A classical cancel (`Idle` / `ErrorEmptyTrajectory`) passes through
         // unblended: the controller then holds the measured state.
         if matches!(
-            out.status,
+            out_setpoint.status,
             CuFollowStatus::Idle | CuFollowStatus::ErrorEmptyTrajectory
         ) && self.source == CuSetpointSource::Classical
         {
             self.blend = None;
         }
-        self.apply_blend(&mut out, now);
-        self.last = Some(out.clone());
+        self.apply_blend(out_setpoint, now);
+        self.last = Some(out_setpoint.clone());
+
+        let (blending, blend_progress) = match self.blend {
+            Some(blend) => {
+                let duration = self.params.blend_time.get::<second>();
+                if duration > 0.0 {
+                    let elapsed =
+                        now.as_nanos().saturating_sub(blend.start_ns) as f64 / 1_000_000_000.0;
+                    (true, (elapsed / duration).clamp(0.0, 1.0))
+                } else {
+                    (false, 1.0)
+                }
+            }
+            None => (false, 1.0),
+        };
+        let report = CuSetpointMuxReport {
+            source: self.source,
+            switched: self.source != prev_source,
+            reason: self.reason,
+            blending,
+            blend_progress,
+        };
+        self.last_report = report;
+        *out_report = report;
+    }
+
+    /// Arbitration and output for one cycle; see the type docs.
+    #[cfg(test)]
+    fn step(
+        &mut self,
+        classical: Option<&CuTrajectoryFollowOutput<N>>,
+        policy: Option<&CuTrajectoryFollowOutput<N>>,
+        now: CuTime,
+    ) -> CuTrajectoryFollowOutput<N> {
+        let mut out = CuTrajectoryFollowOutput::default();
+        let mut report = CuSetpointMuxReport::default();
+        self.evaluate(classical, policy, now, &mut out, &mut report);
         out
+    }
+
+    fn input_now<'m>(&self, ctx: &CuContext, input: &<Self as CuTask>::Input<'m>) -> CuTime {
+        let (primary, secondary) = match self.source {
+            CuSetpointSource::Policy => (input.1.tov, input.0.tov),
+            _ => (input.0.tov, input.1.tov),
+        };
+        match (primary, secondary) {
+            (Tov::Time(t), _) | (_, Tov::Time(t)) => t,
+            _ => ctx.now(),
+        }
+    }
+
+    fn output_tov<'m>(&self, input: &<Self as CuTask>::Input<'m>) -> Tov {
+        match self.source {
+            CuSetpointSource::Policy => input.1.tov,
+            _ => input.0.tov,
+        }
     }
 }
 
@@ -444,6 +590,14 @@ impl<const N: usize> Freezable for CuSetpointMuxTask<N> {
             acceleration: Decode::decode(decoder)?,
         };
         self.blend = has_blend.then_some(blend);
+        self.reason = CuSetpointSwitchReason::Initial;
+        self.last_report = CuSetpointMuxReport {
+            source: self.source,
+            switched: false,
+            reason: self.reason,
+            blending: self.blend.is_some(),
+            blend_progress: if self.blend.is_some() { 0.0 } else { 1.0 },
+        };
         Ok(())
     }
 }
@@ -470,20 +624,135 @@ impl<const N: usize> CuTask for CuSetpointMuxTask<N> {
         input: &Self::Input<'i>,
         output: &mut Self::Output<'o>,
     ) -> CuResult<()> {
-        let (primary, secondary) = match self.source {
-            CuSetpointSource::Policy => (input.1.tov, input.0.tov),
-            _ => (input.0.tov, input.1.tov),
-        };
-        let now = match (primary, secondary) {
-            (Tov::Time(t), _) | (_, Tov::Time(t)) => t,
-            _ => ctx.now(),
-        };
-        let out = self.step(input.0.payload(), input.1.payload(), now);
-        output.tov = match self.source {
-            CuSetpointSource::Policy => input.1.tov,
-            _ => input.0.tov,
-        };
+        let now = self.input_now(ctx, input);
+        let mut out = CuTrajectoryFollowOutput::default();
+        let mut report = CuSetpointMuxReport::default();
+        self.evaluate(
+            input.0.payload(),
+            input.1.payload(),
+            now,
+            &mut out,
+            &mut report,
+        );
+        output.tov = self.output_tov(input);
         output.set_payload(out);
+        Ok(())
+    }
+}
+
+/// Deterministic, bumpless mux emitting both the active setpoint and its
+/// per-cycle arbitration telemetry.
+///
+/// Identical in configuration ([`CuSetpointMuxParams`]), arbitration, and
+/// bumpless blending to [`CuSetpointMuxTask`], with a second Copper output
+/// carrying [`CuSetpointMuxReport`] (and both outputs stamped with the same
+/// `Tov`) so `.copper` logs record source ownership and switch reasons on every
+/// cycle.
+///
+/// Also round-trips the switch attribution state through [`Freezable`] with a
+/// constant encoded size across all states.
+#[derive(Default, Reflect)]
+#[reflect(no_field_bounds, from_reflect = false)]
+pub struct CuAuditedSetpointMuxTask<const N: usize> {
+    mux: CuSetpointMuxTask<N>,
+}
+
+impl<const N: usize> CuAuditedSetpointMuxTask<N> {
+    /// Creates an audited mux following the classical source.
+    pub fn from_params(params: CuSetpointMuxParams) -> CuResult<Self> {
+        Ok(Self {
+            mux: CuSetpointMuxTask::from_params(params)?,
+        })
+    }
+
+    /// Params this task runs with.
+    pub fn params(&self) -> &CuSetpointMuxParams {
+        self.mux.params()
+    }
+
+    /// Source the mux currently follows.
+    pub fn source(&self) -> CuSetpointSource {
+        self.mux.source()
+    }
+
+    /// Whether a bumpless blend is in progress.
+    pub fn is_blending(&self) -> bool {
+        self.mux.is_blending()
+    }
+
+    /// Most recent per-cycle arbitration telemetry report.
+    pub fn last_report(&self) -> &CuSetpointMuxReport {
+        self.mux.last_report()
+    }
+
+    /// Evaluates one arbitration cycle, writing the setpoint and telemetry
+    /// report into caller-provided buffers without allocating.
+    pub fn evaluate(
+        &mut self,
+        classical: Option<&CuTrajectoryFollowOutput<N>>,
+        policy: Option<&CuTrajectoryFollowOutput<N>>,
+        now: CuTime,
+        out_setpoint: &mut CuTrajectoryFollowOutput<N>,
+        out_report: &mut CuSetpointMuxReport,
+    ) {
+        self.mux
+            .evaluate(classical, policy, now, out_setpoint, out_report);
+    }
+}
+
+impl<const N: usize> Freezable for CuAuditedSetpointMuxTask<N> {
+    fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        self.mux.freeze(encoder)?;
+        Encode::encode(&self.mux.last_report, encoder)
+    }
+
+    fn thaw<D: Decoder>(&mut self, decoder: &mut D) -> Result<(), DecodeError> {
+        self.mux.thaw(decoder)?;
+        let report: CuSetpointMuxReport = Decode::decode(decoder)?;
+        self.mux.reason = report.reason;
+        self.mux.last_report = report;
+        Ok(())
+    }
+}
+
+impl<const N: usize> CuTask for CuAuditedSetpointMuxTask<N> {
+    type Resources<'r> = ();
+    type Input<'m> = input_msg!('m, CuTrajectoryFollowOutput<N>, CuTrajectoryFollowOutput<N>);
+    type Output<'m> = output_msg!(CuTrajectoryFollowOutput<N>, CuSetpointMuxReport);
+
+    fn new(cfg: Option<&ComponentConfig>, _res: Self::Resources<'_>) -> CuResult<Self>
+    where
+        Self: Sized,
+    {
+        let params = cfg
+            .map(ComponentConfig::deserialize_into::<CuSetpointMuxParams>)
+            .transpose()?
+            .unwrap_or_default();
+        Self::from_params(params)
+    }
+
+    fn process<'i, 'o>(
+        &mut self,
+        ctx: &CuContext,
+        input: &Self::Input<'i>,
+        output: &mut Self::Output<'o>,
+    ) -> CuResult<()> {
+        let now = self.mux.input_now(ctx, input);
+        let mut out = CuTrajectoryFollowOutput::default();
+        let mut report = CuSetpointMuxReport::default();
+        self.mux.evaluate(
+            input.0.payload(),
+            input.1.payload(),
+            now,
+            &mut out,
+            &mut report,
+        );
+        let tov = self.mux.output_tov(input);
+        let (setpoint_out, report_out) = output;
+        setpoint_out.tov = tov;
+        report_out.tov = tov;
+        setpoint_out.set_payload(out);
+        report_out.set_payload(report);
         Ok(())
     }
 }
@@ -844,5 +1113,360 @@ mod tests {
         m.process(&ctx, &(&c, &p), &mut out).unwrap();
         assert_eq!(out.tov, Tov::Time(at(7 * MS)));
         assert_eq!(out.payload().unwrap().status, CuFollowStatus::Running);
+    }
+
+    fn eval_report(
+        m: &mut CuSetpointMuxTask<2>,
+        classical: Option<&CuTrajectoryFollowOutput<2>>,
+        policy: Option<&CuTrajectoryFollowOutput<2>>,
+        t_ns: u64,
+    ) -> (CuTrajectoryFollowOutput<2>, CuSetpointMuxReport) {
+        let mut out = CuTrajectoryFollowOutput::default();
+        let mut report = CuSetpointMuxReport::default();
+        m.evaluate(classical, policy, at(t_ns), &mut out, &mut report);
+        assert_eq!(*m.last_report(), report);
+        (out, report)
+    }
+
+    fn audited_mux(blend: f64) -> CuAuditedSetpointMuxTask<2> {
+        CuAuditedSetpointMuxTask::from_params(CuSetpointMuxParams {
+            blend_time: Time::new::<second>(blend),
+        })
+        .unwrap()
+    }
+
+    fn audited_frozen_len(m: &CuAuditedSetpointMuxTask<2>) -> usize {
+        let mut bytes = [0u8; 4096];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
+        );
+        m.freeze(&mut encoder).unwrap();
+        encoder.into_writer().bytes_written()
+    }
+
+    #[test]
+    fn switch_reasons_and_switched_edge_trigger() {
+        let policy_run = sp(1.2, 0.1, CuFollowStatus::Running);
+
+        // 1. Initial -> Classical running -> TransitFinishedToPolicy -> PolicyMissing -> ClassicalPreempted
+        let mut m = mux(0.0);
+        assert_eq!(
+            *m.last_report(),
+            CuSetpointMuxReport {
+                source: CuSetpointSource::Classical,
+                switched: false,
+                reason: CuSetpointSwitchReason::Initial,
+                blending: false,
+                blend_progress: 1.0,
+            }
+        );
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(0.5, 1.0, CuFollowStatus::Running)),
+            None,
+            0,
+        );
+        assert_eq!(r.source, CuSetpointSource::Classical);
+        assert!(!r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::Initial);
+
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+            Some(&policy_run),
+            MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Policy);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::TransitFinishedToPolicy);
+
+        // Steady Policy cycle clears `switched` while preserving `reason`.
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+            Some(&policy_run),
+            2 * MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Policy);
+        assert!(!r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::TransitFinishedToPolicy);
+
+        // PolicyMissing -> Hold
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+            None,
+            3 * MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Hold);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::PolicyMissing);
+
+        // Steady Hold clears `switched` and preserves `reason`.
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+            None,
+            4 * MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Hold);
+        assert!(!r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::PolicyMissing);
+
+        // ClassicalPreempted from Hold
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, -0.2, CuFollowStatus::Running)),
+            Some(&policy_run),
+            5 * MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Classical);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::ClassicalPreempted);
+
+        // ClassicalPreempted from Policy directly
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+            Some(&policy_run),
+            6 * MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Policy);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::TransitFinishedToPolicy);
+
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(0.9, -0.1, CuFollowStatus::Running)),
+            Some(&policy_run),
+            7 * MS,
+        );
+        assert_eq!(r.source, CuSetpointSource::Classical);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::ClassicalPreempted);
+
+        // 2. PolicyIdle (including default Fixed/Idle payload), PolicyFinished, PolicyFault, PolicyUnusable
+        let default_idle = CuTrajectoryFollowOutput::<2>::default();
+        let mut mismatched_policy = policy_run.clone();
+        mismatched_policy.positions[1] = CuJointPosition::Fixed;
+
+        let policy_cases = [
+            (
+                sp(1.2, 0.0, CuFollowStatus::Idle),
+                CuSetpointSwitchReason::PolicyIdle,
+            ),
+            (default_idle, CuSetpointSwitchReason::PolicyIdle),
+            (
+                sp(1.2, 0.0, CuFollowStatus::Finished),
+                CuSetpointSwitchReason::PolicyFinished,
+            ),
+            (
+                sp(1.2, 0.0, CuFollowStatus::ErrorEmptyTrajectory),
+                CuSetpointSwitchReason::PolicyFault,
+            ),
+            (
+                sp(f64::NAN, 0.0, CuFollowStatus::Running),
+                CuSetpointSwitchReason::PolicyUnusable,
+            ),
+            (mismatched_policy, CuSetpointSwitchReason::PolicyUnusable),
+        ];
+        for (bad_policy, expected_reason) in policy_cases {
+            let mut m = mux(0.0);
+            let t = transit(&mut m, Some(&policy_run));
+            let (_, r) = eval_report(
+                &mut m,
+                Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+                Some(&policy_run),
+                t,
+            );
+            assert_eq!(r.source, CuSetpointSource::Policy);
+            assert_eq!(r.reason, CuSetpointSwitchReason::TransitFinishedToPolicy);
+
+            let (_, r) = eval_report(
+                &mut m,
+                Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+                Some(&bad_policy),
+                t + MS,
+            );
+            assert_eq!(r.source, CuSetpointSource::Hold);
+            assert!(r.switched);
+            assert_eq!(r.reason, expected_reason);
+        }
+
+        // 3. ClassicalUnusable (non-finite and mismatched joint kinds)
+        let mut m = mux(0.0);
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(f64::INFINITY, 0.0, CuFollowStatus::Running)),
+            None,
+            0,
+        );
+        assert_eq!(r.source, CuSetpointSource::Hold);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::ClassicalUnusable);
+
+        let mut m = mux(0.0);
+        eval_report(
+            &mut m,
+            Some(&sp(0.5, 1.0, CuFollowStatus::Running)),
+            None,
+            0,
+        );
+        let mut bad_classical = sp(0.6, 1.0, CuFollowStatus::Running);
+        bad_classical.positions[0] = CuJointPosition::Fixed;
+        let (_, r) = eval_report(&mut m, Some(&bad_classical), None, MS);
+        assert_eq!(r.source, CuSetpointSource::Hold);
+        assert!(r.switched);
+        assert_eq!(r.reason, CuSetpointSwitchReason::ClassicalUnusable);
+    }
+
+    #[test]
+    fn blend_progress_advances_monotonically() {
+        let mut m = mux(0.1);
+        let policy = sp(1.2, 0.5, CuFollowStatus::Running);
+        let t = transit(&mut m, None);
+        assert!(!m.last_report().blending);
+        assert_eq!(m.last_report().blend_progress, 1.0);
+
+        let (_, r) = eval_report(
+            &mut m,
+            Some(&sp(1.0, 0.0, CuFollowStatus::Finished)),
+            Some(&policy),
+            t,
+        );
+        assert!(r.switched);
+        assert!(r.blending);
+        assert_eq!(r.blend_progress, 0.0);
+
+        let mut prev_progress = r.blend_progress;
+        for k in 1..100 {
+            let (_, r) = eval_report(&mut m, None, Some(&policy), t + k * MS);
+            assert!(!r.switched);
+            assert!(r.blending);
+            assert!(r.blend_progress > prev_progress);
+            assert!(r.blend_progress < 1.0);
+            prev_progress = r.blend_progress;
+        }
+
+        // At elapsed == blend_time (100 ms), blend completes.
+        let (_, r) = eval_report(&mut m, None, Some(&policy), t + 100 * MS);
+        assert!(!r.blending);
+        assert_eq!(r.blend_progress, 1.0);
+    }
+
+    #[test]
+    fn audited_mux_process_emits_matching_tov_and_constant_freezable() {
+        let (ctx, _) = CuContext::new_mock_clock();
+        let mut m = audited_mux(0.1);
+        let initial_len = audited_frozen_len(&m);
+
+        // Check RON config construction and validation.
+        let mut cfg = ComponentConfig::default();
+        cfg.0.insert("blend_time".into(), 0.1.into());
+        let configured = CuAuditedSetpointMuxTask::<2>::new(Some(&cfg), ()).unwrap();
+        assert_eq!(configured.params().blend_time.get::<second>(), 0.1);
+
+        let mut bad_cfg = ComponentConfig::default();
+        bad_cfg.0.insert("blend_time".into(), (-0.1).into());
+        assert!(CuAuditedSetpointMuxTask::<2>::new(Some(&bad_cfg), ()).is_err());
+
+        // Classical running cycle: Tov comes from input.0.
+        let mut c = CuMsg::new(Some(sp(0.5, 1.0, CuFollowStatus::Running)));
+        c.tov = Tov::Time(at(10 * MS));
+        let mut p = CuMsg::<CuTrajectoryFollowOutput<2>>::new(None);
+        p.tov = Tov::Time(at(11 * MS));
+        let mut out = (CuMsg::new(None), CuMsg::new(None));
+        m.process(&ctx, &(&c, &p), &mut out).unwrap();
+        assert_eq!(out.0.tov, Tov::Time(at(10 * MS)));
+        assert_eq!(out.1.tov, Tov::Time(at(10 * MS)));
+        assert_eq!(
+            out.1.payload().unwrap().reason,
+            CuSetpointSwitchReason::Initial
+        );
+        assert!(!out.1.payload().unwrap().switched);
+        assert_eq!(audited_frozen_len(&m), initial_len);
+
+        // Classical finished + Policy running: switches to Policy, Tov comes from input.1.
+        let mut c = CuMsg::new(Some(sp(1.0, 0.0, CuFollowStatus::Finished)));
+        c.tov = Tov::Time(at(20 * MS));
+        let mut p = CuMsg::new(Some(sp(1.2, 0.5, CuFollowStatus::Running)));
+        p.tov = Tov::Time(at(25 * MS));
+        m.process(&ctx, &(&c, &p), &mut out).unwrap();
+        assert_eq!(out.0.tov, Tov::Time(at(25 * MS)));
+        assert_eq!(out.1.tov, Tov::Time(at(25 * MS)));
+        let rep = *out.1.payload().unwrap();
+        assert_eq!(rep.source, CuSetpointSource::Policy);
+        assert!(rep.switched);
+        assert_eq!(rep.reason, CuSetpointSwitchReason::TransitFinishedToPolicy);
+        assert!(rep.blending);
+        assert_eq!(rep.blend_progress, 0.0);
+        assert_eq!(audited_frozen_len(&m), initial_len);
+
+        // Freeze/thaw mid-blend preserves report, reason, and future cycles identically.
+        let mut p_next = CuMsg::new(Some(sp(1.2, 0.5, CuFollowStatus::Running)));
+        p_next.tov = Tov::Time(at(35 * MS));
+        m.process(&ctx, &(&c, &p_next), &mut out).unwrap();
+        assert_eq!(audited_frozen_len(&m), initial_len);
+
+        let mut bytes = [0u8; 4096];
+        let mut encoder = bincode::enc::EncoderImpl::new(
+            bincode::enc::write::SliceWriter::new(&mut bytes),
+            bincode::config::standard(),
+        );
+        m.freeze(&mut encoder).unwrap();
+        let len = encoder.into_writer().bytes_written();
+        let mut decoder = bincode::de::DecoderImpl::new(
+            bincode::de::read::SliceReader::new(&bytes[..len]),
+            bincode::config::standard(),
+            (),
+        );
+        let mut restored = audited_mux(0.1);
+        restored.thaw(&mut decoder).unwrap();
+        assert_eq!(restored.last_report(), m.last_report());
+
+        for k in 4..10 {
+            let mut pk = CuMsg::new(Some(sp(1.2, 0.5, CuFollowStatus::Running)));
+            pk.tov = Tov::Time(at((25 + k * 10) * MS));
+            let mut out_a = (CuMsg::new(None), CuMsg::new(None));
+            let mut out_b = (CuMsg::new(None), CuMsg::new(None));
+            m.process(&ctx, &(&c, &pk), &mut out_a).unwrap();
+            restored.process(&ctx, &(&c, &pk), &mut out_b).unwrap();
+            assert_eq!(out_a.0.payload(), out_b.0.payload());
+            assert_eq!(out_a.1.payload(), out_b.1.payload());
+        }
+
+        // Fault drops to Hold with PolicyFault and constant frozen size.
+        let mut p_fault = CuMsg::new(Some(sp(1.2, 0.0, CuFollowStatus::ErrorEmptyTrajectory)));
+        p_fault.tov = Tov::Time(at(200 * MS));
+        c.tov = Tov::Time(at(200 * MS));
+        m.process(&ctx, &(&c, &p_fault), &mut out).unwrap();
+        assert_eq!(out.1.payload().unwrap().source, CuSetpointSource::Hold);
+        assert!(out.1.payload().unwrap().switched);
+        assert_eq!(
+            out.1.payload().unwrap().reason,
+            CuSetpointSwitchReason::PolicyFault
+        );
+        assert_eq!(audited_frozen_len(&m), initial_len);
+
+        // Classical preempts Hold with ClassicalPreempted and constant frozen size.
+        let mut c_retract = CuMsg::new(Some(sp(1.1, -0.2, CuFollowStatus::Running)));
+        c_retract.tov = Tov::Time(at(210 * MS));
+        m.process(&ctx, &(&c_retract, &p_fault), &mut out).unwrap();
+        assert_eq!(out.1.payload().unwrap().source, CuSetpointSource::Classical);
+        assert!(out.1.payload().unwrap().switched);
+        assert_eq!(
+            out.1.payload().unwrap().reason,
+            CuSetpointSwitchReason::ClassicalPreempted
+        );
+        assert_eq!(audited_frozen_len(&m), initial_len);
+    }
+
+    #[test]
+    fn switch_reason_serializes_snake_case() {
+        let s = ron::to_string(&CuSetpointSwitchReason::TransitFinishedToPolicy).unwrap();
+        assert_eq!(s, "transit_finished_to_policy");
+        let parsed: CuSetpointSwitchReason = ron::from_str(&s).unwrap();
+        assert_eq!(parsed, CuSetpointSwitchReason::TransitFinishedToPolicy);
     }
 }

@@ -451,4 +451,35 @@ mod tests {
         let decoded_empty: CuCycleSample<6> = serde_json::from_str(&encoded_empty).unwrap();
         assert_eq!(decoded_empty, empty_sample);
     }
+
+    #[test]
+    fn ongoing_robot_fault_attributes_delayed_controller_fault_to_hardware() {
+        let params = CuIncidentDetectorParams {
+            cooldown: Time::new::<second>(0.05),
+            ..CuIncidentDetectorParams::default()
+        };
+        let mut detector = CuIncidentDetector::<6>::from_params(params).unwrap();
+
+        // Cycle 0: robot enters fault alone -> opens episode 1.
+        let mut s0 = nominal_sample(0, 0);
+        s0.robot_status = Some(CuRobotStatus::NotReady);
+        detector.observe(&s0).unwrap();
+
+        // Cycle 1 after cooldown (200 ms): robot is still non-Ready and controller faults.
+        let mut s1 = nominal_sample(1, 200_000_000);
+        s1.robot_status = Some(CuRobotStatus::NotReady);
+        s1.controller_status = Some(CuControllerStatus::Fault);
+        detector.observe(&s1).unwrap();
+
+        let summary = detector.finish();
+        assert_eq!(summary.incidents.len(), 2);
+        assert_eq!(
+            summary.incidents[1].primary_trigger,
+            CuIncidentTrigger::ControllerFault
+        );
+        assert_eq!(
+            summary.incidents[1].blame,
+            CuIncidentBlame::HardwareOrBridge
+        );
+    }
 }

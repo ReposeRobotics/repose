@@ -650,7 +650,10 @@ impl<const N: usize> CuIncidentDetector<N> {
                     }
                 }
             } else {
-                let mut flags = EpisodeFlags::default();
+                let mut flags = EpisodeFlags {
+                    has_robot_fault: robot_fault_now,
+                    ..EpisodeFlags::default()
+                };
                 let mut primary = first_trigger;
                 for &t in &triggers {
                     flags.record_trigger(t, recent_scene_change);

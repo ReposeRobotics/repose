@@ -15,8 +15,9 @@ Design invariants enforced across the workspace:
   caller-provided `&mut` buffers without heap allocation (host ONNX inference in
   `repose-policy-rl` is the single bounded, measured exception).
 - **`no_std` core, safety, and control:** Shared library and task crates build
-  without `std` and are verified on bare-metal Arm (`aarch64-unknown-none`) and
-  Cortex-M (`thumbv7em-none-eabihf`) targets.
+  without `std`; every non-simulator, non-ONNX library crate (excluding
+  `repose-mujoco-sim` and `repose-policy-rl`) is verified on bare-metal Arm
+  (`aarch64-unknown-none`) and Cortex-M (`thumbv7em-none-eabihf`) targets.
 - **Typed physical units:** Public APIs and payloads use `cu29::units` SI types
   (`Angle`, `AngularVelocity`, `Length`, `Time`, `Torque`, `Force`) rather than
   untyped floats.

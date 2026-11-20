@@ -297,7 +297,8 @@ impl<const N: usize> CuSetpointMuxTask<N> {
         self.blend.is_some()
     }
 
-    /// Most recent per-cycle arbitration telemetry report.
+    /// Most recent per-cycle arbitration telemetry report updated by
+    /// [`Self::evaluate`] (or [`CuAuditedSetpointMuxTask`]).
     pub fn last_report(&self) -> &CuSetpointMuxReport {
         &self.last_report
     }
@@ -399,6 +400,39 @@ impl<const N: usize> CuSetpointMuxTask<N> {
         out_setpoint: &mut CuTrajectoryFollowOutput<N>,
         out_report: &mut CuSetpointMuxReport,
     ) {
+        let (out, switched) = self.step_core(classical, policy, now);
+        *out_setpoint = out;
+        let (blending, blend_progress) = match self.blend {
+            Some(blend) => {
+                let duration = self.params.blend_time.get::<second>();
+                if duration > 0.0 {
+                    let elapsed =
+                        now.as_nanos().saturating_sub(blend.start_ns) as f64 / 1_000_000_000.0;
+                    (true, (elapsed / duration).clamp(0.0, 1.0))
+                } else {
+                    (false, 1.0)
+                }
+            }
+            None => (false, 1.0),
+        };
+        let report = CuSetpointMuxReport {
+            source: self.source,
+            switched,
+            reason: self.reason,
+            blending,
+            blend_progress,
+        };
+        self.last_report = report;
+        *out_report = report;
+    }
+
+    #[inline]
+    fn step_core(
+        &mut self,
+        classical: Option<&CuTrajectoryFollowOutput<N>>,
+        policy: Option<&CuTrajectoryFollowOutput<N>>,
+        now: CuTime,
+    ) -> (CuTrajectoryFollowOutput<N>, bool) {
         let prev_source = self.source;
         let last = self.last.clone();
         let classical_running =
@@ -458,7 +492,7 @@ impl<const N: usize> CuSetpointMuxTask<N> {
             }
         }
 
-        *out_setpoint = match self.source {
+        let mut out = match self.source {
             CuSetpointSource::Classical => match classical {
                 Some(c) => c.clone(),
                 None => {
@@ -482,37 +516,15 @@ impl<const N: usize> CuSetpointMuxTask<N> {
         // A classical cancel (`Idle` / `ErrorEmptyTrajectory`) passes through
         // unblended: the controller then holds the measured state.
         if matches!(
-            out_setpoint.status,
+            out.status,
             CuFollowStatus::Idle | CuFollowStatus::ErrorEmptyTrajectory
         ) && self.source == CuSetpointSource::Classical
         {
             self.blend = None;
         }
-        self.apply_blend(out_setpoint, now);
-        self.last = Some(out_setpoint.clone());
-
-        let (blending, blend_progress) = match self.blend {
-            Some(blend) => {
-                let duration = self.params.blend_time.get::<second>();
-                if duration > 0.0 {
-                    let elapsed =
-                        now.as_nanos().saturating_sub(blend.start_ns) as f64 / 1_000_000_000.0;
-                    (true, (elapsed / duration).clamp(0.0, 1.0))
-                } else {
-                    (false, 1.0)
-                }
-            }
-            None => (false, 1.0),
-        };
-        let report = CuSetpointMuxReport {
-            source: self.source,
-            switched: self.source != prev_source,
-            reason: self.reason,
-            blending,
-            blend_progress,
-        };
-        self.last_report = report;
-        *out_report = report;
+        self.apply_blend(&mut out, now);
+        self.last = Some(out.clone());
+        (out, self.source != prev_source)
     }
 
     /// Arbitration and output for one cycle; see the type docs.
@@ -523,10 +535,7 @@ impl<const N: usize> CuSetpointMuxTask<N> {
         policy: Option<&CuTrajectoryFollowOutput<N>>,
         now: CuTime,
     ) -> CuTrajectoryFollowOutput<N> {
-        let mut out = CuTrajectoryFollowOutput::default();
-        let mut report = CuSetpointMuxReport::default();
-        self.evaluate(classical, policy, now, &mut out, &mut report);
-        out
+        self.step_core(classical, policy, now).0
     }
 
     fn input_now<'m>(&self, ctx: &CuContext, input: &<Self as CuTask>::Input<'m>) -> CuTime {
@@ -625,15 +634,7 @@ impl<const N: usize> CuTask for CuSetpointMuxTask<N> {
         output: &mut Self::Output<'o>,
     ) -> CuResult<()> {
         let now = self.input_now(ctx, input);
-        let mut out = CuTrajectoryFollowOutput::default();
-        let mut report = CuSetpointMuxReport::default();
-        self.evaluate(
-            input.0.payload(),
-            input.1.payload(),
-            now,
-            &mut out,
-            &mut report,
-        );
+        let (out, _) = self.step_core(input.0.payload(), input.1.payload(), now);
         output.tov = self.output_tov(input);
         output.set_payload(out);
         Ok(())

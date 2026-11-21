@@ -24,6 +24,7 @@ repose-collision = { version = "0.9.0", path = "../repose_collision", default-fe
 repose-controller = { version = "0.9.0", path = "../../tasks/repose_controller", default-features = false }
 repose-kinematics = { version = "0.9.0", path = "../repose_kinematics", default-features = false }
 repose-policy-rl = { version = "0.9.0", path = "../../tasks/repose_policy_rl", default-features = false }
+repose-safety = { version = "0.9.0", path = "../../tasks/repose_safety", default-features = false }
 repose-trajectory = { version = "0.9.0", path = "../repose_trajectory", default-features = false }
 serde = { workspace = true }
 serde_json = "1.0"
@@ -37,6 +38,7 @@ std = [
   "repose-trajectory/std",
   "repose-controller/std",
   "repose-policy-rl/std",
+  "repose-safety/std",
   "bincode/std",
   "serde/std",
   "serde_json/std",

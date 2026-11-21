@@ -525,4 +525,63 @@ mod tests {
         assert_eq!(summary.controller_faults, 1);
         assert_eq!(summary.incidents.len(), 2);
     }
+
+    #[test]
+    fn test_cycle_sample_adapters_ingest_task_payloads() {
+        use repose_controller::CuJointCommandPayload;
+        use repose_kinematics::CuJointStatePayload;
+        use repose_policy_rl::CuJointActionReport;
+        use repose_policy_rl::CuPolicyAction;
+        use repose_safety::CuSafetyReport;
+        use repose_safety::CuSafetyVerdict;
+        use repose_trajectory::CuTrajectoryFollowOutput;
+
+        let state = CuJointStatePayload::<6> {
+            positions: q([0.1, -0.2, 0.3, 0.0, 0.4, 0.0]),
+            velocities: [CuJointVelocity::default(); 6],
+            status: CuRobotStatus::Ready,
+        };
+        let policy = CuPolicyAction::<6> {
+            values: [0.0; 6],
+            status: CuPolicyStatus::Fresh,
+        };
+        let action_report = CuJointActionReport {
+            step_limited_mask: 0b1,
+            step_limited_count: 1,
+            ..CuJointActionReport::default()
+        };
+        let follow = CuTrajectoryFollowOutput::<6> {
+            status: CuFollowStatus::Running,
+            ..CuTrajectoryFollowOutput::default()
+        };
+        let safety = CuSafetyReport {
+            verdict: CuSafetyVerdict::HeldCollision,
+            min_clearance: Length::new::<meter>(-0.005),
+            scene_revision: CuSceneRevision::new(7),
+            ..CuSafetyReport::default()
+        };
+        let cmd = CuJointCommandPayload::<6> {
+            status: CuControllerStatus::Running,
+            ..CuJointCommandPayload::default()
+        };
+
+        let mut sample = CuCycleSample::<6>::new(42, 420_000_000);
+        sample
+            .with_joint_state(&state)
+            .with_policy_action(&policy)
+            .with_joint_action_report(&action_report)
+            .with_follow_output(&follow)
+            .with_safety_report(&safety)
+            .with_controller_command(&cmd);
+
+        assert_eq!(sample.robot_status, Some(CuRobotStatus::Ready));
+        assert_eq!(sample.policy_status, Some(CuPolicyStatus::Fresh));
+        assert_eq!(sample.follow_status, Some(CuFollowStatus::Running));
+        assert_eq!(sample.controller_status, Some(CuControllerStatus::Running));
+        assert_eq!(sample.min_clearance, Some(Length::new::<meter>(-0.005)));
+        assert!(sample.in_collision);
+        assert!(sample.action_clamped);
+        assert_eq!(sample.scene_revision, Some(CuSceneRevision::new(7)));
+        assert_eq!(sample.positions, Some(state.positions));
+    }
 }

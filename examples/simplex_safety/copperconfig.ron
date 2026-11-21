@@ -1,0 +1,153 @@
+// End-to-end Physical AI Simplex Safety Architecture demo on a 6-DOF igus ReBeL:
+//   RRT* classical transit -> CuAuditedSetpointMuxTask (bumpless handoff) ->
+//   ScriptedPolicy (v1 rogue vs v2 safe) -> CuJointActionTask ->
+//   CuSafetyShieldTask (live obstacle + workspace fence + braking lookahead) ->
+//   CuControllerTask -> in-process PlantBridge.
+// Every cycle's payloads (including CuSetpointMuxReport & CuSafetyReport) are
+// recorded to `.copper` logs for black-box incident triage and counterfactual
+// checkpoint gating (`simplex_safety_triage`) and exact replay (`simplex_safety_resim`).
+(
+    runtime: (rate_target_hz: 100),
+    logging: (slab_size_mib: 16),
+    resources: [
+        (id: "planner_rng", provider: "cu_rng::CuRngBundle", config: {"seed": 42}),
+    ],
+    tasks: [
+        (
+            id: "scene_pub",
+            type: "tasks::ObstacleSceneSource",
+            config: {
+                "obstacle_center": [0.34, 0.14, 0.36],
+                "obstacle_radius": 0.085,
+            },
+        ),
+        (
+            id: "scenario",
+            type: "tasks::Scenario",
+            config: {
+                "pregrasp": [0.35, 0.45, 0.55, 0.0, 0.35, 0.0],
+                "home": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "retract_delay": 45,
+            },
+        ),
+        (
+            id: "planner",
+            type: "repose_joint_rrt_star::CuJointRrtStarTask<6>",
+            background: true,
+            anytime: (time_budget_ms: 250.0, quality_target: 0.95),
+            resources: {"rng": "planner_rng.rng"},
+            config: {"chain": "igus_rebel", "collision_model": "igus_rebel", "base_budget": 256, "refine_budget": 64},
+        ),
+        (
+            id: "timing",
+            type: "repose_motion_planning::CuPlanToTrajectoryTask<6, 1024>",
+            config: {
+                "profile": "cubic",
+                "sample_period": 0.02,
+                "limits": {
+                    "max_velocities": [
+                        {"revolute": 0.9}, {"revolute": 0.9}, {"revolute": 0.9},
+                        {"revolute": 0.9}, {"revolute": 0.9}, {"revolute": 0.9},
+                    ],
+                    "max_accelerations": [
+                        {"revolute": 2.2}, {"revolute": 2.2}, {"revolute": 2.2},
+                        {"revolute": 2.2}, {"revolute": 2.2}, {"revolute": 2.2},
+                    ],
+                },
+            },
+        ),
+        (id: "follower", type: "repose_trajectory::CuFollowTrajectoryTask<6, 1024>"),
+        (
+            id: "policy",
+            type: "tasks::ScriptedPolicy",
+            config: {
+                "pregrasp": [0.35, 0.45, 0.55, 0.0, 0.35, 0.0],
+                "engage_tolerance": 0.025,
+                "rogue_action": [0.05, 1.0, 1.0, 0.0, 0.4, 0.0],
+                "safe_action": [-1.0, -0.35, -0.30, 0.0, -0.25, 0.0],
+                "max_policy_cycles": 140,
+            },
+        ),
+        (
+            id: "joint_action",
+            type: "repose_policy_rl::CuJointActionTask<6, 6>",
+            config: {
+                "chain": "igus_rebel",
+                "kind": "position_delta",
+                "scale": 0.02,
+                "max_step": 0.005,
+                "period": 0.01,
+            },
+        ),
+        (
+            id: "mux",
+            type: "repose_trajectory::CuAuditedSetpointMuxTask<6>",
+            config: {"blend_time": 0.2},
+        ),
+        (
+            id: "shield",
+            type: "repose_safety::CuSafetyShieldTask<6>",
+            config: {
+                "chain": "igus_rebel",
+                "collision_model": "igus_rebel",
+                "workspace": {"min": [-0.65, -0.65, 0.05], "max": [0.65, 0.65, 0.95]},
+                "braking_horizon": 0.12,
+                "near_miss_margin": 0.04,
+                "max_tcp_speed": 1.2,
+                "require_scene": true,
+            },
+        ),
+        (
+            id: "controller",
+            type: "repose_controller::CuControllerTask<6>",
+            config: {
+                "tracking_error_limit": 0.6,
+                "state_timeout": 0.2,
+                "rate_limit": {"max_speed": 1.5, "max_acceleration": 6.0},
+            },
+        ),
+        (
+            id: "observer",
+            type: "tasks::SimplexObserver",
+            config: {
+                "pregrasp": [0.35, 0.45, 0.55, 0.0, 0.35, 0.0],
+                "home": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "tolerance": 0.03,
+                "max_cycles": 2000,
+            },
+        ),
+    ],
+    bridges: [
+        (
+            id: "plant",
+            type: "tasks::PlantBridge",
+            config: {"time_constant": 0.03},
+            channels: [
+                Tx(id: "joint_command", msg: "repose_controller::CuJointCommandPayload<6>"),
+                Rx(id: "joint_state", msg: "repose_kinematics::CuJointStatePayload<6>"),
+            ],
+        ),
+    ],
+    cnx: [
+        (src: "plant/joint_state", dst: "scenario", msg: "repose_kinematics::CuJointStatePayload<6>"),
+        (src: "policy", dst: "scenario", msg: "repose_policy_rl::CuPolicyAction<6>"),
+        (src: "scenario", dst: "planner", msg: "repose_motion_planning::CuJointPlanRequest<6>"),
+        (src: "planner", dst: "timing", msg: "repose_motion_planning::CuJointPlanPath<6>"),
+        (src: "timing", dst: "follower", msg: "repose_trajectory::CuTrajectoryPayload<6, 1024>"),
+        (src: "plant/joint_state", dst: "policy", msg: "repose_kinematics::CuJointStatePayload<6>"),
+        (src: "policy", dst: "joint_action", msg: "repose_policy_rl::CuPolicyAction<6>"),
+        (src: "plant/joint_state", dst: "joint_action", msg: "repose_kinematics::CuJointStatePayload<6>"),
+        (src: "follower", dst: "mux", msg: "repose_trajectory::CuTrajectoryFollowOutput<6>"),
+        (src: "joint_action", dst: "mux", msg: "repose_trajectory::CuTrajectoryFollowOutput<6>"),
+        (src: "mux", dst: "shield", msg: "repose_trajectory::CuTrajectoryFollowOutput<6>"),
+        (src: "plant/joint_state", dst: "shield", msg: "repose_kinematics::CuJointStatePayload<6>"),
+        (src: "scene_pub", dst: "shield", msg: "repose_collision::CuPlanningScene"),
+        (src: "shield", dst: "controller", msg: "repose_trajectory::CuTrajectoryFollowOutput<6>"),
+        (src: "plant/joint_state", dst: "controller", msg: "repose_kinematics::CuJointStatePayload<6>"),
+        (src: "controller", dst: "plant/joint_command", msg: "repose_controller::CuJointCommandPayload<6>"),
+        (src: "plant/joint_state", dst: "observer", msg: "repose_kinematics::CuJointStatePayload<6>"),
+        (src: "mux", dst: "observer", msg: "repose_trajectory::CuSetpointMuxReport"),
+        (src: "shield", dst: "observer", msg: "repose_safety::CuSafetyReport"),
+        (src: "controller", dst: "observer", msg: "repose_controller::CuJointCommandPayload<6>"),
+    ],
+)

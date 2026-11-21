@@ -191,16 +191,20 @@ goal → plan → time → follow → control loop, configured entirely in RON.
 
 | Crate | What it does |
 |---|---|
-| [`repose`](components/libs/repose) | Umbrella crate; re-exports everything, plus the MuJoCo bridge behind `mujoco-sim` |
-| [`repose-kinematics`](components/libs/repose_kinematics) | FK, space/body Jacobians, DLS and differential IK, servo task, igus ReBeL model |
-| [`repose-collision`](components/libs/repose_collision) | Sphere/capsule models, exact signed distance, planning scene, collision tasks |
-| [`repose-robot-description`](components/libs/repose_robot_description) | Startup URDF/SRDF import into fixed-size kinematic and collision models |
+| [`repose`](components/libs/repose) | Umbrella crate; re-exports the runtime crates, plus the MuJoCo bridge behind `mujoco-sim` |
+| [`repose-kinematics`](components/libs/repose_kinematics) | FK, space/body Jacobians, DLS and differential IK, rigid-body dynamics, servo task, igus ReBeL model |
+| [`repose-collision`](components/libs/repose_collision) | Sphere/capsule models, exact signed distance, planning scene, collision tasks and monitor |
+| [`repose-robot-description`](components/libs/repose_robot_description) | Startup URDF/SRDF import into fixed-size kinematic, collision, and inertial models |
 | [`repose-robot-interface`](components/libs/repose_robot_interface) | Vendor-neutral robot bridge contract: channels and session rules |
-| [`repose-trajectory`](components/libs/repose_trajectory) | Fixed-capacity trajectories, timing profiles, Cartesian TCP-zone blending |
-| [`repose-motion-planning`](components/tasks/repose_motion_planning) | `CuJointPlanner` contract, anytime planner task, built-in planners |
+| [`repose-trajectory`](components/libs/repose_trajectory) | Fixed-capacity trajectories, timing profiles, Cartesian TCP-zone blending, bumpless classical/policy setpoint mux |
+| [`repose-motion-planning`](components/tasks/repose_motion_planning) | `CuJointPlanner` contract, anytime planner task, built-in planners, pose and Cartesian planning |
 | [`repose-joint-rrt-star`](components/tasks/repose_joint_rrt_star) | Informed RRT* with rewiring and shortcutting |
-| [`repose-controller`](components/tasks/repose_controller) | Position/velocity/effort joint controller with watchdog and rate limiting |
+| [`repose-policy-rl`](components/tasks/repose_policy_rl) | ONNX RL, ACT, Diffusion, and VLA policy tasks, temporal ensembling, OOD guardrails (`std`) |
+| [`repose-safety`](components/tasks/repose_safety) | Real-time safety shield: collision, TCP workspace fence, speed limit, braking lookahead, `CuSafetyReport` |
+| [`repose-controller`](components/tasks/repose_controller) | Position, velocity, PD effort, and inverse-dynamics joint controller with watchdog and rate limiting |
+| [`repose-incident`](components/libs/repose_incident) | Black-box incident detector, root-cause blame attribution, and counterfactual checkpoint regression gating (`std`) |
 | [`repose-io`](components/tasks/repose_io) | Digital IO payloads and an IO-driven gripper task |
+| [`repose-mujoco-sim`](components/bridges/repose_mujoco_sim) | Generic `CuMujocoSimBridge<N>` TCP/JSON bridge to a MuJoCo sidecar (`std`) |
 
 ## Documentation
 

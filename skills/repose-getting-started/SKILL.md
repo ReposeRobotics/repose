@@ -25,7 +25,7 @@ Nothing is on crates.io yet; depend on a git tag (newest tag in the
 
 ```toml
 [dependencies]
-repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
+repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
 cu29 = { version = "1.3.1", features = ["units"] }
 cu-spatial-payloads = "1.3.0"   # Transform3D for TCP poses
 ```
@@ -37,18 +37,20 @@ git tag.
 
 | Module (`repose::…`) | Crate | Use it for |
 |---|---|---|
-| `kinematics` | `repose-kinematics` | Chains, FK, Jacobians, DLS IK, differential IK, servo, joint-state payloads |
-| `collision` | `repose-collision` | Sphere/capsule robot models, planning scenes, collision checks |
+| `kinematics` | `repose-kinematics` | Chains, FK, Jacobians, DLS IK, differential IK, rigid-body dynamics, servo, joint-state payloads |
+| `collision` | `repose-collision` | Sphere/capsule robot models, planning scenes, collision checks and monitor |
 | `robot_description` | `repose-robot-description` | Startup URDF/SRDF import (`std`) |
 | `robot_interface` | `repose-robot-interface` | Bridge channel contract and session lifecycle |
-| `trajectory` | `repose-trajectory` | Timing, Cartesian blending, trajectory follower |
+| `trajectory` | `repose-trajectory` | Timing, Cartesian blending, trajectory follower, bumpless classical/policy setpoint mux |
 | `motion_planning` | `repose-motion-planning` | Planner trait, planner tasks, pose and Cartesian planning |
 | `rrt_star` | `repose-joint-rrt-star` | Informed RRT* |
 | `planners` | `repose` itself | `CuPlannerChoice` / `CuAnyPlanner` registry |
+| `safety` | `repose-safety` | Real-time safety shield (`CuSafetyShieldTask`, `CuSafetyReport`) |
 | `controller` | `repose-controller` | Position/velocity/effort joint controller |
 | `io` | `repose-io` | Digital IO payloads, IO gripper |
 | `mujoco_sim` (feature `mujoco-sim`) | `repose-mujoco-sim` | MuJoCo sidecar bridge |
-| — | `repose-policy-rl` | ONNX RL/VLA policy tasks (`std`, separate dependency) |
+| — | `repose-policy-rl` | ONNX RL/VLA policy tasks and OOD guardrails (`std`, separate dependency) |
+| — | `repose-incident` | Black-box incident detector, root-cause blame, and checkpoint regression gating (`std`, separate dependency) |
 
 ## Conventions that apply to every call
 
@@ -98,8 +100,8 @@ Get these right first; most compile errors and wrong results come from them.
    same seed replays bit for bit; never feed wall-clock time or OS randomness
    into the pipeline.
 8. **`no_std`.** Runtime crates build for `no_std` with
-   `default-features = false`. URDF import, the MuJoCo bridge and
-   `repose-policy-rl` are `std`-only.
+   `default-features = false`. URDF import, the MuJoCo bridge,
+   `repose-policy-rl`, and `repose-incident` are `std`-only.
 
 ## Which skill next
 

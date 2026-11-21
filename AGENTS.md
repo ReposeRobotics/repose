@@ -90,17 +90,19 @@ breaking change documented under `### Breaking`.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for shipped capabilities (`v0.9.x`) and upcoming milestones (Physical AI safety shield, OOD guardrails and mux attribution, black-box incident replay, hardware presets, and `1.0` stabilization). Current workspace crates:
+See [ROADMAP.md](ROADMAP.md) for shipped capabilities (`v0.10.x`) and upcoming milestones (scene-revision execution contract, per-feature OOD envelopes and action-chatter detection, hardware presets and servo hardening, and `1.0` stabilization). Current workspace crates:
 
 1. `components/libs/repose` (`repose`): Umbrella crate re-exporting runtime crates, `repose::planners` registry, and library examples.
 2. `components/libs/repose_kinematics` (`repose-kinematics`): Serial-chain FK, space/body Jacobians, DLS & differential IK, `CuServoTask<N>`, serial-chain `inverse_dynamics` / `gravity_compensation` (`CuChainInertia<N>`), and 6-DOF igus ReBeL preset (`no_std`).
 3. `components/libs/repose_collision` (`repose-collision`): Fixed-capacity capsule/sphere `CuRobotCollisionModel<N, M>`, exact signed distance, versioned `CuPlanningScene`, `CuCollisionCheckTask`, and `CuCollisionMonitor` (`no_std`).
 4. `components/libs/repose_robot_description` (`repose-robot-description`): Startup URDF/SRDF import into fixed-size kinematic, collision, and inertial models (`std`).
 5. `components/libs/repose_robot_interface` (`repose-robot-interface`): Vendor-neutral robot bridge channel contract and `CuSessionTracker` (`no_std`).
-6. `components/libs/repose_trajectory` (`repose-trajectory`): Fixed-capacity trajectories, timing profiles (`Trapezoidal`, `Cubic`, `MinimumJerk`, `SCurve`), Cartesian TCP-zone blending, `CuFollowTrajectoryTask`, and `CuSetpointMuxTask<N>` bumpless arbitration (`no_std`).
+6. `components/libs/repose_trajectory` (`repose-trajectory`): Fixed-capacity trajectories, timing profiles (`Trapezoidal`, `Cubic`, `MinimumJerk`, `SCurve`), Cartesian TCP-zone blending, `CuFollowTrajectoryTask`, and `CuSetpointMuxTask<N>` / `CuAuditedSetpointMuxTask<N>` bumpless arbitration (`no_std`).
 7. `components/tasks/repose_motion_planning` (`repose-motion-planning`): `CuJointPlanner` contract, anytime `CuJointPlannerTask`, built-in planners (Direct, RRT-Connect, PRM, A*, PathOptimizer, STOMP), `CuPosePlannerTask`, `CuCartesianPlanTask`, and `CuPathConstraintSet` (`no_std`).
 8. `components/tasks/repose_joint_rrt_star` (`repose-joint-rrt-star`): Deterministic `CuRng`-seeded RRT* (`CuJointRrtStar` / `CuJointRrtStarTask`, `no_std`).
-9. `components/tasks/repose_policy_rl` (`repose-policy-rl`): Host (`std`) ONNX inference (`tract-onnx`) with `CuJointReachObservationTask`, `CuPolicyTask`, `CuChunkPolicyTask`, `CuActionChunkTask` (ACT temporal ensembling / receding-horizon), `CuJointActionTask`, `CuCartesianActionTask`, and `CuGripperActionTask`.
-10. `components/tasks/repose_controller` (`repose-controller`): `CuControllerTask<N>` with position, velocity, PD effort, and inverse-dynamics effort modes, per-joint gains, gravity-compensated hold brake, tracking watchdog, and rate limiting (`no_std`).
-11. `components/tasks/repose_io` (`repose-io`): Digital IO payloads and RON-configured `CuGripperTask` (`no_std`).
-12. `components/bridges/repose_mujoco_sim` (`repose-mujoco-sim`): Generic `CuMujocoSimBridge<N>` TCP/JSON `CuBridge` to a MuJoCo sidecar (`std`). External hardware bridges (e.g. `repose-igus-cri`) live in `ReposeRobotics/repose-bridges`.
+9. `components/tasks/repose_policy_rl` (`repose-policy-rl`): Host (`std`) ONNX inference (`tract-onnx`) with `CuJointReachObservationTask`, `CuPolicyTask`, `CuChunkPolicyTask`, `CuActionChunkTask` (ACT temporal ensembling / receding-horizon), observation/action `CuBoundPolicy` guardrails, `CuJointActionTask` (`CuJointActionReport`), `CuCartesianActionTask`, and `CuGripperActionTask`.
+10. `components/tasks/repose_safety` (`repose-safety`): Real-time safety shield (`CuSafetyShieldTask<N, M>`, `CuSafetyReport`) enforcing joint limits, self/scene collisions, `CuWorkspaceBounds` TCP fences, `max_tcp_speed`, and `braking_horizon` lookahead (`no_std`).
+11. `components/tasks/repose_controller` (`repose-controller`): `CuControllerTask<N>` with position, velocity, PD effort, and inverse-dynamics effort modes, per-joint gains, gravity-compensated hold brake, tracking watchdog, and rate limiting (`no_std`).
+12. `components/libs/repose_incident` (`repose-incident`): Host (`std`) black-box incident detector (`CuIncidentDetector`, `CuCycleSample`), windowed `CuIncidentRecord` / `CuIncidentSummary` JSON manifests, deterministic `CuIncidentBlame` root-cause attribution, and `CuCheckpointDiff` counterfactual regression gating.
+13. `components/tasks/repose_io` (`repose-io`): Digital IO payloads and RON-configured `CuGripperTask` (`no_std`).
+14. `components/bridges/repose_mujoco_sim` (`repose-mujoco-sim`): Generic `CuMujocoSimBridge<N>` TCP/JSON `CuBridge` to a MuJoCo sidecar (`std`). External hardware bridges (e.g. `repose-igus-cri`) live in `ReposeRobotics/repose-bridges`.

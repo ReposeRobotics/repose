@@ -7,6 +7,8 @@ may be breaking.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-21
+
 ### Breaking
 
 - `repose-policy-rl`: `CuPolicyParams` and `CuChunkPolicyParams` gain four
@@ -570,7 +572,8 @@ Full notes: [docs/releases/0.4.0.md](docs/releases/0.4.0.md).
 
 Initial release.
 
-[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ReposeRobotics/repose/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/ReposeRobotics/repose/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/ReposeRobotics/repose/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/ReposeRobotics/repose/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/ReposeRobotics/repose/compare/v0.8.2...v0.8.3

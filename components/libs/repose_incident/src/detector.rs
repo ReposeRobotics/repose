@@ -9,11 +9,18 @@ use repose_collision::CuCollisionMonitor;
 use repose_collision::CuMonitorTransition;
 use repose_collision::CuSceneRevision;
 use repose_controller::CuControllerStatus;
+use repose_controller::CuJointCommandPayload;
 use repose_kinematics::CuJointPosition;
+use repose_kinematics::CuJointStatePayload;
 use repose_kinematics::CuJointVelocity;
 use repose_kinematics::CuRobotStatus;
+use repose_policy_rl::CuJointActionReport;
+use repose_policy_rl::CuPolicyAction;
 use repose_policy_rl::CuPolicyStatus;
+use repose_safety::CuSafetyReport;
+use repose_safety::CuSafetyVerdict;
 use repose_trajectory::CuFollowStatus;
+use repose_trajectory::CuTrajectoryFollowOutput;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -82,6 +89,66 @@ impl<const N: usize> CuCycleSample<N> {
             positions: None,
             velocities: None,
         }
+    }
+
+    /// Populates robot status, joint positions, and joint velocities from a
+    /// measured [`CuJointStatePayload`].
+    pub fn with_joint_state(&mut self, state: &CuJointStatePayload<N>) -> &mut Self {
+        self.robot_status = Some(state.status);
+        self.positions = Some(state.positions);
+        self.velocities = Some(state.velocities);
+        self
+    }
+
+    /// Populates `policy_status` from a [`CuPolicyAction`].
+    pub fn with_policy_action<const A: usize>(&mut self, action: &CuPolicyAction<A>) -> &mut Self {
+        self.policy_status = Some(action.status);
+        self
+    }
+
+    /// Incorporates step/joint clamping from a [`CuJointActionReport`].
+    pub fn with_joint_action_report(&mut self, report: &CuJointActionReport) -> &mut Self {
+        self.action_clamped |= report.any_limited();
+        self
+    }
+
+    /// Populates `follow_status` from a [`CuTrajectoryFollowOutput`].
+    pub fn with_follow_output(&mut self, out: &CuTrajectoryFollowOutput<N>) -> &mut Self {
+        self.follow_status = Some(out.status);
+        self
+    }
+
+    /// Populates clearance, collision/violation state, shield clamping, and
+    /// scene revision from a [`CuSafetyReport`].
+    ///
+    /// Any non-clear verdict sets `action_clamped = true`; collision and
+    /// braking-lookahead holds (or negative finite clearance) set
+    /// `in_collision = true`.
+    pub fn with_safety_report(&mut self, report: &CuSafetyReport) -> &mut Self {
+        let clearance_m = report.min_clearance.get::<meter>();
+        if clearance_m.is_finite() {
+            self.min_clearance = Some(report.min_clearance);
+        }
+        if matches!(
+            report.verdict,
+            CuSafetyVerdict::HeldCollision
+                | CuSafetyVerdict::HeldBrakingLookahead
+                | CuSafetyVerdict::HeldWorkspaceFence
+        ) || (clearance_m.is_finite() && clearance_m < 0.0)
+        {
+            self.in_collision = true;
+        }
+        if !report.verdict.is_clear() {
+            self.action_clamped = true;
+        }
+        self.scene_revision = Some(report.scene_revision);
+        self
+    }
+
+    /// Populates `controller_status` from a [`CuJointCommandPayload`].
+    pub fn with_controller_command(&mut self, cmd: &CuJointCommandPayload<N>) -> &mut Self {
+        self.controller_status = Some(cmd.status);
+        self
     }
 }
 

@@ -20,13 +20,22 @@ may be breaking.
 ### Added
 
 - `repose-incident`: new host (`std`) crate providing black-box per-cycle
-  incident detection (`CuIncidentDetector`, `CuCycleSample`), windowed episode
-  manifests (`CuIncidentRecord`, `CuIncidentWindow`, `CuIncidentSummary` with
+  incident detection (`CuIncidentDetector`, `CuCycleSample`, plus
+  `CuCycleSample::with_joint_state`, `with_policy_action`,
+  `with_joint_action_report`, `with_follow_output`, `with_safety_report`, and
+  `with_controller_command` adapters), windowed episode manifests
+  (`CuIncidentRecord`, `CuIncidentWindow`, `CuIncidentSummary` with
   `to_json_pretty()`), deterministic root-cause blame attribution
   (`CuIncidentBlame`: `LearnedPolicy`, `EnvironmentChange`,
   `TrajectoryOrCollision`, `ControllerOrTracking`, `HardwareOrBridge`), and
   counterfactual checkpoint regression gating (`CuCheckpointDiff::compare`,
   `passed_gate()`).
+- `examples/simplex_safety`: end-to-end closed-loop Physical AI Simplex safety
+  demonstration wiring `CuJointRrtStarTask`, `CuAuditedSetpointMuxTask`,
+  `CuJointActionTask`, `CuSafetyShieldTask`, and `CuControllerTask` on a 6-DOF
+  igus ReBeL arm with offline `.copper` incident triage
+  (`simplex_safety_triage`), bit-identical replay (`simplex_safety_resim`), and
+  a 1080p side-by-side comparison video renderer (`render_video.py`).
 - `repose-safety` (re-exported as `repose::safety`): added the `no_std`,
   zero-allocation [`CuSafetyShieldTask`] and [`CuSafetyReport`] real-time safety
   shield sitting between setpoint sources (`CuFollowTrajectoryTask`,

@@ -35,12 +35,12 @@ the same Repose tag:
 [dependencies]
 cu29 = { version = "1.3.1", default-features = false, features = ["std", "units"] }
 cu-rng = { version = "1.3.0", features = ["std"] }
-repose-kinematics      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
-repose-motion-planning = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
-repose-joint-rrt-star  = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
-repose-trajectory      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
-repose-controller      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
-repose-mujoco-sim      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
+repose-kinematics      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
+repose-motion-planning = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
+repose-joint-rrt-star  = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
+repose-trajectory      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
+repose-controller      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
+repose-mujoco-sim      = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
 
 [build-dependencies]
 cu29-build = "1.3.0"
@@ -117,7 +117,9 @@ fn main() -> CuResult<()> {
 )
 ```
 
-Complete, tested version: `examples/mujoco_rebel/` in the Repose repo.
+Complete, tested version: `examples/mujoco_rebel/` in the Repose repo (and
+`examples/simplex_safety/` for a full Simplex classical/policy/safety-shield
+pipeline).
 
 ## Rules for RON graphs
 
@@ -176,5 +178,7 @@ equal `N`.
   move the robot as soon as it runs.
 - Keep `state_timeout` and `tracking_error_limit` set on the controller.
 - Collision checks in planning are discrete and against the scene snapshot of
-  that job; there is no execution-time collision monitoring unless you add
-  `CuCollisionCheckTask` + `CuCollisionMonitor`.
+  that job; insert `repose_safety::CuSafetyShieldTask<N>` before
+  `CuControllerTask<N>` (or `CuCollisionCheckTask` + `CuCollisionMonitor`) for
+  execution-time collision, workspace-fence, speed, and braking-horizon
+  enforcement.

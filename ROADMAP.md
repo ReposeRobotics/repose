@@ -15,9 +15,10 @@ Design invariants enforced across the workspace:
   caller-provided `&mut` buffers without heap allocation (host ONNX inference in
   `repose-policy-rl` is the single bounded, measured exception).
 - **`no_std` core, safety, and control:** Shared library and task crates build
-  without `std`; every non-simulator, non-ONNX library crate (excluding
-  `repose-mujoco-sim` and `repose-policy-rl`) is verified on bare-metal Arm
-  (`aarch64-unknown-none`) and Cortex-M (`thumbv7em-none-eabihf`) targets.
+  without `std`; every non-simulator, non-ONNX, non-host-only library crate
+  (excluding `repose-mujoco-sim`, `repose-policy-rl`, and `repose-incident`) is
+  verified on bare-metal Arm (`aarch64-unknown-none`) and Cortex-M
+  (`thumbv7em-none-eabihf`) targets.
 - **Typed physical units:** Public APIs and payloads use `cu29::units` SI types
   (`Angle`, `AngularVelocity`, `Length`, `Time`, `Torque`, `Force`) rather than
   untyped floats.
@@ -26,9 +27,9 @@ Design invariants enforced across the workspace:
   explicit per-job `CuRng` seeds; every setpoint, observation, action, and
   controller output is captured in cycle-exact `.copper` logs.
 
-## Shipped Capabilities (Built — through `v0.9.x`)
+## Shipped Capabilities (Built — through `v0.10.x`)
 
-All 12 workspace crates share one synchronized workspace version (`v0.9.0` on
+All 14 workspace crates share one synchronized workspace version (`v0.10.0` on
 crates tagged from `master`) and are tested under `std`, `no_std`, and
 `cu29/reflect`.
 
@@ -36,21 +37,24 @@ crates tagged from `master`) and are tested under `std`, `no_std`, and
 |---|---|---|
 | `repose` | Shipped | Umbrella re-exports of runtime crates (`mujoco-sim` feature-gated), `repose::planners` registry (`CuPlannerChoice`, `CuAnyPlanner`), simulator-free library examples (`kinematics`, `collision`, `planning`, `determinism`). |
 | `repose-kinematics` | Shipped | `CuKinematicChain<N>`, forward kinematics, space/body Jacobians, manipulability, damped least-squares IK, singularity/limit-damped differential IK, `CuServoTask<N>`, serial-chain rigid-body `inverse_dynamics` & `gravity_compensation` (`CuChainInertia<N>`), 6-DOF igus ReBeL preset. |
-| `repose-collision` | Shipped | Fixed-capacity sphere/capsule `CuRobotCollisionModel<N, M>`, exact signed-distance queries, self/environment/attached-object checks, versioned `CuPlanningScene` (`CuSceneRevision`) with stable object IDs & exclusions, `CuCollisionCheckTask`, `CuCollisionMonitor` (`CuMonitorTransition`). |
+| `repose-collision` | Shipped | Fixed-capacity sphere/capsule `CuRobotCollisionModel<N, M>`, exact signed-distance queries (`check_frames_with_closest`), self/environment/attached-object checks, versioned `CuPlanningScene` (`CuSceneRevision`) with stable object IDs & exclusions, `CuCollisionCheckTask`, `CuCollisionMonitor` (`CuMonitorTransition`). |
 | `repose-robot-description` | Shipped | Startup URDF (`<joint>`, `<link>`, `<inertial>`) and SRDF (groups, named states, link-pair exclusions) import into fixed-size kinematic, collision, and inertial models (`std`). |
 | `repose-motion-planning` | Shipped | Planner-agnostic `CuJointPlanner` trait, anytime `CuJointPlannerTask`, `CuJointDirect`, `CuJointRrtConnect`, `CuJointPrm`, `CuJointAStar`, gradient `CuJointPathOptimizer`, `CuJointStomp`, pose-goal `CuPosePlannerTask`, Cartesian straight-line `CuCartesianPlanTask`, and `CuPathConstraintSet` (orientation & position-region constraints). |
 | `repose-joint-rrt-star` | Shipped | Deterministic `CuRng`-seeded RRT* (`CuJointRrtStar` / `CuJointRrtStarTask`) with informed pruning, rewiring, and shortcutting. |
-| `repose-trajectory` | Shipped | Fixed-capacity trajectory payloads, profile timing (`Trapezoidal`, `Cubic`, `MinimumJerk`, `SCurve` with quintic jerk bounds), Cartesian TCP-zone blending (`blend_cartesian_path`, `parameterize_cartesian_path`), `CuFollowTrajectoryTask` with fixed-size `Freezable` keyframes, and `CuSetpointMuxTask<N>` bumpless quintic arbitration (`CuSetpointSource`: classical, policy, hold). |
-| `repose-policy-rl` | Shipped | Host (`std`) ONNX execution (`tract-onnx`) with `model_hash` pinning and decimation: `CuJointReachObservationTask`, single-step `CuPolicyTask`, chunked `CuChunkPolicyTask`, zero-allocation `CuActionChunkTask` (ACT exponential temporal ensembling & receding-horizon replacement), `CuJointActionTask`, `CuCartesianActionTask` (VLA pose-delta via damped differential IK + `CuCartesianActionReport`), `CuGripperActionTask`. |
+| `repose-trajectory` | Shipped | Fixed-capacity trajectory payloads, profile timing (`Trapezoidal`, `Cubic`, `MinimumJerk`, `SCurve` with quintic jerk bounds), Cartesian TCP-zone blending (`blend_cartesian_path`, `parameterize_cartesian_path`), `CuFollowTrajectoryTask` with fixed-size `Freezable` keyframes, `CuSetpointMuxTask<N>` bumpless quintic arbitration (`CuSetpointSource`: classical, policy, hold), and `CuAuditedSetpointMuxTask<N>` with `CuSetpointMuxReport` (`CuSetpointSwitchReason`) attribution telemetry. |
+| `repose-policy-rl` | Shipped | Host (`std`) ONNX execution (`tract-onnx`) with `model_hash` pinning, decimation, and observation/raw-action magnitude guardrails (`CuBoundPolicy`: `Clamp` or `Fault`): `CuJointReachObservationTask`, single-step `CuPolicyTask`, chunked `CuChunkPolicyTask`, zero-allocation `CuActionChunkTask` (ACT exponential temporal ensembling & receding-horizon replacement), `CuJointActionTask` (`CuJointActionReport`), `CuCartesianActionTask` (VLA pose-delta via damped differential IK + `CuCartesianActionReport`), `CuGripperActionTask`. |
+| `repose-safety` | Shipped | Real-time `no_std`, zero-allocation `CuSafetyShieldTask<N, M>` and `CuSafetyReport` (`CuSafetyVerdict`, `CuSafetyWitness`) enforcing joint limits, self/environment/attached-object collision margins via `CuCollisionMonitor`, axis-aligned TCP `CuWorkspaceBounds` fences, Cartesian `max_tcp_speed` limits, and velocity-extrapolated `braking_horizon` lookahead with safe stationary holds. |
 | `repose-controller` | Shipped | `CuControllerTask<N>` supporting position, velocity, PD effort, and model-based inverse-dynamics effort modes, per-joint `CuEffortGains<N>`, gravity-compensated hold brake, tracking-error fault, `Tov` freshness watchdog, and command rate limiting. |
+| `repose-incident` | Shipped | Host (`std`) black-box per-cycle incident detector (`CuIncidentDetector`, `CuCycleSample` with payload adapters), windowed episode manifests (`CuIncidentRecord`, `CuIncidentWindow`, `CuIncidentSummary` with `to_json_pretty()`), deterministic root-cause blame attribution (`CuIncidentBlame`), and counterfactual checkpoint regression gating (`CuCheckpointDiff`). |
 | `repose-io` | Shipped | Digital IO payloads (`CuDigitalInputPayload`, `CuDigitalOutputPayload`) and RON-configured `CuGripperTask`. |
 | `repose-robot-interface` | Shipped | Vendor-neutral robot bridge channel contract (`joint_command` / `joint_state`) and session lifecycle tracking (`CuSessionTracker`). |
-| `repose-mujoco-sim` | Shipped | Generic `CuMujocoSimBridge<N>` TCP/JSON `CuBridge` to a MuJoCo sidecar (`std`), closed-loop `examples/mujoco_rebel`, and `examples/setpoint_mux` (transit -> policy -> fault hold -> retract with `.copper` resim and offline Rerun `.rrd` export). |
+| `repose-mujoco-sim` | Shipped | Generic `CuMujocoSimBridge<N>` TCP/JSON `CuBridge` to a MuJoCo sidecar (`std`), closed-loop `examples/mujoco_rebel`, `examples/setpoint_mux` (transit -> policy -> fault hold -> retract with `.copper` resim and offline Rerun `.rrd` export), and `examples/simplex_safety` (closed-loop Simplex safety shield, incident triage, and counterfactual replay). |
 
 **Verification & Tooling (Shipped):**
 
-- **Benchmarks:** 44 Divan/CodSpeed benchmarks in `repose` (plus 3 IK benches in
-  `repose-kinematics`) tracked on every PR via CodSpeed.
+- **Benchmarks:** 45 Divan/CodSpeed benchmarks in `repose` (including `safety`
+  bench for `CuSafetyShieldTask`, plus 3 IK benches in `repose-kinematics`)
+  tracked on every PR via CodSpeed.
 - **Determinism & Embedded Gates:** Cross-process `just determinism` harness and
   bare-metal builds (`just bare-metal`) for `aarch64-unknown-none` and
   `thumbv7em-none-eabihf`.
@@ -59,49 +63,33 @@ crates tagged from `master`) and are tested under `std`, `no_std`, and
 
 ## In Progress & Next Up (Not Built Yet)
 
-Work after `v0.9.x` prioritizes runtime safety shielding, policy/mux
-observability, black-box incident replay, and physical hardware validation,
-ordered by priority.
+Work after `v0.10.x` prioritizes scene-revision execution contracts, richer
+per-feature policy distribution guardrails, hardware presets and servo
+hardening, and pre-`1.0` stabilization, ordered by priority.
 
-### Milestone 1 — Real-Time Physical AI Safety Shield (`repose-safety` / Execution Monitoring)
+### Milestone 1 — Scene-Revision-During-Execution Contract (`repose-trajectory` & `repose-safety`)
 
-`CuCollisionMonitor` exists in `repose-collision`, and `CuSetpointMuxTask`
-handles bumpless source handoff, but no runtime task enforces geometric or
-dynamic safety limits on live execution setpoints yet.
+`CuSafetyShieldTask` and `CuSafetyReport` shipped in `v0.10.0`. The remaining
+safety-shield item is end-to-end scene-revision continuity across planning and
+trajectory following:
 
-- **`CuSafetyShieldTask<N, M>`:** A deterministic, zero-allocation task placed
-  between setpoint sources (`CuFollowTrajectoryTask`, `CuSetpointMuxTask`, or
-  policy action tasks) and `CuControllerTask`:
-  - Live `CuPlanningScene` and self-collision checking wired through
-    `CuCollisionMonitor` (`CuMonitorTransition`).
-  - Cartesian workspace keep-in and keep-out virtual fences (table planes,
-    cell boundaries, operator zones).
-  - Braking-horizon lookahead (`q + v * t_brake`) and TCP speed limiting prior
-    to `CuControllerTask`.
-  - Bumpless hold transition on violation without dropping the controller into
-    an abrupt discontinuity.
 - **Scene-revision-during-execution contract:** Propagate `CuSceneRevision` from
-  planned trajectories into execution and define deterministic stale-scene
-  policies when the live `CuPlanningScene` mutates mid-trajectory.
-- **Structured safety telemetry (`CuSafetyReport`):** Per-cycle payload recording
-  verdict, `CuMonitorTransition`, signed `min_clearance`, closest
-  link/obstacle/fence witness, and `scene_revision` into `.copper` logs.
+  planned trajectories into `CuTrajectoryPayload` and `CuFollowTrajectoryTask`,
+  and define deterministic stale-scene policies in `CuSafetyShieldTask` when
+  the live `CuPlanningScene` mutates mid-trajectory.
 
-### Milestone 2 — Attribution, OOD Guardrails & Black-Box Incident Bundles
+### Milestone 2 — Per-Feature OOD Envelopes & Action-Chatter Guardrails (`repose-policy-rl`)
 
-- **Explicit mux arbitration telemetry (`CuSetpointMuxReport`):** Emit active
-  `CuSetpointSource`, blend progress, and switch reason alongside
-  `CuSetpointMuxTask` so every handoff and fallback is directly attributable in
-  logs and Rerun exports.
-- **Observation & action distribution guardrails (`repose-policy-rl`):**
+`CuSetpointMuxReport` (`CuAuditedSetpointMuxTask`), scalar observation/action
+magnitude guardrails (`CuBoundPolicy`), `CuJointActionReport`,
+`repose-incident`, and `examples/simplex_safety` shipped in `v0.10.0`. The
+remaining policy-guardrail item is:
+
+- **Per-feature OOD envelopes & action-chatter detection (`repose-policy-rl`):**
   Per-feature min/max or z-score out-of-distribution (OOD) envelopes pinned in
-  RON, plus action-chatter and oscillation detection before actions reach the
-  mux or shield.
-- **Closed-loop Simplex demo & offline incident extractor:** An end-to-end
-  Simplex safety demonstration and log tool that clips `.copper` black-box
-  windows around safety transitions (`EnteredCollision`, near-miss clearance,
-  policy OOD/fault, controller fault) into self-contained incident manifests
-  with counterfactual checkpoint replay.
+  RON (extending scalar `max_observation_abs` / `max_action_abs`), plus
+  action-chatter and oscillation detection before actions reach the mux or
+  safety shield.
 
 ### Milestone 3 — Hardware Presets & Servo Hardening
 

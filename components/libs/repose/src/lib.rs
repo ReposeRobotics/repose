@@ -5,7 +5,7 @@
 //! dependency, so an application needs a single line in `Cargo.toml`:
 //!
 //! ```toml
-//! repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.8.4" }
+//! repose = { git = "https://github.com/ReposeRobotics/repose", tag = "v0.10.0" }
 //! ```
 //!
 //! | Module | Crate | Provides |
@@ -14,7 +14,7 @@
 //! | [`collision`] | `repose-collision` | Capsule/sphere robot models, planning scenes, collision checks |
 //! | [`robot_description`] | `repose-robot-description` | URDF/SRDF import into fixed-size models (`std`) |
 //! | [`robot_interface`] | `repose-robot-interface` | Vendor-neutral robot bridge contract: session commands, session state, `CuSessionTracker` |
-//! | [`trajectory`] | `repose-trajectory` | Trajectory timing, interpolation, following |
+//! | [`trajectory`] | `repose-trajectory` | Trajectory timing, interpolation, following, classical/policy setpoint mux |
 //! | [`motion_planning`] | `repose-motion-planning` | Planner contract, anytime planner task, built-in planners |
 //! | [`rrt_star`] | `repose-joint-rrt-star` | Joint-space RRT* planner |
 //! | [`planners`] | (this crate) | The planner registry: [`planners::CuPlannerChoice`] (RON names) and [`planners::CuAnyPlanner`] |

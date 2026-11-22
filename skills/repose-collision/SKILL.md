@@ -1,12 +1,14 @@
 ---
 name: repose-collision
 description: >-
-  Collision checking with `repose-collision`: sphere/capsule robot models, the
-  `CuPlanningScene` of obstacles and attached objects with stable IDs and revisions,
-  `CuSceneExclusions`, `CuCollisionReport` (contacts, signed distance / clearance),
-  segment checks, the `CuCollisionCheckTask`, and `CuCollisionMonitor` for execution
-  holds. Use when adding obstacles, attaching a grasped object, checking a configuration
-  or a joint-space segment, or interpreting a collision report.
+  Collision checking and runtime safety shielding with `repose-collision`, `repose-safety`,
+  and `repose-incident`: sphere/capsule robot models, the `CuPlanningScene` of obstacles
+  and attached objects with stable IDs and revisions, `CuSceneExclusions`, `CuCollisionReport`
+  (contacts, signed distance / clearance), segment checks, `CuCollisionCheckTask`,
+  `CuCollisionMonitor`, the real-time `CuSafetyShieldTask` (`CuSafetyReport`), and
+  black-box incident triage (`CuIncidentDetector`, `CuCheckpointDiff`). Use when adding
+  obstacles, attaching a grasped object, checking a configuration or a joint-space
+  segment, configuring execution-time safety shields, or triaging recorded incidents.
 ---
 
 # Repose: collision checking
@@ -127,6 +129,18 @@ action tasks) and `CuControllerTask`:
   at zero velocity/acceleration and emits `CuSafetyReport` with `verdict`,
   `transition` (`CuMonitorTransition`), `near_miss`, `min_clearance`,
   `tcp_speed`, `witness` (`CuSafetyWitness`), and `scene_revision`.
+
+### Black-box incident triage and counterfactual gating (`repose-incident`)
+
+`repose_incident::CuIncidentDetector<N>` (`std`, separate dependency) consumes
+per-cycle `CuCycleSample<N>` observations (built with `.with_joint_state`,
+`.with_policy_action`, `.with_joint_action_report`, `.with_follow_output`,
+`.with_safety_report`, `.with_controller_command`) and produces a
+`CuIncidentSummary` with windowed `CuIncidentRecord` episodes, deterministic
+`CuIncidentBlame` root-cause attribution (`LearnedPolicy`, `EnvironmentChange`,
+`TrajectoryOrCollision`, `ControllerOrTracking`, `HardwareOrBridge`), and
+`CuCheckpointDiff::compare(&baseline, &candidate)` regression gating. See
+`examples/simplex_safety/` for an end-to-end triage and resim workflow.
 
 ## Pitfalls
 

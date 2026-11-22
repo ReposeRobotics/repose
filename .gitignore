@@ -4,3 +4,6 @@ Cargo.lock
 logs/
 .DS_Store
 .local/
+
+# Private: investor / acquisition material, keep out of the public repo
+docs/regulatory-positioning.*
